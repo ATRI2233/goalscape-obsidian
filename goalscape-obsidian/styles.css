@@ -1,9 +1,9 @@
 /* styles.css
- * Goalscape 插件基础样式：适配 Obsidian 主题变量，提供放射图容器、
- * 扇区交互、标签和选中高亮。
+ * Goalscape 插件样式：放射图、信息面板、Focus Filter、List 视图、Gantt 视图、拖拽交互。
  */
 
-/* 视图根容器：占满整个 leaf */
+/* ═══════════════ 通用容器 ═══════════════ */
+
 .goalscape-container {
   display: flex;
   flex-direction: column;
@@ -14,7 +14,66 @@
   color: var(--text-normal);
 }
 
-/* 放射图 + 右侧信息面板的横向布局 */
+/* ═══════════════ 工具栏 / Focus Filter ═══════════════ */
+
+.goalscape-toolbar {
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 6px 12px;
+}
+
+.goalscape-filter-bar {
+  display: flex;
+  flex-direction: column;
+}
+
+.goalscape-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.goalscape-filter-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.goalscape-filter-input {
+  height: 26px;
+  padding: 2px 6px;
+  font-size: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary-alt);
+  color: var(--text-normal);
+  width: 100px;
+}
+
+.goalscape-filter-narrow {
+  width: 60px;
+}
+
+.goalscape-filter-clear {
+  height: 26px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.goalscape-filter-clear:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+/* ═══════════════ 放射图布局 ═══════════════ */
+
 .goalscape-main-row {
   flex: 1 1 auto;
   display: flex;
@@ -24,7 +83,6 @@
   height: 100%;
 }
 
-/* 放射图 SVG 容器 */
 .goalscape-radial-root {
   flex: 1 1 auto;
   display: flex;
@@ -35,7 +93,89 @@
   padding: 12px;
 }
 
-/* 右侧信息面板 */
+.goalscape-radial-svg {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  user-select: none;
+  cursor: grab;
+}
+
+.goalscape-radial-svg:active {
+  cursor: grabbing;
+}
+
+/* 扇区路径 */
+.goalscape-radial-svg path {
+  transition: filter 120ms ease, opacity 120ms ease;
+  cursor: pointer;
+}
+
+.goalscape-radial-svg path:hover {
+  filter: brightness(1.08);
+}
+
+.goalscape-selected {
+  filter: drop-shadow(0 0 4px var(--interactive-accent));
+  stroke: var(--interactive-accent) !important;
+  stroke-width: 3 !important;
+}
+
+.goalscape-collapsed {
+  opacity: 0.85;
+}
+
+.goalscape-dimmed {
+  filter: grayscale(0.8) opacity(0.4);
+}
+
+.goalscape-drop-target {
+  stroke: var(--interactive-accent) !important;
+  stroke-width: 4 !important;
+  stroke-dasharray: 6 3;
+  filter: brightness(1.2);
+}
+
+/* 权重拖拽手柄 */
+.goalscape-weight-handle {
+  fill: var(--interactive-accent);
+  stroke: var(--background-primary);
+  stroke-width: 2;
+  cursor: ew-resize;
+}
+
+.goalscape-weight-handle:hover {
+  fill: var(--interactive-accent-hover);
+}
+
+/* 标签文字 */
+.goalscape-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-on-accent);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* 拖拽幽灵 */
+.goalscape-drag-ghost {
+  position: fixed;
+  z-index: 99999;
+  pointer-events: none;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.85;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  white-space: nowrap;
+}
+
+/* ═══════════════ 右侧信息面板 ═══════════════ */
+
 .goalscape-panel {
   flex: 0 0 300px;
   max-width: 300px;
@@ -78,58 +218,170 @@
   padding: 4px 0;
 }
 
-.goalscape-radial-svg {
-  width: 100%;
-  height: 100%;
-  max-width: 100%;
-  max-height: 100%;
-  user-select: none;
-  cursor: grab;
+/* ═══════════════ Goal List 视图 ═══════════════ */
+
+.goalscape-list-root {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 0;
 }
 
-.goalscape-radial-svg:active {
-  cursor: grabbing;
+.goalscape-list-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  min-height: 30px;
 }
 
-/* 扇区路径 */
-.goalscape-radial-svg path {
-  transition: filter 120ms ease, opacity 120ms ease;
+.goalscape-list-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.goalscape-list-toggle {
+  width: 16px;
+  text-align: center;
   cursor: pointer;
+  font-size: 10px;
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
-.goalscape-radial-svg path:hover {
-  filter: brightness(1.08);
+.goalscape-list-leaf-dot {
+  cursor: default;
+  opacity: 0.4;
 }
 
-.goalscape-selected {
-  filter: drop-shadow(0 0 4px var(--interactive-accent));
-  stroke: var(--interactive-accent) !important;
-  stroke-width: 3 !important;
+.goalscape-list-checkbox {
+  flex-shrink: 0;
 }
 
-.goalscape-collapsed {
-  opacity: 0.85;
+.goalscape-list-title {
+  flex: 1 1 auto;
+  font-size: 13px;
+  cursor: default;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* 权重拖拽手柄：选中节点扇区外沿的小圆点 */
-.goalscape-weight-handle {
-  fill: var(--interactive-accent);
-  stroke: var(--background-primary);
-  stroke-width: 2;
-  cursor: ew-resize;
+.goalscape-list-edit {
+  flex: 1 1 auto;
+  font-size: 13px;
+  padding: 1px 4px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 3px;
+  background: var(--background-primary);
+  color: var(--text-normal);
 }
 
-.goalscape-weight-handle:hover {
-  fill: var(--interactive-accent-hover);
-}
-
-/* 标签文字 */
-.goalscape-label {
+.goalscape-list-progress {
+  flex-shrink: 0;
   font-size: 11px;
-  font-weight: 600;
-  fill: var(--text-on-accent);
-  pointer-events: none;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  color: var(--text-muted);
+  min-width: 36px;
+  text-align: right;
 }
 
-/* 右键菜单占位：保持与 Obsidian 原生菜单一致，无需额外样式 */
+.goalscape-list-slider {
+  width: 80px;
+  flex-shrink: 0;
+}
+
+/* ═══════════════ Gantt 视图 ═══════════════ */
+
+.goalscape-gantt-root {
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 8px;
+}
+
+.goalscape-gantt-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 20px;
+  text-align: center;
+}
+
+.goalscape-gantt-container {
+  position: relative;
+  min-width: 600px;
+}
+
+.goalscape-gantt-header {
+  position: relative;
+  height: 24px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  margin-bottom: 4px;
+}
+
+.goalscape-gantt-tick {
+  position: absolute;
+  top: 2px;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+
+.goalscape-gantt-row {
+  display: flex;
+  align-items: center;
+  position: relative;
+}
+
+.goalscape-gantt-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-right: 8px;
+}
+
+.goalscape-gantt-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 100%;
+}
+
+.goalscape-gantt-bar {
+  position: absolute;
+  top: 2px;
+  border-radius: 4px;
+  overflow: hidden;
+  cursor: default;
+}
+
+.goalscape-gantt-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  background: rgba(255,255,255,0.3);
+  border-radius: 4px 0 0 4px;
+}
+
+.goalscape-gantt-handle {
+  position: absolute;
+  top: 0;
+  width: 8px;
+  height: 100%;
+  margin-left: -4px;
+  cursor: ew-resize;
+  background: rgba(255,255,255,0.6);
+  border-radius: 2px;
+}
+
+.goalscape-gantt-handle:hover {
+  background: var(--interactive-accent);
+}
+
+/* ═══════════════ 模板弹窗 ═══════════════ */
+
+.goalscape-template-warning {
+  color: var(--text-error);
+  font-size: 12px;
+  margin-bottom: 12px;
+}

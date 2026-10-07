@@ -35,7 +35,7 @@ export class GoalTreeStore {
 
   constructor(
     private plugin: Plugin,
-    private path: string = DEFAULT_GOALSCAPE_PATH
+    public readonly path: string = DEFAULT_GOALSCAPE_PATH
   ) {}
 
   async load(): Promise<void> {
