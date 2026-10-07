@@ -1,0 +1,311 @@
+以下是一份完整的技术方案。先说结论：**采用"数据层—视图层"分离架构，目标树作为第一公民以 JSON 格式独立存储，放射图/列表/甘特/原生画布都作为可插拔的视图渲染器注册到 Obsidian，Phase 1–4 完整复刻 Goalscape 的全部核心功能**。数据不直接绑定到 .canvas 节点，这样后续新增任何视图都不需要迁移数据。
+---
+## 一、分层架构
+```
+┌─────────────────────────────────────────────────────┐
+│  视图层   RadialGoalMap │ GoalList │ Gantt │ Canvas   │
+│          （每个视图 = 一个 ItemView，可切换）          │
+├─────────────────────────────────────────────────────┤
+│  控制层   编辑命令│右键菜单│信息面板│Focus Filter      │
+├─────────────────────────────────────────────────────┤
+│  数据层   GoalTree 单例 + 进度自动汇总引擎            │
+│          监听数据变更 → 通知所有活动视图重渲染         │
+├─────────────────────────────────────────────────────┤
+│  存储层   .goalscape.json 文件（主存储）              │
+│          + 可选：同步导出到 .canvas（JSON Canvas）    │
+└─────────────────────────────────────────────────────┘
+```
+存储采用**独立 JSON 文件而非直接复用 .canvas**，理由有三：权重/进度/标签是结构化数据，塞进 canvas 节点的 text 字段会很脏；数据层和视图层解耦后可以加任意新视图；.canvas 仍可作为"导出"目标，保留原生画布视图的兼容性。
+---
+## 二、Goalscape 功能对照清单（必须实现）
+从官方 Tour 提取的全部核心功能，作为 Phase 验收标准：
+| 功能项 | 说明 | Phase |
+|---|---|---|
+| 放射目标图 | 中心 Main Goal + 无限层子目标，扇区角度按数量均分、**半径/面积按重要性权重** | 1 |
+| 重要性权重 | 同级 siblings 归一化，增大某个会减少邻居权重 | 1 |
+| 进度自动汇总 | 叶子节点手动填进度，父级进度 = Σ(子权重×子进度)/Σ权重，逐级向上滚到中心 | 1 |
+| 颜色编码 | 进度 → 颜色深浅（可映射到用户色阶）；也支持用户手动指定颜色并"应用到子目标" | 2 |
+| 信息面板 | 右侧面板：Title / Importance / Progress / Due / Responsible / Tags / Notes / 自定义字段 | 2 |
+| 添加/重命名/删除 | 右键菜单 + 顶部按钮，Add Subgoal / Add Sibling / Rename / Delete | 2 |
+| 拖拽重挂载 | 拖动目标到另一个父节点下，重建父子关系 | 3 |
+| 剪切/复制/粘贴 | 子树级别的复制粘贴 | 3 |
+| Collapse/Expand | 折叠深层子目标，聚焦当前层 | 1 |
+| Focus Filter | 侧栏按 Date/Progress/Responsible/Tag/Color 过滤，图上高亮匹配项并生成列表 | 3 |
+| Goal List 视图 | 缩进列表视图，可勾选完成、更新进度 | 4 |
+| Gantt 视图 | 时间线、起止日期、依赖关系、拖动更新进度 | 5 |
+| 导出 | PNG / SVG / CSV / Markdown 大纲 | 5 |
+| 模板 | 预置人生/商业/运动等初始结构 | 5 |
+---
+## 三、数据层设计（核心）
+### 3.1 数据模型
+```typescript
+// src/data/types.ts
+export interface GoalNode {
+  id: string;                  // uuid
+  title: string;
+  importance: number;          // 原始权重 0-100，渲染时与同级归一化
+  progress?: number;           // 0-100，仅叶子节点手工填写；父级由引擎计算
+  due?: string;                // ISO date
+  start?: string;              // Gantt 用
+  responsible: string[];
+  tags: string[];              // 含 "Now"/"Next" 等
+  color?: string;              // 用户手动色，未设则按进度渲染
+  notes?: string;              // Markdown
+  fields?: Record<string, string>;  // 自定义字段（Goalscape 12）
+  collapsed?: boolean;
+  children: GoalNode[];
+}
+export interface GoalScape {
+  version: 1;
+  mainGoal: GoalNode;
+  colorMeanings?: Record<string, string>;  // 颜色→含义标签
+}
+```
+### 3.2 进度汇总引擎
+```typescript
+// src/data/rollup.ts
+export function computeProgress(node: GoalNode): number {
+  if (!node.children.length) return node.progress ?? 0;
+  const totalWeight = node.children.reduce((s, c) => s + c.importance, 0);
+  if (totalWeight === 0) return 0;
+  const weighted = node.children.reduce(
+    (s, c) => s + c.importance * computeProgress(c), 0
+  );
+  return Math.round(weighted / totalWeight);
+}
+// 编辑器每次改叶子 progress，触发整棵树重算
+export function recalcTree(root: GoalNode): void {
+  const walk = (n: GoalNode) => {
+    n.children.forEach(walk);
+    if (n.children.length) n.progress = computeProgress(n);
+  };
+  walk(root);
+}
+```
+### 3.3 GoalTree 单例 + 变更通知
+```typescript
+// src/data/goalTree.ts
+import { TFile, Plugin, Notice } from "obsidian";
+export class GoalTreeStore {
+  private listeners = new Set<() => void>();
+  scape!: GoalScape;
+  file!: TFile;
+  constructor(private plugin: Plugin, private path: string) {}
+  async load() {
+    const f = this.plugin.app.vault.getAbstractFileByPath(this.path);
+    if (f instanceof TFile) {
+      const raw = await this.plugin.app.vault.read(f);
+      this.scape = JSON.parse(raw);
+      this.file = f;
+    } else {
+      this.scape = { version: 1, mainGoal: /* 默认三段 L1 */ };
+      await this.save();
+    }
+  }
+  async save() {
+    await this.plugin.app.vault.adapter.write(
+      this.path, JSON.stringify(this.scape, null, 2)
+    );
+  }
+  /** 所有变更通过这一个入口，确保自动汇总 + 持久化 + 通知 */
+  mutate(fn: (s: GoalScape) => void) {
+    fn(this.scape);
+    recalcTree(this.scape.mainGoal);
+    this.save();
+    this.listeners.forEach(l => l());
+  }
+  subscribe(fn: () => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+}
+```
+### 3.4 挂载到 .canvas 的同步导出（可选）
+JSON Canvas 规范里节点由 `id/type/x/y/width/height/color` 构成，text 节点可携带 markdown，group 节点可作容器。放射图导出到 canvas 时，把每个目标变成一个 text node，按角度计算 x/y 排布成放射状，父→子画 edge，`color` 字段直接用 preset 颜色 `"1"`~`"6"` 对应进度档位：
+```typescript
+// src/export/canvasSync.ts
+export function toCanvas(scape: GoalScape): JsonCanvas {
+  const nodes: any[] = [], edges: any[] = [];
+  const R = 600;
+  let cursor = { x: 0, y: 0, angle: 0 };
+  function walk(node: GoalNode, depth: number, startAngle: number, endAngle: number, parentId?: string) {
+    const mid = (startAngle + endAngle) / 2;
+    const radius = depth * R;
+    const x = Math.cos(mid) * radius, y = Math.sin(mid) * radius;
+    const id = node.id;
+    nodes.push({
+      id, type: "text",
+      x: Math.round(x - 100), y: Math.round(y - 50), width: 200, height: 100,
+      text: `**${node.title}**\n权重 ${node.importance} · 进度 ${node.progress}%`,
+      color: progressToPreset(node.progress!),  // 0-20→"1", 20-40→"2"...
+    });
+    if (parentId) edges.push({ id: `e-${id}`, fromNode: parentId, toNode: id });
+    // 子节点按权重切分父扇区角度
+    let acc = startAngle;
+    const total = node.children.reduce((s, c) => s + c.importance, 0);
+    for (const c of node.children) {
+      const span = (c.importance / total) * (endAngle - startAngle);
+      walk(c, depth + 1, acc, acc + span, id);
+      acc += span;
+    }
+  }
+  walk(scape.mainGoal, 0, 0, Math.PI * 2);
+  return { nodes, edges };
+}
+```
+这样用户既能用你的放射视图，也能一键导出到原生 .canvas 里继续手动编辑。
+---
+## 四、视图层：Goalscape 放射图渲染
+### 4.1 注册视图
+遵循 Obsidian 标准模式：在 `onload` 里 `registerView`，用 `ItemView` 子类承载 DOM：
+```typescript
+// src/main.ts
+export default class GoalscapePlugin extends Plugin {
+  store!: GoalTreeStore;
+  async onload() {
+    this.store = new GoalTreeStore(this, "Goalscapes/life.goalscape.json");
+    await this.store.load();
+    this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
+    this.registerView(VIEW_LIST,   (leaf) => new GoalListView(leaf, this));
+    this.registerView(VIEW_GANTT,  (leaf) => new GanttView(leaf, this));
+    this.addRibbonIcon("target", "Open Goalscape", () => this.openView(VIEW_RADIAL));
+    this.addCommand({ id: "open-radial", name: "Open radial map",
+      callback: () => this.openView(VIEW_RADIAL) });
+    // ...视图切换命令
+  }
+  async openView(type: string) {
+    const { workspace } = this.app;
+    let leaf = workspace.getLeavesOfType(type)[0]
+      ?? workspace.getLeaf("tab");
+    await leaf.setViewState({ type, active: true });
+    workspace.revealLeaf(leaf);
+  }
+}
+```
+### 4.2 RadialGoalMapView：放射图渲染
+技术选型：**纯 SVG + 自研扇区布局**（比 D3 sunburst 更可控，因为 Goalscape 的关键在于"权重决定扇区大小 + 进度决定颜色深浅 + 邻居相互挤压"，需要自己实现权重→角度切分）。如果不想自己写，也可以基于 d3-hierarchy 的 `partition()` 做放射版（radial treemap）。
+```typescript
+// src/views/radialView.ts
+import { ItemView, WorkspaceLeaf } from "obsidian";
+export const VIEW_RADIAL = "goalscape-radial-view";
+export class RadialGoalMapView extends ItemView {
+  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapePlugin) {
+    super(leaf);
+  }
+  getViewType() { return VIEW_RADIAL; }
+  getDisplayText() { return "Goalscape Radial"; }
+  getIcon() { return "target"; }
+  async onOpen() {
+    const root = this.contentEl.createDiv({ cls: "goalscape-root" });
+    const svg = root.createSvg("svg");
+    // 订阅数据变更 → 重渲染
+    this.unsubscribe = this.plugin.store.subscribe(() => this.render(svg));
+    this.render(svg);
+  }
+  async onClose() { this.unsubscribe?.(); this.contentEl.empty(); }
+  private render(svg: SVGElement) {
+    svg.empty();
+    const scape = this.plugin.store.scape;
+    const cx = 400, cy = 400, maxR = 380;
+    let acc = -Math.PI / 2;
+    const drawNode = (
+      node: GoalNode, depth: number,
+      startAngle: number, endAngle: number,
+      parentId?: string
+    ) => {
+      const siblingsTotal = /* 上层角度范围由父节点切分传入 */;
+      const span = endAngle - startAngle;
+      const rInner = depth === 0 ? 0 : (depth - 1) / depth * maxR;
+      const rOuter = depth / (depth + 1) * maxR;
+      // ① 路径：扇环
+      const path = this.arcPath(cx, cy, rInner, rOuter, startAngle, endAngle);
+      const el = svg.createSvg("path");
+      el.setAttribute("d", path);
+      el.setAttribute("fill", this.colorFor(node));       // 进度 → 色阶
+      el.setAttribute("stroke", "var(--background-primary)");
+      el.setAttribute("data-id", node.id);
+      el.addEventListener("click", () => this.openInfoPanel(node.id));
+      el.addEventListener("contextmenu", (e) => this.showCtxMenu(e, node.id));
+      // ② 标签：中点文字
+      const midAngle = (startAngle + endAngle) / 2;
+      const rMid = (rInner + rOuter) / 2;
+      const label = svg.createSvg("text");
+      label.setAttribute("x", String(cx + Math.cos(midAngle) * rMid));
+      label.setAttribute("y", String(cy + Math.sin(midAngle) * rMid));
+      label.textContent = `${node.title} ${node.progress}%`;
+      // ③ 递归：子节点按权重切分父扇区角度
+      const total = node.children.reduce((s, c) => s + c.importance, 0);
+      let cursor = startAngle;
+      for (const c of node.children) {
+        const cSpan = (c.importance / total) * span;
+        drawNode(c, depth + 1, cursor, cursor + cSpan, node.id);
+        cursor += cSpan;
+      }
+    };
+    drawNode(scape.mainGoal, 0, 0, Math.PI * 2);
+  }
+  private colorFor(node: GoalNode): string {
+    if (node.color) return node.color;
+    // 进度 0-100 → 色阶（红→橙→黄→绿），或用户主题色
+    const stops = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
+    const idx = Math.min(3, Math.floor((node.progress ?? 0) / 25));
+    return stops[idx];
+  }
+}
+```
+### 4.3 关键交互实现要点
+- **权重调节**：在扇区外沿放一个拖动手柄，拖动改变该子节点的 `importance`，同时等比缩放其他 siblings 的 importance，保证总和恒定（这是 Goalscape 邻居互斥的关键）；
+- **折叠**：`collapsed=true` 时该节点的 children 不渲染，外环半径封顶；
+- **Focus Filter**：侧栏条件生成 `Predicate<GoalNode>`，匹配项渲染成正常色，非匹配项降饱和度（`filter: grayscale(0.8)`）；
+- **拖拽重挂载**：用 HTML5 drag-and-drop，拖到目标扇区上松手时调用 `store.mutate(s => { /* 把节点从旧 parent.children 移到新 parent.children */ })`。
+---
+## 五、视图切换机制
+每个视图都是独立注册的 `ItemView`，切换只需 `leaf.setViewState({ type: ... })`。数据层通过 `store.subscribe` 让所有视图自动同步——切到 Goal List 时列表视图读同一棵树、切回放射图也无需重新加载。
+再加一个顶部 Tab 栏（通过 `this.contentEl` 上的自定义 toolbar）实现同一 leaf 内的快速切换：
+```
+[◉ Radial]  [☰ List]  [▤ Gantt]  [▦ Canvas Sync]
+```
+---
+## 六、项目骨架
+```
+goalscape-obsidian/
+├── manifest.json
+├── package.json            # esbuild + obsidian + typescript
+├── tsconfig.json
+├── src/
+│   ├── main.ts             # 插件入口，registerView / 命令 / 设置页
+│   ├── data/
+│   │   ├── types.ts        # GoalNode / GoalScape
+│   │   ├── goalTree.ts     # GoalTreeStore 单例
+│   │   ├── rollup.ts       # 进度汇总引擎
+│   │   └── crud.ts         # add/delete/rename/move/copy/paste
+│   ├── views/
+│   │   ├── radialView.ts   # Goalscape 放射图
+│   │   ├── listView.ts     # Goal List
+│   │   ├── ganttView.ts    # Gantt（Phase 5）
+│   │   └── infoPanel.ts    # 右侧信息面板
+│   ├── export/
+│   │   ├── canvasSync.ts   # → .canvas
+│   │   └── pngSvgCsv.ts
+│   └── styles.css
+└── README.md
+```
+`manifest.json`：
+```json
+{
+  "id": "goalscape-obsidian",
+  "name": "Goalscape",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Radial goal map with weighted importance and auto-rollup progress",
+  "author": "you",
+  "isDesktopOnly": false
+}
+```
+---
+## 七、开发路线图
+| Phase | 交付 | 验收标准 |
+|---|---|---|
+| **1（2–3 周）** | 数据层 + 放射图只读渲染 + Collapse/Expand | 能打开一张默认三段 L1 的 goalscape，扇区大小按权重渲染，颜色按进度渲染，改 JSON 文件后图自动刷新 |
+| **2（2 周）** | CRUD + 信息面板 + 权重拖拽 + 进度汇总 | 右键能加/删/重命名，改叶子进度父级实时重算，信息面板能编辑全部字段并持久化 |
+| **3（2 周）** | 拖拽重挂载 + Focus Filter + 颜色主题 + 复制粘贴 | 拖动节点换父成功，按 Tag/进度过滤高亮正常 |
+| **4（1–2 周）** | Goal List 视图 + Canvas 同步导出 | 一键导出 .canvas 且能在原生 Canvas 打开 |
+| **5（2 周）** | Gantt 视图 + 导出 PNG/SVG/CSV + 模板库 | 完整对齐 Goalscape 官方 Tour 功能 |
+**两个建议提前确认的实现取舍**：一是用纯 SVG 自绘还是引入 d3-hierarchy（前者可控性强、后者开发快，建议先自绘、复杂需求再迁 d3）；二是数据主存储用 `.goalscape.json` 还是直接扩展 .canvas 节点元数据（前者解耦彻底、后者单文件管理，建议前者，.canvas 作为导出兼容层）。

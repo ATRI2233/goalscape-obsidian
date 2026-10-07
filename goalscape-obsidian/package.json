@@ -1,0 +1,26 @@
+{
+  "name": "goalscape-obsidian",
+  "version": "0.1.0",
+  "description": "Radial goal map with weighted importance and auto-rollup progress",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "tsc": "tsc -noEmit -skipLibCheck"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "goalscape",
+    "goal-map"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "^1.5.0",
+    "tslib": "^2.8.1",
+    "typescript": "^5.4.0"
+  }
+}

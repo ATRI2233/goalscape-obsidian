@@ -1,0 +1,69 @@
+/* styles.css
+ * Goalscape 插件基础样式：适配 Obsidian 主题变量，提供放射图容器、
+ * 扇区交互、标签和选中高亮。
+ */
+
+/* 视图根容器：占满整个 leaf */
+.goalscape-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--background-primary);
+  color: var(--text-normal);
+}
+
+/* 放射图 SVG 容器 */
+.goalscape-radial-root {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  padding: 12px;
+}
+
+.goalscape-radial-svg {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  user-select: none;
+  cursor: grab;
+}
+
+.goalscape-radial-svg:active {
+  cursor: grabbing;
+}
+
+/* 扇区路径 */
+.goalscape-radial-svg path {
+  transition: filter 120ms ease, opacity 120ms ease;
+  cursor: pointer;
+}
+
+.goalscape-radial-svg path:hover {
+  filter: brightness(1.08);
+}
+
+.goalscape-selected {
+  filter: drop-shadow(0 0 4px var(--interactive-accent));
+  stroke: var(--interactive-accent) !important;
+  stroke-width: 3 !important;
+}
+
+.goalscape-collapsed {
+  opacity: 0.85;
+}
+
+/* 标签文字 */
+.goalscape-label {
+  font-size: 11px;
+  font-weight: 600;
+  fill: var(--text-on-accent);
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+/* 右键菜单占位：保持与 Obsidian 原生菜单一致，无需额外样式 */

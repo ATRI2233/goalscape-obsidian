@@ -1,0 +1,9 @@
+{
+  "id": "goalscape-obsidian",
+  "name": "Goalscape",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Radial goal map with weighted importance and auto-rollup progress",
+  "author": "you",
+  "isDesktopOnly": false
+}
