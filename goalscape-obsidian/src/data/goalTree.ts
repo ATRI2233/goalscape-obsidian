@@ -45,8 +45,17 @@ export class GoalTreeStore {
       await this.readFromFile(f);
     } else {
       this.scape = createDefaultScape();
-      await this.save();
-      this.file = this.plugin.app.vault.getAbstractFileByPath(this.path) as TFile | null;
+      // 首次建档用 vault.create 而非 adapter.write：adapter.write 绕过 Vault 索引，
+      // 紧接着的 getAbstractFileByPath 有极小概率因索引异步刷新而拿到 null。
+      this.writing = true;
+      try {
+        this.file = await this.plugin.app.vault.create(
+          this.path,
+          JSON.stringify(this.scape, null, 2)
+        );
+      } finally {
+        window.setTimeout(() => (this.writing = false), 500);
+      }
       new Notice(`Goalscape: created ${this.path}`);
     }
     this.registerExternalWatch();

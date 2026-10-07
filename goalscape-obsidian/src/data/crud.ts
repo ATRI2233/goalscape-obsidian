@@ -61,6 +61,24 @@ export function adjustImportance(
   if (oldSelf === target) return;
 }
 
+/**
+ * 把一组 siblings 的 importance 等比缩放到总和为 100。
+ * adjustImportance 假设"同级权重总和恒为 100"，moveGoal 改变了两端父级的
+ * 子节点集合，必须在这里重新归一化，否则该假设在跨父级移动后失真
+ * （已通过单测复现：移动后剩余 siblings 总和会漂移到 100 以外）。
+ */
+function renormalizeSiblings(children: GoalNode[]): void {
+  if (!children.length) return;
+  const total = children.reduce((s, c) => s + c.importance, 0);
+  if (total <= 0) {
+    const even = Math.round((100 / children.length) * 100) / 100;
+    for (const c of children) c.importance = even;
+    return;
+  }
+  const scale = 100 / total;
+  for (const c of children) c.importance = Math.round(c.importance * scale * 100) / 100;
+}
+
 /** 拖拽重挂载：把节点从旧父移到新父下。禁止移到自己或自己的后代下。 */
 export function moveGoal(scape: GoalScape, id: string, newParentId: string): boolean {
   if (id === scape.mainGoal.id || id === newParentId) return false;
@@ -77,6 +95,8 @@ export function moveGoal(scape: GoalScape, id: string, newParentId: string): boo
   const idx = moving.parent.children.findIndex((c) => c.id === id);
   const [node] = moving.parent.children.splice(idx, 1);
   target.node.children.push(node);
+  renormalizeSiblings(moving.parent.children);
+  renormalizeSiblings(target.node.children);
   return true;
 }
 
@@ -117,8 +137,25 @@ export function pasteSubtree(
   return clone.id;
 }
 
-/** 剪切 = 深拷贝出子树但不删除原节点，由调用方在粘贴成功后删除（Goalscape 语义） */
+/**
+ * 复制/剪切都从这里取数据：必须返回深拷贝的快照，而不是树里的活引用。
+ * 否则 Copy 之后再编辑原节点，剪贴板内容会跟着变（已通过单测复现过）。
+ */
 export function extractSubtree(scape: GoalScape, id: string): GoalNode | null {
   const found = findNode(scape.mainGoal, id);
-  return found ? found.node : null;
+  return found ? cloneSubtree(found.node) : null;
+}
+
+/** 把节点当前的 color 应用到它的所有后代（含清空：color 未设时后代也会被清空）。 */
+export function applyColorToSubtree(scape: GoalScape, id: string): void {
+  const found = findNode(scape.mainGoal, id);
+  if (!found) return;
+  const color = found.node.color;
+  const walk = (n: GoalNode) => {
+    for (const c of n.children) {
+      c.color = color;
+      walk(c);
+    }
+  };
+  walk(found.node);
 }

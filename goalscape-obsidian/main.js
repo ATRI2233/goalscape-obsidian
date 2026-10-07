@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => GoalscapePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian3 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/data/goalTree.ts
 var import_obsidian = require("obsidian");
@@ -132,8 +132,15 @@ var GoalTreeStore = class {
       await this.readFromFile(f);
     } else {
       this.scape = createDefaultScape();
-      await this.save();
-      this.file = this.plugin.app.vault.getAbstractFileByPath(this.path);
+      this.writing = true;
+      try {
+        this.file = await this.plugin.app.vault.create(
+          this.path,
+          JSON.stringify(this.scape, null, 2)
+        );
+      } finally {
+        window.setTimeout(() => this.writing = false, 500);
+      }
       new import_obsidian.Notice(`Goalscape: created ${this.path}`);
     }
     this.registerExternalWatch();
@@ -229,7 +236,7 @@ var GoalTreeStore = class {
 };
 
 // src/views/radialView.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/data/crud.ts
 function addGoal(scape, refId, position, title = "New Goal") {
@@ -262,6 +269,24 @@ function renameGoal(scape, id, title) {
   if (found)
     found.node.title = title;
 }
+function adjustImportance(scape, id, newImportance) {
+  const found = findNode(scape.mainGoal, id);
+  if (!(found == null ? void 0 : found.parent))
+    return;
+  const siblings = found.parent.children;
+  const others = siblings.filter((c) => c.id !== id);
+  const oldSelf = found.node.importance;
+  const othersTotal = others.reduce((s, c) => s + c.importance, 0);
+  const target = Math.max(0, Math.min(100, newImportance));
+  found.node.importance = target;
+  if (othersTotal > 0) {
+    const scale = (100 - target) / othersTotal;
+    for (const c of others)
+      c.importance = Math.round(c.importance * scale * 100) / 100;
+  }
+  if (oldSelf === target)
+    return;
+}
 function cloneSubtree(node) {
   return createGoalNode({
     title: node.title,
@@ -293,8 +318,261 @@ function pasteSubtree(scape, refId, position, payload) {
 }
 function extractSubtree(scape, id) {
   const found = findNode(scape.mainGoal, id);
-  return found ? found.node : null;
+  return found ? cloneSubtree(found.node) : null;
 }
+function applyColorToSubtree(scape, id) {
+  const found = findNode(scape.mainGoal, id);
+  if (!found)
+    return;
+  const color = found.node.color;
+  const walk = (n) => {
+    for (const c of n.children) {
+      c.color = color;
+      walk(c);
+    }
+  };
+  walk(found.node);
+}
+
+// src/views/promptModal.ts
+var import_obsidian2 = require("obsidian");
+function promptInput(app, title, initial) {
+  return new Promise((resolve) => {
+    const modal = new PromptModal(app, title, initial, resolve);
+    modal.open();
+  });
+}
+var PromptModal = class extends import_obsidian2.Modal {
+  constructor(app, titleText, initial, onSubmit) {
+    super(app);
+    this.titleText = titleText;
+    this.initial = initial;
+    this.onSubmit = onSubmit;
+    this.value = initial;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.titleText });
+    new import_obsidian2.Setting(contentEl).setName("Value").addText((text) => {
+      text.setValue(this.initial);
+      text.inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          this.close();
+          this.onSubmit(this.value);
+        }
+      });
+      text.onChange((v) => this.value = v);
+    });
+    new import_obsidian2.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText("Confirm").onClick(() => {
+        this.close();
+        this.onSubmit(this.value);
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Cancel").onClick(() => {
+        this.close();
+        this.onSubmit(null);
+      })
+    );
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
+
+// src/views/infoPanel.ts
+var import_obsidian3 = require("obsidian");
+function splitCsv(raw) {
+  return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+}
+var InfoPanel = class {
+  constructor(container, plugin) {
+    this.container = container;
+    this.plugin = plugin;
+    this.nodeId = null;
+    /** 拖动滑杆时跳过外部触发的整面板重建，避免滑杆在拖拽中被重新创建而丢失指针 */
+    this.interacting = false;
+  }
+  /** 切换选中节点：始终强制重建 */
+  show(nodeId) {
+    this.nodeId = nodeId;
+    this.render(true);
+  }
+  /** 数据变更后的被动刷新：拖拽中跳过，避免打断正在交互的控件 */
+  refresh() {
+    this.render(false);
+  }
+  render(force) {
+    var _a, _b, _c, _d;
+    if (this.interacting && !force)
+      return;
+    this.container.empty();
+    const scape = this.plugin.store.scape;
+    if (!this.nodeId || !scape) {
+      this.container.createDiv({
+        cls: "goalscape-panel-empty",
+        text: "Select a goal to edit its details."
+      });
+      return;
+    }
+    const found = findNode(scape.mainGoal, this.nodeId);
+    if (!found) {
+      this.container.createDiv({ cls: "goalscape-panel-empty", text: "Goal not found." });
+      return;
+    }
+    const node = found.node;
+    const isMain = !found.parent;
+    const isLeaf = node.children.length === 0;
+    this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
+    new import_obsidian3.Setting(this.container).setName("Title").addText((text) => {
+      text.setValue(node.title);
+      text.inputEl.addEventListener("blur", () => {
+        const v = text.getValue().trim();
+        if (v && v !== node.title)
+          this.mutate((s) => renameGoal(s, node.id, v));
+      });
+    });
+    if (!isMain) {
+      new import_obsidian3.Setting(this.container).setName("Importance").setDesc(`${Math.round(node.importance)}`).addSlider((slider) => {
+        slider.setLimits(0, 100, 1);
+        slider.setValue(Math.round(node.importance));
+        slider.setDynamicTooltip();
+        this.trackInteraction(slider.sliderEl);
+        slider.onChange((v) => {
+          this.mutate((s) => adjustImportance(s, node.id, v));
+        });
+      });
+    }
+    if (isLeaf) {
+      new import_obsidian3.Setting(this.container).setName("Progress").setDesc(`${(_a = node.progress) != null ? _a : 0}%`).addSlider((slider) => {
+        var _a2;
+        slider.setLimits(0, 100, 1);
+        slider.setValue((_a2 = node.progress) != null ? _a2 : 0);
+        slider.setDynamicTooltip();
+        this.trackInteraction(slider.sliderEl);
+        slider.onChange((v) => {
+          this.mutate((s) => this.patch(s, node.id, (n) => n.progress = v));
+        });
+      });
+    } else {
+      new import_obsidian3.Setting(this.container).setName("Progress (auto-rollup)").setDesc(`${(_b = node.progress) != null ? _b : 0}%`);
+    }
+    new import_obsidian3.Setting(this.container).setName("Due date").addText((text) => {
+      var _a2;
+      text.inputEl.type = "date";
+      text.setValue((_a2 = node.due) != null ? _a2 : "");
+      text.inputEl.addEventListener("change", () => {
+        const v = text.getValue();
+        this.mutate((s) => this.patch(s, node.id, (n) => n.due = v || void 0));
+      });
+    });
+    new import_obsidian3.Setting(this.container).setName("Start date").addText((text) => {
+      var _a2;
+      text.inputEl.type = "date";
+      text.setValue((_a2 = node.start) != null ? _a2 : "");
+      text.inputEl.addEventListener("change", () => {
+        const v = text.getValue();
+        this.mutate((s) => this.patch(s, node.id, (n) => n.start = v || void 0));
+      });
+    });
+    new import_obsidian3.Setting(this.container).setName("Responsible").setDesc("Comma separated").addText((text) => {
+      text.setValue(node.responsible.join(", "));
+      text.inputEl.addEventListener("blur", () => {
+        const list = splitCsv(text.getValue());
+        this.mutate((s) => this.patch(s, node.id, (n) => n.responsible = list));
+      });
+    });
+    new import_obsidian3.Setting(this.container).setName("Tags").setDesc("Comma separated, e.g. Now, Next").addText((text) => {
+      text.setValue(node.tags.join(", "));
+      text.inputEl.addEventListener("blur", () => {
+        const list = splitCsv(text.getValue());
+        this.mutate((s) => this.patch(s, node.id, (n) => n.tags = list));
+      });
+    });
+    new import_obsidian3.Setting(this.container).setName("Color").setDesc("Empty = color by progress").addText((text) => {
+      var _a2;
+      text.inputEl.placeholder = "#4ade80";
+      text.setValue((_a2 = node.color) != null ? _a2 : "");
+      text.inputEl.addEventListener("blur", () => {
+        const v = text.getValue().trim();
+        this.mutate((s) => this.patch(s, node.id, (n) => n.color = v || void 0));
+      });
+    }).addButton(
+      (btn) => btn.setButtonText("Apply to subgoals").setDisabled(!node.children.length).onClick(() => {
+        this.mutate((s) => applyColorToSubtree(s, node.id));
+      })
+    );
+    this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
+    const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
+    notesArea.value = (_c = node.notes) != null ? _c : "";
+    notesArea.addEventListener("blur", () => {
+      const v = notesArea.value;
+      this.mutate((s) => this.patch(s, node.id, (n) => n.notes = v || void 0));
+    });
+    this.container.createEl("h4", { text: "Custom fields" });
+    const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
+    const fields = (_d = node.fields) != null ? _d : {};
+    for (const [key, value] of Object.entries(fields)) {
+      new import_obsidian3.Setting(fieldsContainer).setName(key).addText((text) => {
+        text.setValue(value);
+        text.inputEl.addEventListener("blur", () => {
+          const v = text.getValue();
+          this.mutate(
+            (s) => this.patch(s, node.id, (n) => {
+              var _a2;
+              n.fields = { ...(_a2 = n.fields) != null ? _a2 : {}, [key]: v };
+            })
+          );
+        });
+      }).addExtraButton(
+        (btn) => btn.setIcon("trash-2").setTooltip("Remove field").onClick(() => {
+          this.mutate(
+            (s) => this.patch(s, node.id, (n) => {
+              if (!n.fields)
+                return;
+              const rest = { ...n.fields };
+              delete rest[key];
+              n.fields = rest;
+            })
+          );
+        })
+      );
+    }
+    new import_obsidian3.Setting(fieldsContainer).addButton(
+      (btn) => btn.setButtonText("Add custom field").onClick(async () => {
+        const key = await promptInput(this.plugin.app, "New field name", "");
+        if (!key || !key.trim())
+          return;
+        this.mutate(
+          (s) => this.patch(s, node.id, (n) => {
+            var _a2;
+            n.fields = { ...(_a2 = n.fields) != null ? _a2 : {}, [key.trim()]: "" };
+          })
+        );
+      })
+    );
+  }
+  /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
+  trackInteraction(el) {
+    const start = () => this.interacting = true;
+    const end = () => {
+      this.interacting = false;
+      this.render(true);
+    };
+    el.addEventListener("pointerdown", start);
+    window.addEventListener("pointerup", end, { once: false });
+  }
+  mutate(fn) {
+    this.plugin.store.mutate(fn);
+  }
+  patch(scape, id, fn) {
+    const found = findNode(scape.mainGoal, id);
+    if (found)
+      fn(found.node);
+  }
+};
 
 // src/views/radialView.ts
 var VIEW_RADIAL = "goalscape-radial-view";
@@ -306,11 +584,12 @@ var MAX_R = VIEW_SIZE / 2 - 20;
 var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 var clipboardSubtree = null;
 var clipboardMode = null;
-var RadialGoalMapView = class extends import_obsidian2.ItemView {
+var RadialGoalMapView = class extends import_obsidian4.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
     this.selectedId = null;
+    this.dragState = null;
   }
   getViewType() {
     return VIEW_RADIAL;
@@ -324,14 +603,27 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
   async onOpen() {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
-    this.rootEl = this.contentEl.createDiv({ cls: "goalscape-radial-root" });
-    this.unsubscribe = this.plugin.store.subscribe(() => this.render());
+    const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
+    this.rootEl = mainRow.createDiv({ cls: "goalscape-radial-root" });
+    const panelEl = mainRow.createDiv({ cls: "goalscape-panel" });
+    this.infoPanel = new InfoPanel(panelEl, this.plugin);
+    this.infoPanel.show(this.selectedId);
+    this.unsubscribe = this.plugin.store.subscribe(() => {
+      this.render();
+      this.infoPanel.refresh();
+    });
     this.render();
   }
   async onClose() {
     var _a;
     (_a = this.unsubscribe) == null ? void 0 : _a.call(this);
     this.contentEl.empty();
+  }
+  // ──────────────────────────── 选中 ────────────────────────────
+  select(id) {
+    this.selectedId = id;
+    this.render();
+    this.infoPanel.show(id);
   }
   // ──────────────────────────── 渲染 ────────────────────────────
   render() {
@@ -346,7 +638,7 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
     const ringCount = Math.max(1, maxDepth);
     const ringW = MAX_R / ringCount;
-    const drawNode = (node, depth, startAngle, endAngle) => {
+    const drawNode = (node, depth, startAngle, endAngle, parentStart, parentEnd) => {
       var _a;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
@@ -365,13 +657,12 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
         path.addClass("goalscape-collapsed");
       path.addEventListener("click", (e) => {
         e.stopPropagation();
-        this.selectedId = node.id;
-        this.render();
+        this.select(node.id);
       });
       path.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        this.selectedId = node.id;
+        this.select(node.id);
         this.showContextMenu(e, node);
       });
       svg.appendChild(path);
@@ -385,7 +676,7 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
         label.setAttribute("dominant-baseline", "middle");
         label.addClass("goalscape-label");
         const deg = midAngle * 180 / Math.PI;
-        if (depth > 0 && (deg > 90 && deg < 270)) {
+        if (depth > 0 && deg > 90 && deg < 270) {
           label.setAttribute(
             "transform",
             `rotate(${deg + 180} ${CX + Math.cos(midAngle) * rMid} ${CY + Math.sin(midAngle) * rMid})`
@@ -399,6 +690,18 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
         label.textContent = `${node.title} ${(_a = node.progress) != null ? _a : 0}%`;
         svg.appendChild(label);
       }
+      if (node.id === this.selectedId && depth > 0) {
+        const midAngle = (startAngle + endAngle) / 2;
+        const handle = document.createElementNS(SVG_NS, "circle");
+        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * rOuter));
+        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * rOuter));
+        handle.setAttribute("r", "9");
+        handle.addClass("goalscape-weight-handle");
+        handle.addEventListener("pointerdown", (e) => {
+          this.startWeightDrag(e, svg, node.id, startAngle, parentStart, parentEnd);
+        });
+        svg.appendChild(handle);
+      }
       if (node.collapsed)
         return;
       const total = node.children.reduce((s, c) => s + c.importance, 0);
@@ -407,16 +710,14 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
       let cursor = startAngle;
       for (const c of node.children) {
         const cSpan = c.importance / total * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan);
+        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle);
         cursor += cSpan;
       }
     };
-    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5);
+    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, -Math.PI / 2, Math.PI * 1.5);
     svg.addEventListener("click", () => {
-      if (this.selectedId) {
-        this.selectedId = null;
-        this.render();
-      }
+      if (this.selectedId)
+        this.select(null);
     });
   }
   /** 可见深度：collapsed 节点算作当前层的末端 */
@@ -433,9 +734,51 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
     const idx = Math.min(PROGRESS_STOPS.length - 1, Math.floor(p / 25));
     return PROGRESS_STOPS[idx];
   }
-  // ──────────────────────────── 交互 ────────────────────────────
+  // ──────────────────────────── 权重拖拽 ────────────────────────────
+  startWeightDrag(e, svg, nodeId, startAngle, parentStart, parentEnd) {
+    e.preventDefault();
+    e.stopPropagation();
+    this.select(nodeId);
+    this.dragState = { nodeId, startAngle, parentStart, parentEnd, svg };
+    const move = (ev) => this.onWeightDragMove(ev);
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      this.dragState = null;
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+  onWeightDragMove(e) {
+    const drag = this.dragState;
+    if (!drag)
+      return;
+    const point = this.toLogicalPoint(drag.svg, e.clientX, e.clientY);
+    let angle = Math.atan2(point.y - CY, point.x - CX);
+    while (angle < drag.parentStart)
+      angle += Math.PI * 2;
+    while (angle >= drag.parentStart + Math.PI * 2)
+      angle -= Math.PI * 2;
+    const parentSpan = drag.parentEnd - drag.parentStart;
+    if (parentSpan <= 0)
+      return;
+    const rawSpan = angle - drag.startAngle;
+    const span = Math.max(0, Math.min(parentSpan, rawSpan));
+    const fraction = span / parentSpan;
+    const target = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+    this.plugin.store.mutate((s) => adjustImportance(s, drag.nodeId, target));
+  }
+  /** 把屏幕坐标转换成 svg viewBox 内的逻辑坐标，兼容容器缩放/边距 */
+  toLogicalPoint(svg, clientX, clientY) {
+    const ctm = svg.getScreenCTM();
+    if (!ctm)
+      return { x: CX, y: CY };
+    const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+    return { x: p.x, y: p.y };
+  }
+  // ──────────────────────────── 交互：右键菜单 ────────────────────────────
   showContextMenu(event, node) {
-    const menu = new import_obsidian2.Menu();
+    const menu = new import_obsidian4.Menu();
     const isMain = node.id === this.plugin.store.scape.mainGoal.id;
     if (node.children.length) {
       menu.addItem(
@@ -506,7 +849,7 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
             clipboardSubtree = extracted;
             clipboardMode = "cut";
             this.plugin.store.mutate((s) => deleteGoal(s, node.id));
-            new import_obsidian2.Notice("Goal cut to clipboard");
+            new import_obsidian4.Notice("Goal cut to clipboard");
           }
         })
       );
@@ -516,7 +859,7 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
           if (extracted) {
             clipboardSubtree = extracted;
             clipboardMode = "copy";
-            new import_obsidian2.Notice("Goal copied to clipboard");
+            new import_obsidian4.Notice("Goal copied to clipboard");
           }
         })
       );
@@ -540,7 +883,7 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
         (item) => item.setTitle("Delete").setIcon("trash-2").onClick(() => {
           this.plugin.store.mutate((s) => deleteGoal(s, node.id));
           if (this.selectedId === node.id)
-            this.selectedId = null;
+            this.select(null);
         })
       );
     }
@@ -560,53 +903,11 @@ var RadialGoalMapView = class extends import_obsidian2.ItemView {
     return null;
   }
 };
-function promptInput(app, title, initial) {
-  return new Promise((resolve) => {
-    const modal = new PromptModal(app, title, initial, resolve);
-    modal.open();
-  });
-}
-var PromptModal = class extends import_obsidian2.Modal {
-  constructor(app, titleText, initial, onSubmit) {
-    super(app);
-    this.titleText = titleText;
-    this.initial = initial;
-    this.onSubmit = onSubmit;
-    this.value = "";
-    this.value = initial;
-  }
-  onOpen() {
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.createEl("h3", { text: this.titleText });
-    new import_obsidian2.Setting(contentEl).setName("Value").addText((text) => {
-      text.setValue(this.initial);
-      text.inputEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          this.close();
-          this.onSubmit(this.value);
-        }
-      });
-      text.onChange((v) => this.value = v);
-    });
-    new import_obsidian2.Setting(contentEl).addButton(
-      (btn) => btn.setButtonText("Confirm").onClick(() => {
-        this.close();
-        this.onSubmit(this.value);
-      })
-    ).addButton(
-      (btn) => btn.setButtonText("Cancel").onClick(() => {
-        this.close();
-        this.onSubmit(null);
-      })
-    );
-  }
-  onClose() {
-    this.contentEl.empty();
-  }
-};
+var FULL_CIRCLE_EPSILON = 1e-4;
 function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
+  if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
+    endAngle = startAngle + Math.PI * 2 - FULL_CIRCLE_EPSILON;
+  }
   const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
   const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
   if (rInner <= 0) {
@@ -627,7 +928,7 @@ function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
 }
 
 // src/main.ts
-var GoalscapePlugin = class extends import_obsidian3.Plugin {
+var GoalscapePlugin = class extends import_obsidian5.Plugin {
   async onload() {
     this.store = new GoalTreeStore(this, DEFAULT_GOALSCAPE_PATH);
     await this.store.load();
@@ -646,7 +947,7 @@ var GoalscapePlugin = class extends import_obsidian3.Plugin {
       callback: () => {
         var _a, _b;
         this.openView(VIEW_RADIAL);
-        new import_obsidian3.Notice(`Goalscape: using ${(_b = (_a = this.store.file) == null ? void 0 : _a.path) != null ? _b : DEFAULT_GOALSCAPE_PATH}`);
+        new import_obsidian5.Notice(`Goalscape: using ${(_b = (_a = this.store.file) == null ? void 0 : _a.path) != null ? _b : DEFAULT_GOALSCAPE_PATH}`);
       }
     });
     this.addCommand({
@@ -677,7 +978,7 @@ var GoalscapePlugin = class extends import_obsidian3.Plugin {
   async openSourceFile() {
     const file = this.store.file;
     if (!file) {
-      new import_obsidian3.Notice("Goalscape source file not found");
+      new import_obsidian5.Notice("Goalscape source file not found");
       return;
     }
     const leaf = this.app.workspace.getLeaf("tab");
