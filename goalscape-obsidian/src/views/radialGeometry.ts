@@ -22,6 +22,12 @@ export const MAX_R = VIEW_SIZE / 2 - 20;
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
+/** 未手工设色相时的默认色相来源（插件原来的进度绿）；纯灰配色也借用它的色相 */
+const DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
+/** 进度 → 饱和度的取值区间：0% 进度 50%（发灰），100% 进度 100%（纯色） */
+const SATURATION_MIN = 50;
+const SATURATION_SPAN = 50;
+
 /** 环带厚度的四档（面板上从左到右：极薄/薄/标准/厚）；未设 bandScale 的节点用"标准"档。
  *  标准档刻意等于旧版"等宽环"的厚度，所以没调过的图看起来和以前一致；厚档只加 30%，
  *  再加就挤占可读面积、实际用不上 */
@@ -235,13 +241,14 @@ function hslToHex(h: number, s: number, l: number): string {
  * 进度 → 饱和度：0% 进度 50%（发灰、看着就"没做成"），100% 进度 100%（纯色）。
  * 这是**所有**扇区统一的表达，不再区分"设过色"和"没设色"。
  */
-export function progressSaturation(progress: number): number {
+function progressSaturation(progress: number): number {
   const p = Math.max(0, Math.min(100, progress || 0));
   return SATURATION_MIN + SATURATION_SPAN * (p / 100);
 }
 
 /**
- * 扇区底色：色相取节点自己颜色的色相（没设色就用默认绿），**饱和度即进度**。
+ * 扇区底色：色相由所属分支决定（调用方传 branchColors 解析出来的那个色），
+ * **饱和度即进度**，明度承担环层区分 + 节点自己的 brightness 偏移。
  *
  * 旧实现是"没设色 → 按进度在红/橙/黄/绿四档里挑一档；设了色 → 进度完全不影响"，
  * 所以进度和颜色的关系只对默认那一条色带成立，手工配的颜色一律不随进度变。
@@ -250,13 +257,18 @@ export function progressSaturation(progress: number): number {
  *
  * 纯灰（色相无意义）时借用默认绿色相，否则灰底的进度就没地方显示了。
  */
-export function nodeColor(node: GoalNode, depth: number, siblingIndex = 0): string {
-  const base = hexToHsl(node.color || DEFAULT_SECTOR_HEX);
+export function nodeColor(
+  node: GoalNode,
+  depth: number,
+  branchColor: string,
+  siblingIndex = 0
+): string {
+  const base = hexToHsl(branchColor);
   const hue = base.s < 5 ? DEFAULT_SECTOR.h : base.h;
-  const light = Math.max(24, Math.min(76,
-    base.l + (depth === 0 ? -12 : Math.min(depth, 4) * 3 + (siblingIndex % 3) * 2)
-  ));
-  return hslToHex(hue, progressSaturation(node.progress ?? 0), light);
+  const offset = (node.brightness ?? 0) + (depth === 0
+    ? -12
+    : Math.min(depth, 4) * 3 + (siblingIndex % 3) * 2);
+  return hslToHex(hue, progressSaturation(node.progress ?? 0), Math.max(20, Math.min(82, base.l + offset)));
 }
 
 const FULL_CIRCLE_EPSILON = 1e-4;

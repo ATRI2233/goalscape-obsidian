@@ -3,7 +3,7 @@
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, flattenTree } from "../data/types";
+import { GoalNode, DEFAULT_BRANCH_COLOR, branchColors, flattenTree } from "../data/types";
 import { VIEW_GANTT } from "./viewTypes";
 import { createViewSwitcher } from "./viewSwitcher";
 
@@ -65,6 +65,7 @@ export class GanttView extends ItemView {
     const container = this.rootEl.createDiv({ cls: "goalscape-gantt-container" });
     const width = container.clientWidth || 800;
     const chartWidth = width - LABEL_WIDTH;
+    const hues = branchColors(scape.mainGoal);
 
     const header = container.createDiv({ cls: "goalscape-gantt-header" });
     header.style.paddingLeft = `${LABEL_WIDTH}px`;
@@ -99,7 +100,7 @@ export class GanttView extends ItemView {
       bar.style.left = `${left}px`;
       bar.style.width = `${barWidth}px`;
       bar.style.height = `${BAR_HEIGHT}px`;
-      bar.style.backgroundColor = this.colorFor(node);
+      bar.style.backgroundColor = hues.get(node.id) ?? DEFAULT_BRANCH_COLOR;
 
       const fill = bar.createDiv({ cls: "goalscape-gantt-fill" });
       fill.style.width = `${node.progress ?? 0}%`;
@@ -145,13 +146,6 @@ export class GanttView extends ItemView {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     });
-  }
-
-  private colorFor(node: GoalNode): string {
-    if (node.color) return node.color;
-    const stops = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
-    const p = node.progress ?? 0;
-    return stops[Math.min(3, Math.floor(p / 25))];
   }
 
   private getMonthTicks(min: number, max: number): Array<{ time: number; label: string }> {

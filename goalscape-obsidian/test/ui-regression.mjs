@@ -153,7 +153,8 @@ async function restore() {
   } catch (e) { notes.push(`还原活动标签失败：${e.message}`); }
 
   try { await ev(`app.changeTheme(${JSON.stringify(start.theme)})`); } catch { /* 主题还原失败无关紧要 */ }
-  try { await ev(`document.querySelectorAll('.notice,.menu').forEach(n=>n.remove())`); } catch { /* ignore */ }
+  // 程序化改滑杆会留下 Obsidian 的动态 tooltip（真鼠标一动就没了，但截图里是块残渣）
+  try { await ev(`document.querySelectorAll('.notice,.menu,.tooltip').forEach(n=>n.remove())`); } catch { /* ignore */ }
 
   const after = dirSnap();
   const added = Object.keys(after).filter((f) => !(f in start.files));
@@ -440,6 +441,8 @@ function toGoalNode(n) {
   return {
     id: `n-${n.title}`, title: n.title, importance: n.importance,
     ...(n.bandScale ? { bandScale: n.bandScale } : {}),
+    ...(n.color ? { color: n.color } : {}),
+    ...(n.progress !== undefined ? { progress: n.progress } : {}),
     tags: [], children: (n.children || []).map(toGoalNode),
   };
 }
@@ -547,6 +550,153 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
   await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
   await new Promise((r) => setTimeout(r, 500));
   info(`森林几何截图：${await shot("forest")}`);
+});
+
+/** 两条配色分支 + 一条没配色；叶子进度铺满 0/50/100，饱和度断言才有可比性 */
+const BRANCHES = {
+  title: "Root", importance: 100, children: [
+    { title: "Blue", importance: 60, color: "#38bdf8", children: [
+      { title: "B-done", importance: 30, progress: 100 },
+      { title: "B-zero", importance: 30, progress: 0 },
+      { title: "B-mid", importance: 30, children: [{ title: "B-mid-leaf", importance: 100, progress: 50 }] },
+    ] },
+    { title: "Pink", importance: 30, color: "#f472b6", children: [
+      { title: "P-leaf", importance: 100, progress: 20 },
+    ] },
+    { title: "Plain", importance: 10, children: [] },
+  ],
+};
+
+/** #rrggbb → {h,s,l}，与 radialGeometry 的 hexToHsl 同式；断言只比色相/饱和度/明度 */
+function hsl(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const [r, g, b] = [16, 8, 0].map((sh) => ((n >> sh) & 255) / 255);
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const d = max - min;
+  const l = ((max + min) / 2) * 100;
+  if (!d) return { h: 0, s: 0, l };
+  const s = (l > 50 ? d / (2 - max - min) : d / (max - min)) * 100;
+  const h = 60 * (max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4);
+  return { h, s, l };
+}
+/** 色相是个环：0 与 359 相差 1，不能直接相减比。容差 2 —— 扇区底色经过 hsl→hex→hsl 往返回来会漂 1° 上下 */
+const sameHue = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b)) < 2;
+/** 期望色相一律从"分支存的那个 hex"算出来，不写死数字：改 fixture 不会连带把断言写错 */
+const hueOf = (hex) => hsl(hex).h;
+const BLUE = hueOf(BRANCHES.children[0].color);
+const PINK = hueOf(BRANCHES.children[1].color);
+/** 面板色盘第一格（改色步骤点的就是它）与没配色分支的兜底色相 */
+const RED = hueOf("#f87171");
+const GREEN = hueOf("#4ade80");
+
+/** 读当前画布上每个扇区的 fill（色相断言都从这份快照算）；调用方自己 return fills */
+const FILLS = `const fills={};
+    for(const p of document.querySelectorAll('svg.goalscape-radial-svg path[data-id]'))
+      fills[p.getAttribute('data-id')]=p.getAttribute('fill');`;
+const hueMap = (f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, Math.round(hsl(v).h)]));
+
+step("color 分支统一色：色系只在二级、其余层级调明度", async () => {
+  await useTmpMap();
+
+  const painted = await json(`(async()=>{
+    ${PL}.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(BRANCHES))};});
+    await new Promise(r=>setTimeout(r,600));
+    ${FILLS}
+    return fills;})()`);
+  const H = (id) => hsl(painted[id]);
+  ok("分支里每一层都是二级存的那个色相",
+    ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"].every((id) => sameHue(H(id).h, BLUE)),
+    JSON.stringify(hueMap(painted)));
+  ok("隔壁分支与没配色的分支各自成色，中心盘用默认色相",
+    sameHue(H("n-Pink").h, PINK) && sameHue(H("n-P-leaf").h, PINK)
+      && sameHue(H("n-Plain").h, GREEN) && sameHue(H("n-Root").h, GREEN),
+    JSON.stringify(hueMap(painted)));
+  ok("进度只改饱和度：0% 最灰 50、100% 纯色 100、父级按汇总落在中间",
+    Math.abs(H("n-B-zero").s - 50) <= 2 && Math.abs(H("n-B-done").s - 100) <= 2
+      && Math.abs(H("n-B-mid").s - 75) <= 2 && sameHue(H("n-B-done").h, H("n-B-zero").h),
+    JSON.stringify({ zero: H("n-B-zero").s, done: H("n-B-done").s, mid: H("n-B-mid").s }));
+
+  const panelAt = (id) => json(`(async()=>{
+    const v=${PL}.radialViews()[0]; v.select(${JSON.stringify(id)});
+    await new Promise(r=>setTimeout(r,350));
+    const p=document.querySelector('.goalscape-panel');
+    return {title:p.querySelector('.goalscape-panel-title').textContent,
+      names:[...p.querySelectorAll('.setting-item-name')].map(e=>e.textContent.trim()),
+      swatches:p.querySelectorAll('.goalscape-color-swatches').length};})()`);
+  const hub = await panelAt("n-Root");
+  const branch = await panelAt("n-Blue");
+  const deep = await panelAt("n-B-mid");
+  ok("二级节点：有色系选择（取色器 + 色盘），没有明度滑杆",
+    branch.title === "Blue" && branch.names.includes("Branch color")
+      && !branch.names.includes("Brightness") && branch.swatches === 1,
+    JSON.stringify(branch));
+  ok("中心盘与三级往内：只有明度滑杆，色系入口已被它替换",
+    hub.names.includes("Brightness") && !hub.names.includes("Branch color") && hub.swatches === 0
+      && deep.names.includes("Brightness") && !deep.names.includes("Branch color") && deep.swatches === 0,
+    JSON.stringify({ hub: hub.names, deep: deep.names }));
+
+  const recolored = await json(`(async()=>{
+    const v=${PL}.radialViews()[0]; v.select('n-Blue');
+    await new Promise(r=>setTimeout(r,350));
+    document.querySelector('.goalscape-panel .goalscape-swatch[title="#f87171"]')
+      .dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    await new Promise(r=>setTimeout(r,600));
+    ${FILLS}
+    return fills;})()`);
+  ok("改二级节点一次，整条分支（含叶子）同一次渲染里一起变、别的分支不动",
+    ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"].every((id) => sameHue(hsl(recolored[id]).h, RED))
+      && sameHue(hsl(recolored["n-P-leaf"]).h, PINK),
+    JSON.stringify(hueMap(recolored)));
+
+  await json(`(async()=>{
+    const v=${PL}.radialViews()[0]; v.select('n-B-mid');
+    await new Promise(r=>setTimeout(r,350));
+    const row=[...document.querySelectorAll('.goalscape-panel .setting-item')]
+      .find(r=>r.querySelector('.setting-item-name')?.textContent.trim()==='Brightness');
+    const el=row.querySelector('input[type=range]');
+    el.value='-15';
+    el.dispatchEvent(new Event('input',{bubbles:true}));
+    el.dispatchEvent(new Event('change',{bubbles:true}));
+    await new Promise(r=>setTimeout(r,600));
+    // 程序化拖动留下的动态 tooltip 会一直悬在界面上，把后面的截图糊一块
+    document.querySelectorAll('.tooltip').forEach(t=>t.remove());
+    return 1;})()`);
+  const dimmed = await json(`(async()=>{
+    ${FILLS}
+    const row=[...document.querySelectorAll('.goalscape-panel .setting-item')]
+      .find(r=>r.querySelector('.setting-item-name')?.textContent.trim()==='Brightness');
+    let n=null; (function w(x){ if(x.id==='n-B-mid') n=x; x.children.forEach(w); })(${PL}.store.scape.mainGoal);
+    return {fills, slider:row.querySelector('input[type=range]').value, brightness:n.brightness};})()`);
+  ok("明度滑杆只压暗本节点：色相不变、明度降 15、子节点不受牵连",
+    dimmed.slider === "-15" && dimmed.brightness === -15
+      && Math.abs(hsl(dimmed.fills["n-B-mid"]).l - (hsl(recolored["n-B-mid"]).l - 15)) < 1.5
+      && Math.abs(hsl(dimmed.fills["n-B-mid-leaf"]).l - hsl(recolored["n-B-mid-leaf"]).l) < 1.5
+      && sameHue(hsl(dimmed.fills["n-B-mid"]).h, RED),
+    JSON.stringify({ slider: dimmed.slider, brightness: dimmed.brightness,
+      mid: Math.round(hsl(dimmed.fills["n-B-mid"]).l), leaf: Math.round(hsl(dimmed.fills["n-B-mid-leaf"]).l) }));
+
+  const rehomed = await json(`(async()=>{
+    ${PL}.store.mutate(s=>{
+      const blue=s.mainGoal.children.find(c=>c.id==='n-Blue');
+      const pink=s.mainGoal.children.find(c=>c.id==='n-Pink');
+      pink.children.push(blue.children.splice(blue.children.findIndex(c=>c.id==='n-B-mid'),1)[0]);
+    });
+    await new Promise(r=>setTimeout(r,600));
+    ${FILLS}
+    return fills;})()`);
+  ok("挪到别的分支下自动跟新分支的色相（旧色值根本不存在，无需同步）",
+    sameHue(hsl(rehomed["n-B-mid"]).h, PINK) && sameHue(hsl(rehomed["n-B-mid-leaf"]).h, PINK),
+    JSON.stringify(hueMap(rehomed)));
+
+  const onDisk = await json(`app.vault.adapter.read(${JSON.stringify(TMP_PATH)}).then(t=>JSON.parse(t))`);
+  const withColor = [];
+  (function walk(n, depth) {
+    if ("color" in n) withColor.push(`${n.id}@${depth}`);
+    n.children.forEach((c) => walk(c, depth + 1));
+  })(onDisk.mainGoal, 0);
+  ok("落盘的 JSON 里 color 只出现在二级节点（深层的死字段写盘前就清掉了）",
+    withColor.sort().join(",") === "n-Blue@1,n-Pink@1", withColor.join(","));
 });
 
 step("themes 暗/亮两主题截图", async () => {

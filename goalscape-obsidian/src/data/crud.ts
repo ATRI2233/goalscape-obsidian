@@ -132,16 +132,5 @@ export function extractSubtree(scape: GoalScape, id: string): GoalNode | null {
   return found ? cloneSubtree(found.node) : null;
 }
 
-/** 把节点当前的 color 应用到它的所有后代（含清空：color 未设时后代也会被清空）。 */
-export function applyColorToSubtree(scape: GoalScape, id: string): void {
-  const found = findNode(scape.mainGoal, id);
-  if (!found) return;
-  const color = found.node.color;
-  const walk = (n: GoalNode) => {
-    for (const c of n.children) {
-      c.color = color;
-      walk(c);
-    }
-  };
-  walk(found.node);
-}
+// 没有"把颜色应用到子树"这种操作：色相只存在二级节点，后代一律沿父链继承，
+// 复制一份到子节点上就又回到"父改了子没改"的双份状态。

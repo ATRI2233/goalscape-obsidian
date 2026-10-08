@@ -6,7 +6,7 @@
 
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, flattenTree } from "../data/types";
+import { GoalNode, DEFAULT_BRANCH_COLOR, branchColors, flattenTree } from "../data/types";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
@@ -159,6 +159,8 @@ export class RadialGoalMapView extends ItemView {
     // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
+    // 色相只有一个来源：沿父链解析一次，整条分支天然同色，父节点改色子节点不需要跟着改
+    const hues = branchColors(scape.mainGoal);
 
     const drawNode = (
       node: GoalNode,
@@ -176,7 +178,7 @@ export class RadialGoalMapView extends ItemView {
       this.nodePositions.set(node.id, shape);
 
       const edge = sectorEdges(shape);
-      const color = nodeColor(node, depth, siblingIndex);
+      const color = nodeColor(node, depth, hues.get(node.id) ?? DEFAULT_BRANCH_COLOR, siblingIndex);
       const ink = labelInk(color);
 
       const path = document.createElementNS(SVG_NS, "path");

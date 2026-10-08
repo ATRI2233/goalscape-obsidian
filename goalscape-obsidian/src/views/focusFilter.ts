@@ -4,7 +4,7 @@
 // 漏斗按钮上的小圆点表示"筛选正在生效"，条件本身都收在浮层里，工具栏只留一行。
 
 import { setIcon, setTooltip } from "obsidian";
-import { GoalNode, GoalScape, flattenTree } from "../data/types";
+import { GoalNode, GoalScape, branchColors, flattenTree } from "../data/types";
 
 export interface FilterCriteria {
   tag?: string;
@@ -23,18 +23,20 @@ function isCriteriaEmpty(c: FilterCriteria): boolean {
 /** 返回匹配到的节点 id；未启用任何条件时返回 null，表示全图正常渲染 */
 export function collectMatchingIds(scape: GoalScape, criteria: FilterCriteria): Set<string> | null {
   if (isCriteriaEmpty(criteria)) return null;
+  // 按颜色筛 = 按分支筛：色相只存在二级节点，深层节点要比的是它继承到的那个
+  const hues = criteria.color ? branchColors(scape.mainGoal) : null;
   const matching = new Set<string>();
   for (const node of flattenTree(scape.mainGoal)) {
-    if (matchesCriteria(node, criteria)) matching.add(node.id);
+    if (matchesCriteria(node, criteria, hues?.get(node.id))) matching.add(node.id);
   }
   return matching;
 }
 
-function matchesCriteria(node: GoalNode, c: FilterCriteria): boolean {
+function matchesCriteria(node: GoalNode, c: FilterCriteria, hue?: string): boolean {
   if (c.tag && !node.tags.some((t) => t.toLowerCase().includes(c.tag!.toLowerCase()))) return false;
   if (c.minProgress !== undefined && (node.progress ?? 0) < c.minProgress) return false;
   if (c.maxProgress !== undefined && (node.progress ?? 0) > c.maxProgress) return false;
-  if (c.color && node.color !== c.color) return false;
+  if (c.color && hue !== c.color) return false;
   if (c.dueBefore && node.due && node.due > c.dueBefore) return false;
   if (c.dueAfter && node.due && node.due < c.dueAfter) return false;
   return true;

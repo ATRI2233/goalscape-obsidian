@@ -40,11 +40,12 @@ function createGoalNode(partial) {
     title: partial.title,
     importance: (_b = partial.importance) != null ? _b : 50,
     bandScale: partial.bandScale,
+    color: partial.color,
+    brightness: partial.brightness,
     progress: partial.progress,
     due: partial.due,
     start: partial.start,
     tags: (_c = partial.tags) != null ? _c : [],
-    color: partial.color,
     notes: partial.notes,
     fields: partial.fields,
     collapsed: partial.collapsed,
@@ -79,6 +80,19 @@ function flattenTree(root) {
     n.children.forEach(walk);
   };
   walk(root);
+  return out;
+}
+var DEFAULT_BRANCH_COLOR = "#4ade80";
+var HUE_OWNER_DEPTH = 1;
+function branchColors(root) {
+  const out = /* @__PURE__ */ new Map();
+  const rec = (n, inherited, depth) => {
+    const color = depth === HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
+    out.set(n.id, color);
+    for (const c of n.children)
+      rec(c, color, depth + 1);
+  };
+  rec(root, DEFAULT_BRANCH_COLOR, 0);
   return out;
 }
 
@@ -192,16 +206,23 @@ var GoalTreeStore = class {
       new import_obsidian.Notice(`Goalscape: failed to parse ${this.path}, keeping in-memory copy`);
     }
   }
-  /** 补齐缺省字段，兼容手写/外部编辑的 JSON */
-  normalize(node) {
+  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于二级节点"这条规则落到数据上 */
+  normalize(node, depth = 0) {
     var _a, _b, _c, _d, _e, _f;
     (_b = node.id) != null ? _b : node.id = createGoalNode({ title: (_a = node.title) != null ? _a : "Untitled" }).id;
     (_c = node.title) != null ? _c : node.title = "Untitled";
     (_d = node.importance) != null ? _d : node.importance = 50;
     delete node.responsible;
+    if (depth !== HUE_OWNER_DEPTH)
+      delete node.color;
+    if (node.brightness === void 0 || !Number.isFinite(Number(node.brightness))) {
+      delete node.brightness;
+    } else {
+      node.brightness = Math.max(-20, Math.min(20, Math.round(Number(node.brightness))));
+    }
     (_e = node.tags) != null ? _e : node.tags = [];
     (_f = node.children) != null ? _f : node.children = [];
-    node.children.forEach((c) => this.normalize(c));
+    node.children.forEach((c) => this.normalize(c, depth + 1));
   }
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */
   registerExternalWatch() {
@@ -237,6 +258,7 @@ var GoalTreeStore = class {
   async writeScape() {
     if (!this.scape)
       return;
+    this.normalize(this.scape.mainGoal);
     const content = JSON.stringify(this.scape, null, 2);
     if (!content)
       return;
@@ -368,19 +390,6 @@ function extractSubtree(scape, id) {
   const found = findNode(scape.mainGoal, id);
   return found ? cloneSubtree(found.node) : null;
 }
-function applyColorToSubtree(scape, id) {
-  const found = findNode(scape.mainGoal, id);
-  if (!found)
-    return;
-  const color = found.node.color;
-  const walk = (n) => {
-    for (const c of n.children) {
-      c.color = color;
-      walk(c);
-    }
-  };
-  walk(found.node);
-}
 
 // src/views/radialGeometry.ts
 var SVG_NS = "http://www.w3.org/2000/svg";
@@ -388,8 +397,10 @@ var VIEW_SIZE = 1e3;
 var CX = VIEW_SIZE / 2;
 var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
-var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 var SECTOR_GAP_ARC = 7;
+var DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
+var SATURATION_MIN = 50;
+var SATURATION_SPAN = 50;
 var BAND_STEPS = [0.3, 0.6, 1, 1.3];
 var BAND_DEFAULT_INDEX = 2;
 var INK_LIGHT = "#ffffff";
@@ -507,27 +518,49 @@ function labelInk(sectorColor) {
   };
   return ratio(INK_DARK) > ratio(INK_LIGHT) ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" } : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
 }
-function shadeColor(hex, percent) {
+function hexToHsl(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
   if (!m)
-    return hex;
+    return { h: DEFAULT_SECTOR.h, s: DEFAULT_SECTOR.s, l: DEFAULT_SECTOR.l };
   const n = parseInt(m[1], 16);
-  const t = Math.max(-100, Math.min(100, percent)) / 100;
-  const target = t >= 0 ? 255 : 0;
-  const k = Math.abs(t);
-  const mix = (shift) => {
-    const c = n >> shift & 255;
-    return Math.round(c + (target - c) * k);
-  };
-  const r = mix(16), g = mix(8), b = mix(0);
-  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+  const r = (n >> 16 & 255) / 255;
+  const g = (n >> 8 & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0)
+    return { h: DEFAULT_SECTOR.h, s: 0, l: l * 100 };
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if (max === r)
+    h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g)
+    h = (b - r) / d + 2;
+  else
+    h = (r - g) / d + 4;
+  return { h: h * 60, s: s * 100, l: l * 100 };
 }
-function nodeColor(node, depth, siblingIndex = 0) {
-  var _a;
-  const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor(((_a = node.progress) != null ? _a : 0) / 25))];
-  if (depth === 0)
-    return shadeColor(base, -22);
-  return shadeColor(base, Math.min(depth, 4) * 9 + siblingIndex % 3 * 6);
+function hslToHex(h, s, l) {
+  const sn = Math.max(0, Math.min(100, s)) / 100;
+  const ln = Math.max(0, Math.min(100, l)) / 100;
+  const k = (n) => (n + h / 30) % 12;
+  const a = sn * Math.min(ln, 1 - ln);
+  const f = (n) => ln - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const to = (v) => Math.round(255 * v).toString(16).padStart(2, "0");
+  return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
+}
+function progressSaturation(progress) {
+  const p = Math.max(0, Math.min(100, progress || 0));
+  return SATURATION_MIN + SATURATION_SPAN * (p / 100);
+}
+function nodeColor(node, depth, branchColor, siblingIndex = 0) {
+  var _a, _b;
+  const base = hexToHsl(branchColor);
+  const hue = base.s < 5 ? DEFAULT_SECTOR.h : base.h;
+  const offset = ((_a = node.brightness) != null ? _a : 0) + (depth === 0 ? -12 : Math.min(depth, 4) * 3 + siblingIndex % 3 * 2);
+  return hslToHex(hue, progressSaturation((_b = node.progress) != null ? _b : 0), Math.max(20, Math.min(82, base.l + offset)));
 }
 var FULL_CIRCLE_EPSILON = 1e-4;
 function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
@@ -707,7 +740,7 @@ var InfoPanel = class {
     this.render(false);
   }
   render(force) {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d;
     if (this.interacting && !force)
       return;
     this.container.empty();
@@ -726,6 +759,7 @@ var InfoPanel = class {
     }
     const node = found.node;
     const isMain = !found.parent;
+    const isBranch = !isMain && found.parent.id === scape.mainGoal.id;
     const isLeaf = node.children.length === 0;
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
     new import_obsidian3.Setting(this.container).setName("Title").addText((text) => {
@@ -792,60 +826,20 @@ var InfoPanel = class {
         this.mutate((s) => this.patch(s, node.id, (n) => n.tags = list));
       });
     });
-    new import_obsidian3.Setting(this.container).setName("Color").setDesc("Empty = color by progress").addText((text) => {
-      var _a2;
-      text.inputEl.placeholder = "#4ade80";
-      text.setValue((_a2 = node.color) != null ? _a2 : "");
-      text.inputEl.addEventListener("blur", () => {
-        var _a3;
-        const norm = normalizeHex(text.getValue());
-        if (norm === null) {
-          new import_obsidian3.Notice("Color must be empty or a hex value like #4ade80");
-          text.setValue((_a3 = node.color) != null ? _a3 : "");
-          return;
-        }
-        const v = norm || void 0;
-        this.setColor(node, v);
-      });
-    }).addButton(
-      (btn) => btn.setButtonText("Apply to subgoals").setDisabled(!node.children.length).onClick(() => {
-        this.mutate((s) => applyColorToSubtree(s, node.id));
-      })
-    );
-    const swatches = this.container.createDiv({ cls: "goalscape-color-swatches" });
-    const picker = swatches.createEl("input", { cls: "goalscape-color-picker" });
-    picker.type = "color";
-    picker.title = "Custom color";
-    picker.value = (_c = node.color) != null ? _c : "#4ade80";
-    picker.addEventListener("change", () => {
-      this.setColor(node, normalizeHex(picker.value) || void 0);
-    });
-    const auto = swatches.createEl("button", {
-      cls: "goalscape-swatch goalscape-swatch-auto",
-      text: "Auto"
-    });
-    auto.title = "Color by progress";
-    if (!node.color)
-      auto.addClass("goalscape-swatch-active");
-    auto.addEventListener("click", () => this.setColor(node, void 0));
-    for (const hex of COLOR_PALETTE) {
-      const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
-      swatch.style.backgroundColor = hex;
-      swatch.title = hex;
-      if (node.color === hex)
-        swatch.addClass("goalscape-swatch-active");
-      swatch.addEventListener("click", () => this.setColor(node, hex));
-    }
+    if (isBranch)
+      this.addHueControls(node);
+    else
+      this.addBrightnessControl(node);
     this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
     const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
-    notesArea.value = (_d = node.notes) != null ? _d : "";
+    notesArea.value = (_c = node.notes) != null ? _c : "";
     notesArea.addEventListener("blur", () => {
       const v = notesArea.value;
       this.mutate((s) => this.patch(s, node.id, (n) => n.notes = v || void 0));
     });
     this.container.createEl("h4", { text: "Custom fields" });
     const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
-    const fields = (_e = node.fields) != null ? _e : {};
+    const fields = (_d = node.fields) != null ? _d : {};
     for (const [key, value] of Object.entries(fields)) {
       new import_obsidian3.Setting(fieldsContainer).setName(key).addText((text) => {
         text.setValue(value);
@@ -918,6 +912,72 @@ var InfoPanel = class {
       });
     });
   }
+  /**
+   * 色系选择只出现在二级节点：这一层存的值就是整条分支的颜色，
+   * 后代一律沿父链继承，所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
+   */
+  addHueControls(node) {
+    var _a;
+    new import_obsidian3.Setting(this.container).setName("Branch color").setDesc("Applies to this whole branch \xB7 Empty = default green").addText((text) => {
+      var _a2;
+      text.inputEl.placeholder = "#4ade80";
+      text.setValue((_a2 = node.color) != null ? _a2 : "");
+      text.inputEl.addEventListener("blur", () => {
+        var _a3;
+        const norm = normalizeHex(text.getValue());
+        if (norm === null) {
+          new import_obsidian3.Notice("Color must be empty or a hex value like #4ade80");
+          text.setValue((_a3 = node.color) != null ? _a3 : "");
+          return;
+        }
+        this.setColor(node, norm || void 0);
+      });
+    });
+    const swatches = this.container.createDiv({ cls: "goalscape-color-swatches" });
+    const picker = swatches.createEl("input", { cls: "goalscape-color-picker" });
+    picker.type = "color";
+    picker.title = "Custom color";
+    picker.value = (_a = node.color) != null ? _a : DEFAULT_BRANCH_COLOR;
+    picker.addEventListener("change", () => {
+      this.setColor(node, normalizeHex(picker.value) || void 0);
+    });
+    const auto = swatches.createEl("button", {
+      cls: "goalscape-swatch goalscape-swatch-auto",
+      text: "Auto"
+    });
+    auto.title = "Default hue; saturation shows progress";
+    if (!node.color)
+      auto.addClass("goalscape-swatch-active");
+    auto.addEventListener("click", () => this.setColor(node, void 0));
+    for (const hex of COLOR_PALETTE) {
+      const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
+      swatch.style.backgroundColor = hex;
+      swatch.title = hex;
+      if (node.color === hex)
+        swatch.addClass("goalscape-swatch-active");
+      swatch.addEventListener("click", () => this.setColor(node, hex));
+    }
+  }
+  /** 中心盘和三级往内不能选色系，这里换成明度偏移：0 即分支默认色 */
+  addBrightnessControl(node) {
+    new import_obsidian3.Setting(this.container).setName("Brightness").setDesc("Hue comes from its branch \xB7 0 = default, -20 darker, +20 lighter").addSlider((slider) => {
+      var _a;
+      slider.setLimits(-20, 20, 1);
+      slider.setValue((_a = node.brightness) != null ? _a : 0);
+      slider.setDynamicTooltip();
+      this.trackInteraction(slider.sliderEl);
+      slider.onChange((v) => {
+        this.mutate(
+          (s) => this.patch(s, node.id, (n) => {
+            if (v === 0)
+              delete n.brightness;
+            else
+              n.brightness = v;
+          })
+        );
+      });
+    });
+  }
   /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
   trackInteraction(el) {
     el.addEventListener("pointerdown", () => {
@@ -953,14 +1013,15 @@ function isCriteriaEmpty(c) {
 function collectMatchingIds(scape, criteria) {
   if (isCriteriaEmpty(criteria))
     return null;
+  const hues = criteria.color ? branchColors(scape.mainGoal) : null;
   const matching = /* @__PURE__ */ new Set();
   for (const node of flattenTree(scape.mainGoal)) {
-    if (matchesCriteria(node, criteria))
+    if (matchesCriteria(node, criteria, hues == null ? void 0 : hues.get(node.id)))
       matching.add(node.id);
   }
   return matching;
 }
-function matchesCriteria(node, c) {
+function matchesCriteria(node, c, hue) {
   var _a, _b;
   if (c.tag && !node.tags.some((t) => t.toLowerCase().includes(c.tag.toLowerCase())))
     return false;
@@ -968,7 +1029,7 @@ function matchesCriteria(node, c) {
     return false;
   if (c.maxProgress !== void 0 && ((_b = node.progress) != null ? _b : 0) > c.maxProgress)
     return false;
-  if (c.color && node.color !== c.color)
+  if (c.color && hue !== c.color)
     return false;
   if (c.dueBefore && node.due && node.due > c.dueBefore)
     return false;
@@ -1481,8 +1542,9 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.rootEl.appendChild(svg);
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
+    const hues = branchColors(scape.mainGoal);
     const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles, siblingIndex = 0) => {
-      var _a, _b, _c;
+      var _a, _b, _c, _d;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
@@ -1490,7 +1552,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       const shape = { rInner, rOuter, startAngle, endAngle, depth };
       this.nodePositions.set(node.id, shape);
       const edge = sectorEdges(shape);
-      const color = nodeColor(node, depth, siblingIndex);
+      const color = nodeColor(node, depth, (_a = hues.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR, siblingIndex);
       const ink = labelInk(color);
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("d", arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1));
@@ -1521,7 +1583,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         this.reparentDrag.start(e, node.id);
       });
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = `${node.title} \xB7 ${(_a = node.progress) != null ? _a : 0}%`;
+      tip.textContent = `${node.title} \xB7 ${(_b = node.progress) != null ? _b : 0}%`;
       path.appendChild(tip);
       svg.appendChild(path);
       const midAngle = (startAngle + endAngle) / 2;
@@ -1529,10 +1591,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_b = node.progress) != null ? _b : 0}%`;
+        pct.textContent = `${(_c = node.progress) != null ? _c : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_c = node.progress) != null ? _c : 0}%`);
+        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_d = node.progress) != null ? _d : 0}%`);
         if (text) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
@@ -1805,7 +1867,7 @@ var GanttView = class extends import_obsidian10.ItemView {
     this.contentEl.empty();
   }
   render() {
-    var _a, _b;
+    var _a, _b, _c;
     this.rootEl.empty();
     const scape = this.plugin.store.scape;
     if (!scape)
@@ -1831,6 +1893,7 @@ var GanttView = class extends import_obsidian10.ItemView {
     const container = this.rootEl.createDiv({ cls: "goalscape-gantt-container" });
     const width = container.clientWidth || 800;
     const chartWidth = width - LABEL_WIDTH;
+    const hues = branchColors(scape.mainGoal);
     const header = container.createDiv({ cls: "goalscape-gantt-header" });
     header.style.paddingLeft = `${LABEL_WIDTH}px`;
     const months = this.getMonthTicks(minTime, maxTime);
@@ -1858,11 +1921,11 @@ var GanttView = class extends import_obsidian10.ItemView {
       bar.style.left = `${left}px`;
       bar.style.width = `${barWidth}px`;
       bar.style.height = `${BAR_HEIGHT}px`;
-      bar.style.backgroundColor = this.colorFor(node);
+      bar.style.backgroundColor = (_a = hues.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR;
       const fill = bar.createDiv({ cls: "goalscape-gantt-fill" });
-      fill.style.width = `${(_a = node.progress) != null ? _a : 0}%`;
+      fill.style.width = `${(_b = node.progress) != null ? _b : 0}%`;
       const handle = bar.createDiv({ cls: "goalscape-gantt-handle" });
-      handle.style.left = `${(_b = node.progress) != null ? _b : 0}%`;
+      handle.style.left = `${(_c = node.progress) != null ? _c : 0}%`;
       this.attachProgressDrag(handle, bar, node);
     }
   }
@@ -1899,14 +1962,6 @@ var GanttView = class extends import_obsidian10.ItemView {
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     });
-  }
-  colorFor(node) {
-    var _a;
-    if (node.color)
-      return node.color;
-    const stops = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
-    const p = (_a = node.progress) != null ? _a : 0;
-    return stops[Math.min(3, Math.floor(p / 25))];
   }
   getMonthTicks(min, max) {
     const ticks = [];
@@ -2191,6 +2246,7 @@ async function exportPng(svgEl, scale = 2) {
 }
 function exportCsv(scape) {
   const rows = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
+  const hues = branchColors(scape.mainGoal);
   const walk = (node, depth, parentTitle) => {
     var _a, _b, _c, _d;
     rows.push([
@@ -2200,7 +2256,7 @@ function exportCsv(scape) {
       (_b = node.due) != null ? _b : "",
       (_c = node.start) != null ? _c : "",
       node.tags.join("; "),
-      (_d = node.color) != null ? _d : "",
+      (_d = hues.get(node.id)) != null ? _d : "",
       String(depth),
       parentTitle
     ]);

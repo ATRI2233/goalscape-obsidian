@@ -1,11 +1,12 @@
 // src/views/infoPanel.ts
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
-// Tags / Color / Notes / 自定义字段。所有改动统一走 store.mutate。
+// Tags / 色系（仅二级节点）或明度（其余层级）/ Notes / 自定义字段。
+// 所有改动统一走 store.mutate。
 
 import { Setting, Notice, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, GoalScape, findNode } from "../data/types";
-import { renameGoal, adjustImportance, applyColorToSubtree } from "../data/crud";
+import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode } from "../data/types";
+import { renameGoal, adjustImportance } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
 import { promptInput } from "./promptModal";
 
@@ -27,8 +28,8 @@ function splitCsv(raw: string): string[] {
 
 /**
  * 归一化成 #rrggbb，非色值返回 null。
- * 放射图的 shadeColor / luminance 都只解析 6 位，放行 #f0a 会让该子树
- * 静默失去环层提亮，并按"亮度 0"误选白字；带 alpha 的 8 位同样不被解析。
+ * 放射图的 hexToHsl / luminance 都只解析 6 位，放行 #f0a 会让这条分支
+ * 静默退回默认色相，并按"亮度 0"误选字色；带 alpha 的 8 位同样不被解析。
  */
 function normalizeHex(raw: string): string | null {
   const v = raw.trim();
@@ -77,6 +78,8 @@ export class InfoPanel {
     }
     const node = found.node;
     const isMain = !found.parent;
+    // 二级节点 = 中心盘外那一圈，也是整棵树里唯一能选色系的层级
+    const isBranch = !isMain && found.parent!.id === scape.mainGoal.id;
     const isLeaf = node.children.length === 0;
 
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
@@ -159,58 +162,8 @@ export class InfoPanel {
         });
       });
 
-    new Setting(this.container)
-      .setName("Color")
-      .setDesc("Empty = color by progress")
-      .addText((text) => {
-        text.inputEl.placeholder = "#4ade80";
-        text.setValue(node.color ?? "");
-        text.inputEl.addEventListener("blur", () => {
-          const norm = normalizeHex(text.getValue());
-          if (norm === null) {
-            new Notice("Color must be empty or a hex value like #4ade80");
-            text.setValue(node.color ?? "");
-            return;
-          }
-          const v = norm || undefined;
-          this.setColor(node, v);
-        });
-      })
-      .addButton((btn) =>
-        btn
-          .setButtonText("Apply to subgoals")
-          .setDisabled(!node.children.length)
-          .onClick(() => {
-            this.mutate((s) => applyColorToSubtree(s, node.id));
-          })
-      );
-
-    const swatches = this.container.createDiv({ cls: "goalscape-color-swatches" });
-
-    const picker = swatches.createEl("input", { cls: "goalscape-color-picker" });
-    picker.type = "color";
-    picker.title = "Custom color";
-    picker.value = node.color ?? "#4ade80";
-    // 只接 change：系统取色面板的 input 事件会随拖动连发，每帧都落盘并重建整个面板
-    picker.addEventListener("change", () => {
-      this.setColor(node, normalizeHex(picker.value) || undefined);
-    });
-
-    const auto = swatches.createEl("button", {
-      cls: "goalscape-swatch goalscape-swatch-auto",
-      text: "Auto",
-    });
-    auto.title = "Color by progress";
-    if (!node.color) auto.addClass("goalscape-swatch-active");
-    auto.addEventListener("click", () => this.setColor(node, undefined));
-
-    for (const hex of COLOR_PALETTE) {
-      const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
-      swatch.style.backgroundColor = hex;
-      swatch.title = hex;
-      if (node.color === hex) swatch.addClass("goalscape-swatch-active");
-      swatch.addEventListener("click", () => this.setColor(node, hex));
-    }
+    if (isBranch) this.addHueControls(node);
+    else this.addBrightnessControl(node);
 
     this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
     const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
@@ -298,6 +251,77 @@ export class InfoPanel {
         });
       });
     });
+  }
+
+  /**
+   * 色系选择只出现在二级节点：这一层存的值就是整条分支的颜色，
+   * 后代一律沿父链继承，所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
+   */
+  private addHueControls(node: GoalNode): void {
+    new Setting(this.container)
+      .setName("Branch color")
+      .setDesc("Applies to this whole branch · Empty = default green")
+      .addText((text) => {
+        text.inputEl.placeholder = "#4ade80";
+        text.setValue(node.color ?? "");
+        text.inputEl.addEventListener("blur", () => {
+          const norm = normalizeHex(text.getValue());
+          if (norm === null) {
+            new Notice("Color must be empty or a hex value like #4ade80");
+            text.setValue(node.color ?? "");
+            return;
+          }
+          this.setColor(node, norm || undefined);
+        });
+      });
+
+    const swatches = this.container.createDiv({ cls: "goalscape-color-swatches" });
+
+    const picker = swatches.createEl("input", { cls: "goalscape-color-picker" });
+    picker.type = "color";
+    picker.title = "Custom color";
+    picker.value = node.color ?? DEFAULT_BRANCH_COLOR;
+    // 只接 change：系统取色面板的 input 事件会随拖动连发，每帧都落盘并重建整个面板
+    picker.addEventListener("change", () => {
+      this.setColor(node, normalizeHex(picker.value) || undefined);
+    });
+
+    const auto = swatches.createEl("button", {
+      cls: "goalscape-swatch goalscape-swatch-auto",
+      text: "Auto",
+    });
+    auto.title = "Default hue; saturation shows progress";
+    if (!node.color) auto.addClass("goalscape-swatch-active");
+    auto.addEventListener("click", () => this.setColor(node, undefined));
+
+    for (const hex of COLOR_PALETTE) {
+      const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
+      swatch.style.backgroundColor = hex;
+      swatch.title = hex;
+      if (node.color === hex) swatch.addClass("goalscape-swatch-active");
+      swatch.addEventListener("click", () => this.setColor(node, hex));
+    }
+  }
+
+  /** 中心盘和三级往内不能选色系，这里换成明度偏移：0 即分支默认色 */
+  private addBrightnessControl(node: GoalNode): void {
+    new Setting(this.container)
+      .setName("Brightness")
+      .setDesc("Hue comes from its branch · 0 = default, -20 darker, +20 lighter")
+      .addSlider((slider) => {
+        slider.setLimits(-20, 20, 1);
+        slider.setValue(node.brightness ?? 0);
+        slider.setDynamicTooltip();
+        this.trackInteraction(slider.sliderEl);
+        slider.onChange((v) => {
+          this.mutate((s) =>
+            this.patch(s, node.id, (n) => {
+              if (v === 0) delete n.brightness;
+              else n.brightness = v;
+            })
+          );
+        });
+      });
   }
 
   /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */

@@ -88,6 +88,36 @@ describe("load / 建档", () => {
     assert.equal("responsible" in kid, false);
   });
 
+  it("色相只属于二级节点：根与深层残留的旧 color 读档即清，brightness 收进 ±20", async () => {
+    const { store } = createEnvironment({
+      [PATH]: json({
+        id: "root",
+        title: "Manual",
+        importance: 100,
+        color: "#0000ff",
+        brightness: 3,
+        children: [
+          {
+            id: "b",
+            title: "Branch",
+            importance: 50,
+            color: "#f87171",
+            children: [{ id: "d", title: "Deep", importance: 50, color: "#00ff00", brightness: -90 }],
+          },
+        ],
+      }),
+    });
+    await store.load();
+
+    const root = store.scape.mainGoal;
+    const branch = root.children[0];
+    assert.equal("color" in root, false, "根不持有分支色相");
+    assert.equal(branch.color, "#f87171", "二级节点的原值保留");
+    assert.equal("color" in branch.children[0], false, "深层的旧色值清掉，免得留下图上不生效的死字段");
+    assert.equal(root.brightness, 3);
+    assert.equal(branch.children[0].brightness, -20, "越界值夹到边界");
+  });
+
   it("拒绝解析 version 不为 1 的文件，保留内存副本", async (t) => {
     const { vault, store } = createEnvironment({ [PATH]: scapeJson("Good") });
     await store.load();
@@ -162,6 +192,27 @@ describe("落盘安全", () => {
     assert.equal(store.scape.mainGoal.progress, 80, "汇总发生在落盘之前");
     const written = JSON.parse(vault.contents.get(PATH) ?? "") as GoalScape;
     assert.equal(written.mainGoal.progress, 80);
+  });
+
+  it("落盘前同样按层级清理色相：粘贴到深层的 color 进不了文件", async () => {
+    const { vault, store } = createEnvironment({
+      [PATH]: json({
+        id: "root",
+        title: "R",
+        importance: 100,
+        children: [{ id: "b", title: "B", importance: 50, color: "#38bdf8", children: [] }],
+      }),
+    });
+    await store.load();
+
+    store.mutate((s) => {
+      s.mainGoal.children[0].children.push(createGoalNode({ id: "d", title: "D", color: "#00ff00" }));
+    });
+    await flush();
+
+    const written = JSON.parse(vault.contents.get(PATH) ?? "") as GoalScape;
+    assert.equal(written.mainGoal.children[0].color, "#38bdf8", "二级节点的色相照常落盘");
+    assert.equal("color" in written.mainGoal.children[0].children[0], false, "深层的死字段不写回磁盘");
   });
 });
 

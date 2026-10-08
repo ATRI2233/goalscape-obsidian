@@ -465,7 +465,7 @@
   padding: 4px 0;
 }
 
-/* Color 字段下方的色盘：原生取色器 + 预设色块 + Auto */
+/* 色系选择（只有二级节点出现）下方的色盘：原生取色器 + 预设色块 + Auto */
 .goalscape-color-swatches {
   display: flex;
   flex-wrap: wrap;

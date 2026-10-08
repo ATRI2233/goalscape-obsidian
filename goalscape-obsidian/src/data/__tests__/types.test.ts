@@ -1,8 +1,8 @@
-// src/data/types.ts 的契约：节点默认值、id 唯一性、树遍历工具。
+// src/data/types.ts 的契约：节点默认值、id 唯一性、树遍历工具、分支色相的唯一来源。
 
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
-import { createGoalNode, findNode, flattenTree, generateId } from "../types";
+import { DEFAULT_BRANCH_COLOR, branchColors, createGoalNode, findNode, flattenTree, generateId } from "../types";
 import type { GoalNode } from "../types";
 
 describe("createGoalNode", () => {
@@ -89,5 +89,63 @@ describe("flattenTree", () => {
     const t = tree();
     t.children[0].collapsed = true;
     assert.equal(flattenTree(t).length, 4);
+  });
+});
+
+describe("branchColors", () => {
+  /** root → health(#f87171) → run；career 未配色 */
+  function colored(): GoalNode {
+    return createGoalNode({
+      id: "root",
+      title: "Main Goal",
+      color: "#0000ff",
+      children: [
+        createGoalNode({
+          id: "health",
+          title: "Health",
+          color: "#f87171",
+          children: [
+            createGoalNode({
+              id: "run",
+              title: "Run 5k",
+              color: "#00ff00",
+              children: [createGoalNode({ id: "shoes", title: "Buy shoes" })],
+            }),
+          ],
+        }),
+        createGoalNode({ id: "career", title: "Career" }),
+      ],
+    });
+  }
+
+  it("只有二级节点的值生效，整条分支共用它", () => {
+    const hues = branchColors(colored());
+    assert.equal(hues.get("health"), "#f87171");
+    assert.equal(hues.get("run"), "#f87171", "三级继承二级，即使自己存了别的颜色");
+    assert.equal(hues.get("shoes"), "#f87171", "继承一直传到叶子");
+  });
+
+  it("根和没配色的分支用默认色", () => {
+    const hues = branchColors(colored());
+    assert.equal(hues.get("root"), DEFAULT_BRANCH_COLOR, "根不持有也不需要色相");
+    assert.equal(hues.get("career"), DEFAULT_BRANCH_COLOR);
+  });
+
+  it("改二级节点即改整条分支，不存在父子不一致的状态", () => {
+    const t = colored();
+    const before = branchColors(t).get("shoes");
+    t.children[0].color = "#38bdf8";
+    assert.equal(branchColors(t).get("shoes"), "#38bdf8");
+    assert.notEqual(before, "#38bdf8");
+  });
+
+  it("换父级后跟着新分支走", () => {
+    const t = colored();
+    const run = findNode(t, "run")!;
+    run.parent!.children.splice(run.parent!.children.indexOf(run.node), 1);
+    t.children[1].children.push(run.node);
+    const hues = branchColors(t);
+    assert.equal(hues.get("run"), DEFAULT_BRANCH_COLOR, "挪进未配色的分支后不再带旧色相");
+    assert.equal(hues.get("shoes"), DEFAULT_BRANCH_COLOR);
   });
 });

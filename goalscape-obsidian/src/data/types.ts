@@ -6,11 +6,17 @@ export interface GoalNode {
   title: string;
   importance: number; // 占父扇区角度的百分比 0-100；兄弟之和可 <100（留白）或 >100（渲染时整体缩回）
   bandScale?: number; // 本节点环带厚度倍数，未设即默认档；每棵树各层独立，所以层与层可以不对齐
+  /**
+   * 整条分支的色相，**只有二级节点（根的直接子节点）持有**。
+   * 根与更深层一律不存这个字段（读档时清掉），颜色一律由 branchColors 沿父链解析 ——
+   * 存两份就会有"父改了子没改"和"父子色系不一致"，不存就没有这两个状态。
+   */
+  color?: string;
+  brightness?: number; // 明度偏移 -20..20，未设即 0（默认）；任何节点都能调，自动的环层区分仍叠加在上面
   progress?: number; // 0-100，仅叶子节点手工填写；父级由引擎计算
   due?: string; // ISO date
   start?: string; // Gantt 用
   tags: string[]; // 含 "Now"/"Next" 等
-  color?: string; // 用户手动色，未设则按进度渲染
   notes?: string; // Markdown
   fields?: Record<string, string>; // 自定义字段
   collapsed?: boolean;
@@ -29,11 +35,12 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     title: partial.title,
     importance: partial.importance ?? 50,
     bandScale: partial.bandScale,
+    color: partial.color,
+    brightness: partial.brightness,
     progress: partial.progress,
     due: partial.due,
     start: partial.start,
     tags: partial.tags ?? [],
-    color: partial.color,
     notes: partial.notes,
     fields: partial.fields,
     collapsed: partial.collapsed,
@@ -75,5 +82,27 @@ export function flattenTree(root: GoalNode): GoalNode[] {
     n.children.forEach(walk);
   };
   walk(root);
+  return out;
+}
+
+/** 没设色相时的分支底色（插件的进度绿）；中心大盘也用这个色相，它不参与色系选择 */
+export const DEFAULT_BRANCH_COLOR = "#4ade80";
+/** 二级节点 = 根的直接子节点。整棵树里只有这一层持有 color */
+export const HUE_OWNER_DEPTH = 1;
+
+/**
+ * 沿父链解析每个节点实际使用的色相，一次遍历出全图。
+ * 放射图 / Gantt / CSV / Focus Filter 都从这里取 —— 颜色只有一个来源，
+ * 所以"父改色子没改""父子色系不一致"这两个状态在数据里根本不存在。
+ * 深层节点继承所属的一级分支；把节点拖到别的分支下，颜色自动跟着新分支走。
+ */
+export function branchColors(root: GoalNode): Map<string, string> {
+  const out = new Map<string, string>();
+  const rec = (n: GoalNode, inherited: string, depth: number) => {
+    const color = depth === HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
+    out.set(n.id, color);
+    for (const c of n.children) rec(c, color, depth + 1);
+  };
+  rec(root, DEFAULT_BRANCH_COLOR, 0);
   return out;
 }

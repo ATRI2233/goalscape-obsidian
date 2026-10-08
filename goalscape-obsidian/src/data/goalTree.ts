@@ -3,7 +3,7 @@
 // 确保自动汇总 + 持久化 + 通知所有订阅视图重渲染。
 
 import { TFile, Plugin, Notice } from "obsidian";
-import { GoalScape, GoalNode, createGoalNode } from "./types";
+import { GoalScape, GoalNode, createGoalNode, HUE_OWNER_DEPTH } from "./types";
 import { recalcTree } from "./rollup";
 
 /** vault 里存放 goalscape 文件的目录与扩展名，多处按它筛选/建档，只在这一处定义 */
@@ -109,15 +109,23 @@ export class GoalTreeStore {
     }
   }
 
-  /** 补齐缺省字段，兼容手写/外部编辑的 JSON */
-  private normalize(node: GoalNode): void {
+  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于二级节点"这条规则落到数据上 */
+  private normalize(node: GoalNode, depth = 0): void {
     node.id ??= createGoalNode({ title: node.title ?? "Untitled" }).id;
     node.title ??= "Untitled";
     node.importance ??= 50;
     delete (node as LegacyNode).responsible;
+    // 旧数据里根和深层节点可能存过 color：读档时一律清掉。
+    // 留着就是"文件里有值、图上不生效"的第三种状态，也正是父子颜色不同步的来源
+    if (depth !== HUE_OWNER_DEPTH) delete node.color;
+    if (node.brightness === undefined || !Number.isFinite(Number(node.brightness))) {
+      delete node.brightness;
+    } else {
+      node.brightness = Math.max(-20, Math.min(20, Math.round(Number(node.brightness))));
+    }
     node.tags ??= [];
     node.children ??= [];
-    node.children.forEach((c) => this.normalize(c));
+    node.children.forEach((c) => this.normalize(c, depth + 1));
   }
 
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */
@@ -150,6 +158,9 @@ export class GoalTreeStore {
   /** 统一落盘入口：绝不写空内容，避免把 goalscape 文件截断成 0 字节造成数据丢失 */
   private async writeScape(): Promise<void> {
     if (!this.scape) return;
+    // 落盘前再走一次规则：复制粘贴等路径可能把 color 带到深层节点上，
+    // 那种值图上不生效、却会留在文件里，是"父子颜色不一致"的第三种状态
+    this.normalize(this.scape.mainGoal);
     const content = JSON.stringify(this.scape, null, 2);
     if (!content) return;
     this.writing = true;

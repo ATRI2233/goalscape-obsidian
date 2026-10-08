@@ -1,12 +1,12 @@
 // src/data/crud.ts 的契约。这里锁住的都是 PROGRESS.md 记录过的真实回归点：
-// 剪贴板必须是深拷贝、跨父级移动后权重要重新归一化、禁止将节点挂进自己的后代。
+// 剪贴板必须是深拷贝、禁止将节点挂进自己的后代、importance 是"占父级角度的绝对比例"
+// （跨父级移动不重新归一化，兄弟和允许 ≠100，留白与溢出交给渲染层）。
 
 import { describe, it, beforeEach } from "node:test";
 import * as assert from "node:assert/strict";
 import {
   addGoal,
   adjustImportance,
-  applyColorToSubtree,
   deleteGoal,
   extractSubtree,
   moveGoal,
@@ -326,27 +326,5 @@ describe("extractSubtree / pasteSubtree", () => {
     const before = ids(scape).length;
     assert.equal(pasteSubtree(scape, "ghost", "child", clip), clip.id);
     assert.equal(ids(scape).length, before);
-  });
-});
-
-describe("applyColorToSubtree", () => {
-  it("只影响后代，不动自己和旁支", () => {
-    node(scape, "health").color = "#ff0000";
-    applyColorToSubtree(scape, "health");
-    assert.equal(node(scape, "health").color, "#ff0000", "自身保持原值");
-    assert.equal(node(scape, "h1").color, "#ff0000");
-    assert.equal(node(scape, "h1a").color, "#ff0000");
-    assert.equal(node(scape, "h2").color, "#ff0000");
-    assert.equal(node(scape, "c1").color, undefined);
-  });
-
-  it("自身没设色时等于清空整支手配色", () => {
-    applyColorToSubtree(scape, "health");
-    assert.equal(node(scape, "h1a").color, undefined);
-    assert.equal(node(scape, "h1").color, undefined);
-  });
-
-  it("不存在的 id 不抛错", () => {
-    assert.doesNotThrow(() => applyColorToSubtree(scape, "ghost"));
   });
 });
