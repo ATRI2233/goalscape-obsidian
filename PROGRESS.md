@@ -197,6 +197,47 @@
   （实测出现过 4 个 radial leaf，其中一个是 `view.select` 都不存在的未初始化 leaf），
   于是"面板没刷新"其实是选中了那个空 leaf。收尾必须 detach 多余标签并清掉选中态。
 
+### 真实 bug：信息面板每次重建都泄漏一个 window 监听（已修，实测）
+- `trackInteraction()` 原先无条件 `window.addEventListener("pointerup", end)` —— 监听不是随拖拽建立、
+  随释放拆除，而是**每 render 一次就常驻一个**。面板每改一个值就 mutate → notify → 重建，于是监听单调增长，
+  之后在应用里点**任何地方**都会触发 N 次"重建整个面板"，表现就是滚动位置被弹回顶部、输入焦点丢失。
+- 修法：`pointerdown` 里才挂 `pointerup`，`end` 里先 `removeEventListener` 再重绘。
+- 实测（`D:/tmp/panel.mjs`，用 CDP 调 `DOMDebugger.getEventListeners` 数 window 上的 pointerup）：
+  基线 0 个 / 强制重建 15 次后仍 0 个 / 拖完滑杆释放后 0 个；滑杆 40→70 正常落盘（`stored:70`）。
+
+### 真实缺陷：Color 字段不校验，非法色值让扇区"看不见"（已修，守卫实测通过）
+- 面板可以填任意字符串，`node.color` 直接进 `colorFor()`；`shadeColor` 解析失败就原样返回，
+  于是 `red`、`#12345` 之类会作为非法 SVG paint 值传给 `fill`，扇区退回默认渲染（暗色主题下几乎不可见），
+  而用户完全不知道是哪一步坏的。
+- 修法（`infoPanel.ts`）：新增纯函数 `normalizeHex()` + blur 时校验；非法则 Notice 并把输入框回滚成
+  该节点当前真实色，**不落 store**。
+- **自我踩坑**：第一版正则写成放行 `{3}|{6}|{8}` 位，看着更宽容，其实 3 位缩写会让 shadeColor 原样返回
+  （整棵子树失去环层提亮），且 `luminance()` 解析失败返回 0 → `labelInk` 误选白字，
+  实测 `#f0a` 上白字对比度只有约 3.2:1（深字本可达 6.6:1）；8 位带 alpha 同样不被解析。
+  现在统一**归一化成 `#rrggbb` 再落盘**（`#f0a→#ff00aa`、`abc→#aabbcc`、允许省 `#`、大小写归一），
+  3/6 位之外的值一律拒绝；并加 `if (v === node.color) return;` 避免等价输入也触发落盘+全量重绘。
+- 实测：
+  - 真值表（`D:/tmp/hexcheck.mjs`，纯函数离线穷举）：`""`/`"   "`→清空、`#4ade80`/`#ABC123`/`4ade80`→`#4ade80`/`#abc123`、
+    `#f0a`/`#F0A`/`abc`→`#ff00aa`/`#ff00aa`/`#aabbcc`，`#4ade801`/`#4ade80ff`/`green`/`#12345`/`#1234567`/`rgb(1,2,3)`→全部 null。
+  - 应用内（`D:/tmp/color.mjs`、`D:/tmp/color2.mjs`，临时图 ZZ_C / ZZ_D）：非法值 → store 保持上一个合法色、
+    输入框回滚成 `#f0a`、Notice 文案正确；合法值 → 静默生效、扇区 computed fill 变为该色经环层提亮后的
+    `rgb(90,225,139)`；清空 → `color` 变 undefined、回到按进度着色。两张临时图已删，
+    `life.goalscape.json` 前后都是 732 字节。
+    注意坑：Obsidian Notice 默认存活约 4 秒，连续断言时必须先 `document.querySelectorAll('.notice').forEach(n=>n.remove())`，
+    否则上一条的残留会被读成"合法值也报错"。
+- **待办（重要）**：应用内那次实测跑的是**归一化之前**的 main.js。`normalizeHex` 目前只有离线真值表 +
+  `tsc -noEmit` 干净，尚未在真实面板里跑过。仓库里的 `main.js` 也未重新构建 —— 因为另一个 agent 正在把
+  `radialView.ts` 拆成 `radialGeometry.ts`/`radialMenu.ts`/`radialDrag.ts` 并改 `focusFilter.ts`，
+  现在构建会把他们未验收的 WIP 一起打进产物。等拆分落地验收后：重建 → 部署 → 重跑 `color2.mjs`
+  确认 `#f0a` 存成 `#ff00aa` 且扇区仍按环层提亮。
+
+### 数据层复核：`goalTree.ts` 无需改动
+- 逐条读过：`writeScape()` 的双空值拦截、`readFromPath()` 拒空文件、`adapter` 按路径读写绕开索引竞态、
+  `writing` 标记 500ms 后释放（`adapter.write` 触发的 modify 是异步的）、`switchTo()` 清理挂起 reload 计时器 —— 都对。
+- 唯一瑕疵是解析失败时 Notice 文案写 "keeping in-memory copy"，而首次加载失败时内存里并没有副本；
+  这是**故意保守**的：`scape` 保持旧值/undefined 时 `mutate()` 会直接 no-op，不会用空数据覆盖磁盘，
+  所以只属于措辞不够精确，不改行为。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
@@ -205,15 +246,19 @@
 - ~~放射图视觉重做只在暗色主题下截过图~~ 已补：亮色主题下标签、环间隙、导出底色均已复核（见上两节）。
 - ~~亮色主题下 List 视图已截图复核（正常）；Gantt 只看到空态（life 图没有日期），有排期的甘特条在亮色下的配色未验证；右侧信息面板亮色也未截图复核。~~
   已补验，见"亮色主题复核"一节。
+- `normalizeHex`（3 位缩写归一化）**未在真实面板里跑过**：只过了离线真值表和 `tsc -noEmit`。
+  仓库 `main.js` 也还没重建（另一 agent 正在拆 radialView，见 Color 那节的"待办"）。
 
 ## 后续计划（按优先级）
 
 1. ~~端到端交互验证~~ 已完成（见上），放射图/三视图/CRUD/拖拽/导出/模板全部实测通过。
 2. ~~用户反馈的 5 个 UX 问题~~ 已完成（见上），并顺带修掉启动失败与 0 字节截断两个真实 bug。
-3. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
-4. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
-5. ~~建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后~~ 已做：读档放在
+3. **等 radialView 拆分验收后**：`npm run build` → `install-plugin.bat` → 重跑 `D:/tmp/color2.mjs`
+   与 `D:/tmp/panel.mjs`，确认 `#f0a` 落盘为 `#ff00aa` 且扇区仍按环层提亮、window 监听仍为 0。
+4. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
+5. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
+6. ~~建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后~~ 已做：读档放在
    视图/命令注册之后，数据出问题只影响图的内容，不再连带让标签页退化成"插件不再活动"占位页。
-6. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
+7. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
    Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
-7. ~~可选：亮色主题下补验 Gantt 条形与信息面板配色~~ 已完成（见"亮色主题复核"），顺带修掉 Gantt 父级条形的假进度。
+8. ~~可选：亮色主题下补验 Gantt 条形与信息面板配色~~ 已完成（见"亮色主题复核"），顺带修掉 Gantt 父级条形的假进度。

@@ -2,7 +2,7 @@
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start / Responsible /
 // Tags / Color / Notes / 自定义字段。所有改动统一走 store.mutate。
 
-import { Setting } from "obsidian";
+import { Setting, Notice } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode, GoalScape, findNode } from "../data/types";
 import { renameGoal, adjustImportance, applyColorToSubtree } from "../data/crud";
@@ -13,6 +13,22 @@ function splitCsv(raw: string): string[] {
     .split(",")
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
+}
+
+/**
+ * 归一化成 #rrggbb，非色值返回 null。
+ * 放射图的 shadeColor / luminance 都只解析 6 位，放行 #f0a 会让该子树
+ * 静默失去环层提亮，并按"亮度 0"误选白字；带 alpha 的 8 位同样不被解析。
+ */
+function normalizeHex(raw: string): string | null {
+  const v = raw.trim();
+  if (!v) return "";
+  const long = /^#?([0-9a-f]{6})$/i.exec(v);
+  if (long) return `#${long[1].toLowerCase()}`;
+  const short = /^#?([0-9a-f]{3})$/i.exec(v);
+  if (!short) return null;
+  const t = short[1].toLowerCase();
+  return `#${[...t].map((c) => c + c).join("")}`;
 }
 
 export class InfoPanel {
@@ -144,8 +160,15 @@ export class InfoPanel {
         text.inputEl.placeholder = "#4ade80";
         text.setValue(node.color ?? "");
         text.inputEl.addEventListener("blur", () => {
-          const v = text.getValue().trim();
-          this.mutate((s) => this.patch(s, node.id, (n) => (n.color = v || undefined)));
+          const norm = normalizeHex(text.getValue());
+          if (norm === null) {
+            new Notice("Color must be empty or a hex value like #4ade80");
+            text.setValue(node.color ?? "");
+            return;
+          }
+          const v = norm || undefined;
+          if (v === node.color) return;
+          this.mutate((s) => this.patch(s, node.id, (n) => (n.color = v)));
         });
       })
       .addButton((btn) =>
@@ -213,13 +236,18 @@ export class InfoPanel {
 
   /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
   private trackInteraction(el: HTMLElement): void {
-    const start = () => (this.interacting = true);
-    const end = () => {
-      this.interacting = false;
-      this.render(true);
-    };
-    el.addEventListener("pointerdown", start);
-    window.addEventListener("pointerup", end, { once: false });
+    // window 上的 pointerup 监听必须随拖拽建立、随释放拆除。
+    // 早先每次 render 都无条件挂一个常驻监听：面板每改一次值就重建一次，
+    // 监听越积越多，之后在应用里点任何地方都会重建整个面板（滚动位置被弹回顶部）。
+    el.addEventListener("pointerdown", () => {
+      this.interacting = true;
+      const end = () => {
+        this.interacting = false;
+        window.removeEventListener("pointerup", end);
+        this.render(true);
+      };
+      window.addEventListener("pointerup", end);
+    });
   }
 
   private mutate(fn: (s: GoalScape) => void): void {
