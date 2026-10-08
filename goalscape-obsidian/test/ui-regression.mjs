@@ -19,9 +19,11 @@
 // 上一版 4 个"FAIL"全是脚本期望错（打勾类名是 mod-checked、lucide 图标是 circle/line/rect
 // 而非 path），界面微调也会连带改坏断言。
 //
-// 等待分三等，从快到慢依次是：waitFor(谓词) → 页内 __gsSettle(两帧，上限兜底) →
-// 固定 setTimeout。最后一种只剩 6 处，等的都是 Obsidian 自己的异步
+// 等待按"能不能验"分三等：能验就轮询谓词（waitFor / 页内等 pl.toneSettings 收到目标值、
+// 等 data.json 真写进去）→ 只能等浏览器排版完就 __gsSettle(两帧，上限兜底) →
+// 固定 setTimeout 只剩 6 处，等的都是 Obsidian 自己的异步
 // （插件重载、换视图、开原生菜单、建文件），不是"我们渲染完了没"。
+// 轮询比等帧准：窗口不在前台时 rAF 会整个停下来，两帧可能几分钟不来。
 // 能在 npm test（2 秒、不开界面）里判的东西一律不放这儿。
 
 import fs from "node:fs";
@@ -507,7 +509,7 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
       const id=t.getAttribute('data-id'), s=v.nodePositions.get(id);
       modes[t.getAttribute('data-mode')]=(modes[t.getAttribute('data-mode')]||0)+1;
       if(!s) continue;
-      const m=t.getScreenCTM().multiply(toUser), b=t.getBBox(), mid=(s.startAngle+s.endAngle)/2;
+      const m=toUser.multiply(t.getScreenCTM()), b=t.getBBox(), mid=(s.startAngle+s.endAngle)/2;
       let out=0;
       for(const [x,y] of [[b.x,b.y],[b.x+b.width,b.y],[b.x,b.y+b.height],[b.x+b.width,b.y+b.height]]){
         const p=new DOMPoint(x,y).matrixTransform(m), r=Math.hypot(p.x-500,p.y-500);
@@ -851,32 +853,45 @@ step("settings 颜色基调两根滑杆", async () => {
     const names=rows.map(e=>e.querySelector('.setting-item-name')?.textContent.trim());
     const snap=()=>{const f={};for(const p of document.querySelectorAll('.goalscape-map > path[data-id]'))
       f[p.getAttribute('data-id')]=p.getAttribute('data-color');return f;};
-    const set=(i,v)=>{const el=rows[i]?.querySelector('input[type=range]');
-      if(!el) throw new Error('第 '+i+' 行没有滑杆：'+JSON.stringify(rows.map(e=>e.querySelector('.setting-item-name')?.textContent)));
-      el.value=String(v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};
+    const keys=['intensity','contrast'];
+    const orig={...pl.toneSettings};
+    const readSaved=()=>app.vault.adapter.read('.obsidian/plugins/goalscape-obsidian/data.json').then((t)=>JSON.parse(t)).catch(()=>({}));
+    // 落盘是异步的，而"真的存下来了"正是下面那条断言要验的东西，所以按条件等而不是等固定时长
+    const pollSaved=async(p)=>{for(let k=0;k<40;k++){const d=await readSaved();if(p(d))return d;
+      await new Promise((r)=>setTimeout(r,30));}return readSaved();};
+    const set=async(i,v)=>{
+      const el=rows[i]?.querySelector('input[type=range]');
+      if(!el) throw new Error('第 '+i+' 行没有滑杆：'+JSON.stringify(rows.map((e)=>e.querySelector('.setting-item-name')?.textContent)));
+      el.value=String(v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));
+      // 不信"等两帧"：滑杆的 onChange 有自己的节流节奏，实测就会读到上一档的颜色。
+      // 等到插件真收下这个值为止 —— 重画是同步的，所以条件一成立，下一次 snap() 就是新颜色。
+      for(let k=0;k<90&&pl.toneSettings[keys[i]]!==v;k++) await new Promise((r)=>requestAnimationFrame(r));
+      if(pl.toneSettings[keys[i]]!==v) throw new Error('滑杆 '+keys[i]+' 停在 '+pl.toneSettings[keys[i]]+'，没收到 '+v);
+    };
     const a=snap();
-    set(0,0); await __gsSettle(450); const soft=snap();
-    set(0,100); await __gsSettle(450); const loud=snap();
-    set(0,84); await __gsSettle(450); const back=snap();
+    await set(0,0); const soft=snap();
+    await set(0,100); const loud=snap();
+    const savedLoud=await pollSaved((d)=>d?.tone?.intensity===100);
+    await set(0,orig.intensity); const back=snap();
     const spread=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
       const v=[c(16),c(8),c(0)];return Math.max(...v)-Math.min(...v);};
     const lumOf=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
       return 0.2126*c(16)+0.7152*c(8)+0.0722*c(0);};
     // 第二根：层次调平缓，外圈与二级分支的亮度差要被压小，但不能反过来
     const gapBefore=lumOf(a['n-B-done'])-lumOf(a['n-Blue']);
-    set(1,0); await __gsSettle(450); const flat=snap();
+    await set(1,0); const flat=snap();
     const gapFlat=lumOf(flat['n-B-done'])-lumOf(flat['n-Blue']);
-    set(1,100); await __gsSettle(450); const steep=snap();
+    await set(1,100); const steep=snap();
     const gapSteep=lumOf(steep['n-B-done'])-lumOf(steep['n-Blue']);
-    set(1,50); await __gsSettle(450);
+    await set(1,orig.contrast);
+    const savedFinal=await pollSaved((d)=>d?.tone?.intensity===orig.intensity
+      &&d?.tone?.contrast===orig.contrast);
     app.setting.close();
-    return {names, count:rows.length,
-      saved:await app.vault.adapter.read('.obsidian/plugins/goalscape-obsidian/data.json').then((t)=>JSON.parse(t)).catch(()=>({})),
+    return {names, count:rows.length, orig, savedLoud, savedFinal,
       softer:spread(soft['n-Blue'])<spread(a['n-Blue']),
       louder:spread(loud['n-Blue'])>spread(a['n-Blue']),
       restored:Object.keys(a).filter((k)=>a[k]!==back[k]).length,
-      flatter:gapFlat<gapBefore, steeper:gapSteep>gapBefore, ordered:gapFlat<gapBefore&&gapBefore<gapSteep,
-      sample:[a['n-Blue'],soft['n-Blue'],loud['n-Blue']]};})()`);
+      flatter:gapFlat<gapBefore, steeper:gapSteep>gapBefore, ordered:gapFlat<gapBefore&&gapBefore<gapSteep};})()`);
   ok("设置页两根滑杆：浓艳度左右两端分别变灰/变艳，拖回原位图也原样",
     r.count === 2 && /intensity/i.test(r.names[0]) && /contrast/i.test(r.names[1])
       && r.softer && r.louder && r.restored === 0,
@@ -884,9 +899,11 @@ step("settings 颜色基调两根滑杆", async () => {
   ok("层次分明度：往左压小内外圈的亮度差、往右拉大，且不会把顺序调反",
     r.flatter && r.steeper && r.ordered, JSON.stringify(r));
   ok("滑杆位置写进 data.json（重启插件还在），且不会把 currentPath 顶掉",
-    r.saved?.tone?.intensity === 84 && r.saved?.tone?.contrast === 50
-      && typeof r.saved?.currentPath === "string",
-    JSON.stringify(r.saved));
+    r.savedLoud?.tone?.intensity === 100
+      && r.savedFinal?.tone?.intensity === r.orig.intensity
+      && r.savedFinal?.tone?.contrast === r.orig.contrast
+      && typeof r.savedFinal?.currentPath === "string",
+    JSON.stringify({ orig: r.orig, loud: r.savedLoud?.tone, final: r.savedFinal?.tone }));
 });
 
 step("themes 暗/亮两主题截图", async () => {
