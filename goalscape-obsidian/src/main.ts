@@ -1,11 +1,12 @@
 // src/main.ts
 // Goalscape Obsidian 插件入口。负责初始化数据层、注册视图与命令。
 
-import { Plugin, TFile, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
+import { Plugin, TFile, TFolder, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
 import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH } from "./data/goalTree";
-import { RadialGoalMapView, VIEW_RADIAL } from "./views/radialView";
-import { GoalListView, VIEW_LIST } from "./views/listView";
-import { GanttView, VIEW_GANTT } from "./views/ganttView";
+import { RadialGoalMapView } from "./views/radialView";
+import { GoalListView } from "./views/listView";
+import { GanttView } from "./views/ganttView";
+import { VIEW_RADIAL, VIEW_LIST, VIEW_GANTT } from "./views/viewTypes";
 import { TEMPLATES } from "./data/templates";
 import { promptInput } from "./views/promptModal";
 import { SubtreeClipboard } from "./views/radialMenu";
@@ -42,6 +43,19 @@ export default class GoalscapePlugin extends Plugin {
     this.addCommand({ id: "export-markdown", name: "Export goals as Markdown outline", callback: () => this.exportMarkdown() });
 
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
+
+    // 目录栏右键（右键空白处拿到的是根目录）新建图，取代原工具栏上的 "New map" 按钮。
+    // 只挂在文件夹上：Obsidian 自己的 "Add new note" 也只在文件夹/空白处出现。
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof TFolder)) return;
+        menu.addItem((item) =>
+          item.setTitle("New goalscape")
+            .setIcon("target")
+            .onClick(() => void this.promptNewGoalscape())
+        );
+      })
+    );
 
     // 读档放在视图/命令注册之后：数据出问题只影响图的内容，
     // 不该连带让视图注册不上、整个标签页退化成"插件不再活动"占位页
@@ -109,12 +123,17 @@ export default class GoalscapePlugin extends Plugin {
 
   private async promptNewGoalscape(): Promise<void> {
     const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
-    if (name && name.trim()) await this.createGoalscape(name.trim());
+    if (!name || !name.trim()) return;
+    await this.createGoalscape(name.trim());
+    // 入口在目录栏右键，用户当时可能正看着笔记：新建完得把图打开，否则只剩一条 Notice
+    await this.openView(VIEW_RADIAL);
   }
 
   private refreshMapSelectors(): void {
     for (const view of this.radialViews()) {
-      view.refreshMapList();
+      // 选中态存的是节点 id，换图后那是上一张图的节点，信息面板会显示 "Goal not found."
+      view.clearSelection();
+      view.refreshMapButton();
     }
   }
 
@@ -128,13 +147,22 @@ export default class GoalscapePlugin extends Plugin {
 
   // ──────────────────────────── 导出 ────────────────────────────
 
+  /**
+   * 白板与图文件一一对应，用图文件名派生，不用根目标标题：
+   * 标题随时可改（改了就会把白板落在旧文件里），且每张新图的默认根标题都是 "Main Goal"，
+   * 多张图会抢同一个 .canvas。文件名规则只在这一处写，命令导出与切换器共用。
+   */
+  private canvasPathFor(): string {
+    const folder = this.store.path.split("/").slice(0, -1).join("/");
+    const base = this.store.path.split("/").pop()!.replace(/\.goalscape\.json$/, "");
+    return `${folder}/${base}.canvas`;
+  }
+
   private async exportCanvas(): Promise<void> {
     const scape = this.store.scape;
     if (!scape) return;
-    const canvas = toCanvas(scape);
-    const json = canvasToJson(canvas);
-    const folder = this.store.path.split("/").slice(0, -1).join("/");
-    const canvasPath = `${folder}/${scape.mainGoal.title.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "_")}.canvas`;
+    const json = canvasToJson(toCanvas(scape));
+    const canvasPath = this.canvasPathFor();
     const existing = this.app.vault.getAbstractFileByPath(canvasPath);
     if (existing instanceof TFile) {
       await this.app.vault.modify(existing, json);
@@ -142,9 +170,42 @@ export default class GoalscapePlugin extends Plugin {
       await this.app.vault.create(canvasPath, json);
     }
     new Notice(`Canvas exported: ${canvasPath}`);
-    const leaf = this.app.workspace.getLeaf("tab");
+    await this.openCanvasFile(canvasPath);
+  }
+
+  /**
+   * 切换器里的 Canvas 项：文件已存在就**原样打开**，不重新生成。
+   * 白板里手工摆的位置/连线经不起一次重导出 —— toCanvas() 是按放射布局重算坐标的单向转换，
+   * 且 GoalNode 根本没有 x/y 字段，位置在 goalscape 数据里无处可存。
+   * 只有文件还不存在时才生成第一版。
+   */
+  async openCanvas(): Promise<void> {
+    const scape = this.store.scape;
+    if (!scape) return;
+    const canvasPath = this.canvasPathFor();
+    if (!(this.app.vault.getAbstractFileByPath(canvasPath) instanceof TFile)) {
+      await this.app.vault.create(canvasPath, canvasToJson(toCanvas(scape)));
+      new Notice(`Created ${canvasPath}`);
+    }
+    await this.openCanvasFile(canvasPath);
+  }
+
+  private async openCanvasFile(canvasPath: string): Promise<void> {
     const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (file instanceof TFile) await leaf.openFile(file);
+    if (!(file instanceof TFile)) {
+      new Notice(`Canvas file not found: ${canvasPath}`);
+      return;
+    }
+    const opened = this.app.workspace
+      .getLeavesOfType("canvas")
+      .find((leaf) => (leaf.view as { file?: TFile }).file?.path === canvasPath);
+    if (opened) {
+      this.app.workspace.revealLeaf(opened);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(file);
+    this.app.workspace.revealLeaf(leaf);
   }
 
   private getRadialSvg(): SVGSVGElement | null {

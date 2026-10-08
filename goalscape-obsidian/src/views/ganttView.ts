@@ -4,8 +4,8 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode, flattenTree } from "../data/types";
-
-export const VIEW_GANTT = "goalscape-gantt-view";
+import { VIEW_GANTT } from "./viewTypes";
+import { createViewSwitcher } from "./viewSwitcher";
 
 const DAY_MS = 86400000;
 const BAR_HEIGHT = 22;
@@ -27,6 +27,8 @@ export class GanttView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
+    const bar = this.contentEl.createDiv({ cls: "goalscape-view-bar" });
+    createViewSwitcher(bar, this.plugin, this.leaf, VIEW_GANTT);
     this.rootEl = this.contentEl.createDiv({ cls: "goalscape-gantt-root" });
     this.unsubscribe = this.plugin.store.subscribe(() => this.render());
     this.render();

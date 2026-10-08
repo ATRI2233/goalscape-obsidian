@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => GoalscapePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian9 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 
 // src/data/goalTree.ts
 var import_obsidian = require("obsidian");
@@ -265,7 +265,10 @@ var GoalTreeStore = class {
 };
 
 // src/views/radialView.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian8 = require("obsidian");
+
+// src/views/infoPanel.ts
+var import_obsidian3 = require("obsidian");
 
 // src/data/crud.ts
 function addGoal(scape, refId, position, title = "New Goal") {
@@ -486,7 +489,6 @@ var PromptModal = class extends import_obsidian2.Modal {
 };
 
 // src/views/infoPanel.ts
-var import_obsidian3 = require("obsidian");
 var COLOR_PALETTE = [
   "#f87171",
   "#fb923c",
@@ -734,6 +736,7 @@ var InfoPanel = class {
 };
 
 // src/views/focusFilter.ts
+var import_obsidian4 = require("obsidian");
 function isCriteriaEmpty(c) {
   return !c.tag && c.minProgress === void 0 && c.maxProgress === void 0 && !c.color && !c.dueBefore && !c.dueAfter;
 }
@@ -764,26 +767,56 @@ function matchesCriteria(node, c) {
   return true;
 }
 var FocusFilter = class {
-  constructor(container, plugin, onChange) {
-    this.container = container;
-    this.plugin = plugin;
+  constructor(container, onChange) {
     this.onChange = onChange;
     this.criteria = {};
-    this.render();
+    this.open = false;
+    this.buttonEl = container.createEl("button", { cls: "goalscape-filter-btn" });
+    this.buttonEl.setAttr("aria-label", "Focus filter");
+    this.buttonEl.setAttr("aria-expanded", "false");
+    (0, import_obsidian4.setIcon)(this.buttonEl, "list-filter");
+    (0, import_obsidian4.setTooltip)(this.buttonEl, "Focus filter", { placement: "bottom" });
+    this.panelEl = container.createDiv({ cls: "goalscape-filter-popover" });
+    this.panelEl.hide();
+    this.buttonEl.addEventListener("click", () => this.toggle());
+    this.renderPanel();
   }
-  render() {
+  get isOpen() {
+    return this.open;
+  }
+  toggle() {
+    if (this.open)
+      this.close();
+    else
+      this.showPanel();
+  }
+  showPanel() {
+    this.open = true;
+    this.panelEl.show();
+    this.buttonEl.setAttr("aria-expanded", "true");
+  }
+  close() {
+    this.open = false;
+    this.panelEl.hide();
+    this.buttonEl.setAttr("aria-expanded", "false");
+  }
+  /** 视图负责注册 document 监听，用这个判断"点的是不是自己人"，避免两处各数一遍 DOM */
+  containsTarget(target) {
+    const node = target;
+    return this.buttonEl.contains(node) || this.panelEl.contains(node);
+  }
+  renderPanel() {
     var _a, _b;
-    this.container.empty();
-    this.container.addClass("goalscape-filter-bar");
-    const row = this.container.createDiv({ cls: "goalscape-filter-row" });
-    row.createSpan({ cls: "goalscape-filter-label", text: "Filter:" });
-    const tagInput = row.createEl("input", { cls: "goalscape-filter-input" });
+    this.panelEl.empty();
+    const tagRow = this.panelEl.createDiv({ cls: "goalscape-filter-row" });
+    const tagInput = tagRow.createEl("input", { cls: "goalscape-filter-input goalscape-filter-tag" });
     tagInput.placeholder = "Tag";
     tagInput.value = (_a = this.criteria.tag) != null ? _a : "";
     tagInput.addEventListener("change", () => {
       this.criteria.tag = tagInput.value.trim() || void 0;
       this.emit();
     });
+    const row = this.panelEl.createDiv({ cls: "goalscape-filter-row" });
     const minProg = row.createEl("input", { cls: "goalscape-filter-input goalscape-filter-narrow" });
     minProg.type = "number";
     minProg.placeholder = "Min%";
@@ -818,11 +851,12 @@ var FocusFilter = class {
     clearBtn.textContent = "Clear";
     clearBtn.addEventListener("click", () => {
       this.criteria = {};
-      this.render();
+      this.renderPanel();
       this.emit();
     });
   }
   emit() {
+    this.buttonEl.toggleClass("is-active", !isCriteriaEmpty(this.criteria));
     this.onChange({ ...this.criteria });
   }
 };
@@ -967,7 +1001,7 @@ function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
 }
 
 // src/views/radialDrag.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 var WeightDragController = class {
   constructor(store, surface) {
     this.store = store;
@@ -1060,7 +1094,7 @@ var _ReparentDragController = class _ReparentDragController {
           ok = moveGoal(s, drag.nodeId, targetId);
         });
         if (!ok)
-          new import_obsidian4.Notice("Cannot move goal there (cycle or same parent)");
+          new import_obsidian5.Notice("Cannot move goal there (cycle or same parent)");
       }
       this.surface.render();
     };
@@ -1090,7 +1124,7 @@ _ReparentDragController.ACTIVATE_PX = 8;
 var ReparentDragController = _ReparentDragController;
 
 // src/views/radialMenu.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var SubtreeClipboard = class {
   constructor() {
     this.subtree = null;
@@ -1124,7 +1158,7 @@ async function confirmDeleteGoal(app, node) {
 }
 function buildGoalMenu(deps) {
   const { app, store, clipboard, node, isMain, onDeleted } = deps;
-  const menu = new import_obsidian5.Menu();
+  const menu = new import_obsidian6.Menu();
   if (node.children.length) {
     menu.addItem(
       (item) => item.setTitle(node.collapsed ? "Expand" : "Collapse").setIcon(node.collapsed ? "unfold-vertical" : "fold-vertical").onClick(() => {
@@ -1190,7 +1224,7 @@ function buildGoalMenu(deps) {
           return;
         clipboard.set(extracted, "cut");
         store.mutate((s) => deleteGoal(s, node.id));
-        new import_obsidian5.Notice("Goal cut to clipboard");
+        new import_obsidian6.Notice("Goal cut to clipboard");
       })
     );
     menu.addItem(
@@ -1199,7 +1233,7 @@ function buildGoalMenu(deps) {
         if (!extracted)
           return;
         clipboard.set(extracted, "copy");
-        new import_obsidian5.Notice("Goal copied to clipboard");
+        new import_obsidian6.Notice("Goal copied to clipboard");
       })
     );
   }
@@ -1226,9 +1260,51 @@ function buildGoalMenu(deps) {
   return menu;
 }
 
-// src/views/radialView.ts
+// src/views/viewTypes.ts
 var VIEW_RADIAL = "goalscape-radial-view";
-var RadialGoalMapView = class extends import_obsidian6.ItemView {
+var VIEW_LIST = "goalscape-list-view";
+var VIEW_GANTT = "goalscape-gantt-view";
+var VIEW_CANVAS = "goalscape-canvas-file";
+var VIEW_OPTIONS = [
+  { type: VIEW_RADIAL, label: "Radial map", icon: "target" },
+  { type: VIEW_LIST, label: "Goal list", icon: "list" },
+  { type: VIEW_GANTT, label: "Gantt", icon: "calendar" },
+  { type: VIEW_CANVAS, label: "Canvas (\u767D\u677F)", icon: "layout-grid" }
+];
+
+// src/views/viewSwitcher.ts
+var import_obsidian7 = require("obsidian");
+function createViewSwitcher(container, plugin, leaf, currentType) {
+  const group = container.createDiv({ cls: "goalscape-view-switch" });
+  group.setAttr("role", "group");
+  group.setAttr("aria-label", "Presentation mode");
+  for (const option of VIEW_OPTIONS) {
+    const btn = group.createEl("button", { cls: "goalscape-view-seg" });
+    btn.setAttr("aria-label", option.label);
+    if (option.type === currentType) {
+      btn.addClass("is-active");
+      btn.setAttr("aria-current", "true");
+    }
+    (0, import_obsidian7.setIcon)(btn, option.icon);
+    (0, import_obsidian7.setTooltip)(btn, option.label, { placement: "bottom" });
+    btn.addEventListener("click", () => {
+      if (option.type === currentType)
+        return;
+      if (option.type === VIEW_CANVAS) {
+        void plugin.openCanvas();
+        return;
+      }
+      void leaf.setViewState({ type: option.type, active: true });
+    });
+  }
+  return group;
+}
+
+// src/views/radialView.ts
+function scapeName(path) {
+  return path.split("/").pop().replace(/\.goalscape\.json$/, "");
+}
+var RadialGoalMapView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1249,11 +1325,14 @@ var RadialGoalMapView = class extends import_obsidian6.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
     const toolbar = this.contentEl.createDiv({ cls: "goalscape-toolbar" });
-    this.buildActions(toolbar);
-    const filterWrap = toolbar.createDiv({ cls: "goalscape-filter-wrap" });
-    this.filterBar = new FocusFilter(filterWrap, this.plugin, (criteria) => {
-      this.filterCriteria = criteria;
-      this.render();
+    this.buildToolbar(toolbar);
+    this.registerDomEvent(document, "click", (e) => {
+      if (this.filterBar.isOpen && !this.filterBar.containsTarget(e.target))
+        this.filterBar.close();
+    }, true);
+    this.registerDomEvent(document, "keydown", (e) => {
+      if (e.key === "Escape")
+        this.filterBar.close();
     });
     const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
     this.rootEl = mainRow.createDiv({ cls: "goalscape-radial-root" });
@@ -1281,75 +1360,42 @@ var RadialGoalMapView = class extends import_obsidian6.ItemView {
   clearSelection() {
     this.select(null);
   }
-  buildActions(toolbar) {
-    const actions = toolbar.createDiv({ cls: "goalscape-actions" });
-    this.mapSelect = actions.createEl("select", { cls: "goalscape-map-select" });
-    this.mapSelect.addEventListener("change", () => {
-      void this.plugin.switchGoalscape(this.mapSelect.value);
+  buildToolbar(toolbar) {
+    createViewSwitcher(toolbar, this.plugin, this.leaf, VIEW_RADIAL);
+    this.mapButton = toolbar.createEl("button", { cls: "goalscape-map-btn" });
+    this.mapButton.setAttr("aria-label", "Switch goalscape");
+    this.mapButton.addEventListener("click", (e) => this.showMapMenu(e));
+    this.refreshMapButton();
+    this.filterBar = new FocusFilter(toolbar, (criteria) => {
+      this.filterCriteria = criteria;
+      this.render();
     });
-    const mk = (text, cls, onClick) => {
-      const b = actions.createEl("button", { cls: `goalscape-btn ${cls}`.trim(), text });
-      b.addEventListener("click", onClick);
-      return b;
-    };
-    mk("New map", "", () => void this.newMap());
-    mk("+ Subgoal", "", () => void this.addViaToolbar("child"));
-    mk("+ Sibling", "", () => void this.addViaToolbar("sibling"));
-    mk("Delete", "goalscape-btn-danger", () => this.deleteSelected());
-    this.refreshMapList();
   }
-  refreshMapList() {
-    if (!this.mapSelect)
-      return;
+  /**
+   * 工具栏只放当前图的文件名，完整列表在点开后的原生菜单里 ——
+   * 一排 `<select>` 会被长文件名撑宽，菜单则按内容自适应、还能给当前项打勾。
+   * 供 main.ts 在换图/新建图后刷新标签。
+   */
+  refreshMapButton() {
     const current = this.plugin.store.path;
-    const maps = this.plugin.listGoalscapes();
-    this.mapSelect.empty();
-    for (const p of maps) {
-      const name = p.split("/").pop().replace(/\.goalscape\.json$/, "");
-      const opt = this.mapSelect.createEl("option", { value: p, text: name });
-      if (p === current)
-        opt.selected = true;
-    }
-    if (!maps.includes(current)) {
-      const opt = this.mapSelect.createEl("option", { value: current, text: current.split("/").pop().replace(/\.goalscape\.json$/, "") });
-      opt.selected = true;
-    }
+    this.mapButton.empty();
+    this.mapButton.createSpan({ cls: "goalscape-map-name", text: scapeName(current) });
+    const chevron = this.mapButton.createSpan({ cls: "goalscape-map-chevron" });
+    (0, import_obsidian8.setIcon)(chevron, "chevron-down");
+    this.mapButton.setAttr("title", current);
   }
-  async newMap() {
-    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
-    if (!name || !name.trim())
-      return;
-    await this.plugin.createGoalscape(name.trim());
-    this.clearSelection();
-    this.refreshMapList();
-  }
-  async addViaToolbar(position) {
-    var _a;
-    const scape = this.plugin.store.scape;
-    if (!scape)
-      return;
-    if (position === "sibling" && !this.selectedId) {
-      new import_obsidian6.Notice("Select a goal first");
-      return;
+  showMapMenu(event) {
+    const current = this.plugin.store.path;
+    const paths = this.plugin.listGoalscapes();
+    if (!paths.includes(current))
+      paths.unshift(current);
+    const menu = new import_obsidian8.Menu();
+    for (const p of paths) {
+      menu.addItem(
+        (item) => item.setTitle(scapeName(p)).setIcon("target").setChecked(p === current).onClick(() => void this.plugin.switchGoalscape(p))
+      );
     }
-    const refId = (_a = this.selectedId) != null ? _a : scape.mainGoal.id;
-    const title = await promptInput(this.app, position === "child" ? "New subgoal" : "New sibling goal", "New Goal");
-    if (title === null)
-      return;
-    this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
-  }
-  async deleteSelected() {
-    if (!this.selectedId) {
-      new import_obsidian6.Notice("Select a goal first");
-      return;
-    }
-    const id = this.selectedId;
-    const scape = this.plugin.store.scape;
-    const found = scape ? findNode(scape.mainGoal, id) : null;
-    if (!found || !await confirmDeleteGoal(this.app, found.node))
-      return;
-    this.plugin.store.mutate((s) => deleteGoal(s, id));
-    this.clearSelection();
+    menu.showAtMouseEvent(event);
   }
   // ──────────────────────────── 渲染 ────────────────────────────
   render() {
@@ -1518,9 +1564,8 @@ var RadialGoalMapView = class extends import_obsidian6.ItemView {
 };
 
 // src/views/listView.ts
-var import_obsidian7 = require("obsidian");
-var VIEW_LIST = "goalscape-list-view";
-var GoalListView = class extends import_obsidian7.ItemView {
+var import_obsidian9 = require("obsidian");
+var GoalListView = class extends import_obsidian9.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1537,6 +1582,8 @@ var GoalListView = class extends import_obsidian7.ItemView {
   async onOpen() {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
+    const bar = this.contentEl.createDiv({ cls: "goalscape-view-bar" });
+    createViewSwitcher(bar, this.plugin, this.leaf, VIEW_LIST);
     this.rootEl = this.contentEl.createDiv({ cls: "goalscape-list-root" });
     this.unsubscribe = this.plugin.store.subscribe(() => this.render());
     this.render();
@@ -1651,13 +1698,12 @@ var GoalListView = class extends import_obsidian7.ItemView {
 };
 
 // src/views/ganttView.ts
-var import_obsidian8 = require("obsidian");
-var VIEW_GANTT = "goalscape-gantt-view";
+var import_obsidian10 = require("obsidian");
 var DAY_MS = 864e5;
 var BAR_HEIGHT = 22;
 var ROW_GAP = 4;
 var LABEL_WIDTH = 180;
-var GanttView = class extends import_obsidian8.ItemView {
+var GanttView = class extends import_obsidian10.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1674,6 +1720,8 @@ var GanttView = class extends import_obsidian8.ItemView {
   async onOpen() {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
+    const bar = this.contentEl.createDiv({ cls: "goalscape-view-bar" });
+    createViewSwitcher(bar, this.plugin, this.leaf, VIEW_GANTT);
     this.rootEl = this.contentEl.createDiv({ cls: "goalscape-gantt-root" });
     this.unsubscribe = this.plugin.store.subscribe(() => this.render());
     this.render();
@@ -2124,7 +2172,7 @@ function downloadText(text, filename, mime = "text/plain") {
 }
 
 // src/main.ts
-var GoalscapePlugin = class extends import_obsidian9.Plugin {
+var GoalscapePlugin = class extends import_obsidian11.Plugin {
   constructor() {
     super(...arguments);
     /** 子树剪贴板随插件存活，放射图标签页之间共享 */
@@ -2150,6 +2198,15 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
     this.addCommand({ id: "export-csv", name: "Export goals as CSV", callback: () => this.exportCsv() });
     this.addCommand({ id: "export-markdown", name: "Export goals as Markdown outline", callback: () => this.exportMarkdown() });
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
+    this.registerEvent(
+      this.app.workspace.on("file-menu", (menu, file) => {
+        if (!(file instanceof import_obsidian11.TFolder))
+          return;
+        menu.addItem(
+          (item) => item.setTitle("New goalscape").setIcon("target").onClick(() => void this.promptNewGoalscape())
+        );
+      })
+    );
     await this.store.load();
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);
@@ -2174,7 +2231,7 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
   async openSourceFile() {
     const file = this.store.file;
     if (!file) {
-      new import_obsidian9.Notice("Goalscape source file not found");
+      new import_obsidian11.Notice("Goalscape source file not found");
       return;
     }
     const leaf = this.app.workspace.getLeaf("tab");
@@ -2196,7 +2253,7 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
     const path = `Goalscapes/${safe}.goalscape.json`;
     if (await this.app.vault.adapter.exists(path)) {
-      new import_obsidian9.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
+      new import_obsidian11.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
       await this.switchGoalscape(path);
       return;
     }
@@ -2204,12 +2261,15 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
   }
   async promptNewGoalscape() {
     const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
-    if (name && name.trim())
-      await this.createGoalscape(name.trim());
+    if (!name || !name.trim())
+      return;
+    await this.createGoalscape(name.trim());
+    await this.openView(VIEW_RADIAL);
   }
   refreshMapSelectors() {
     for (const view of this.radialViews()) {
-      view.refreshMapList();
+      view.clearSelection();
+      view.refreshMapButton();
     }
   }
   /** 已注册的放射图视图；用 instanceof 收窄而不是 any，避免伸手进视图私有成员 */
@@ -2217,30 +2277,70 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
     return this.app.workspace.getLeavesOfType(VIEW_RADIAL).map((leaf) => leaf.view).filter((v) => v instanceof RadialGoalMapView);
   }
   // ──────────────────────────── 导出 ────────────────────────────
+  /**
+   * 白板与图文件一一对应，用图文件名派生，不用根目标标题：
+   * 标题随时可改（改了就会把白板落在旧文件里），且每张新图的默认根标题都是 "Main Goal"，
+   * 多张图会抢同一个 .canvas。文件名规则只在这一处写，命令导出与切换器共用。
+   */
+  canvasPathFor() {
+    const folder = this.store.path.split("/").slice(0, -1).join("/");
+    const base = this.store.path.split("/").pop().replace(/\.goalscape\.json$/, "");
+    return `${folder}/${base}.canvas`;
+  }
   async exportCanvas() {
     const scape = this.store.scape;
     if (!scape)
       return;
-    const canvas = toCanvas(scape);
-    const json = canvasToJson(canvas);
-    const folder = this.store.path.split("/").slice(0, -1).join("/");
-    const canvasPath = `${folder}/${scape.mainGoal.title.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "_")}.canvas`;
+    const json = canvasToJson(toCanvas(scape));
+    const canvasPath = this.canvasPathFor();
     const existing = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (existing instanceof import_obsidian9.TFile) {
+    if (existing instanceof import_obsidian11.TFile) {
       await this.app.vault.modify(existing, json);
     } else {
       await this.app.vault.create(canvasPath, json);
     }
-    new import_obsidian9.Notice(`Canvas exported: ${canvasPath}`);
-    const leaf = this.app.workspace.getLeaf("tab");
+    new import_obsidian11.Notice(`Canvas exported: ${canvasPath}`);
+    await this.openCanvasFile(canvasPath);
+  }
+  /**
+   * 切换器里的 Canvas 项：文件已存在就**原样打开**，不重新生成。
+   * 白板里手工摆的位置/连线经不起一次重导出 —— toCanvas() 是按放射布局重算坐标的单向转换，
+   * 且 GoalNode 根本没有 x/y 字段，位置在 goalscape 数据里无处可存。
+   * 只有文件还不存在时才生成第一版。
+   */
+  async openCanvas() {
+    const scape = this.store.scape;
+    if (!scape)
+      return;
+    const canvasPath = this.canvasPathFor();
+    if (!(this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian11.TFile)) {
+      await this.app.vault.create(canvasPath, canvasToJson(toCanvas(scape)));
+      new import_obsidian11.Notice(`Created ${canvasPath}`);
+    }
+    await this.openCanvasFile(canvasPath);
+  }
+  async openCanvasFile(canvasPath) {
     const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (file instanceof import_obsidian9.TFile)
-      await leaf.openFile(file);
+    if (!(file instanceof import_obsidian11.TFile)) {
+      new import_obsidian11.Notice(`Canvas file not found: ${canvasPath}`);
+      return;
+    }
+    const opened = this.app.workspace.getLeavesOfType("canvas").find((leaf2) => {
+      var _a;
+      return ((_a = leaf2.view.file) == null ? void 0 : _a.path) === canvasPath;
+    });
+    if (opened) {
+      this.app.workspace.revealLeaf(opened);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(file);
+    this.app.workspace.revealLeaf(leaf);
   }
   getRadialSvg() {
     const view = this.radialViews()[0];
     if (!view) {
-      new import_obsidian9.Notice("Open the radial view first");
+      new import_obsidian11.Notice("Open the radial view first");
       return null;
     }
     return view.getSvg();
@@ -2251,7 +2351,7 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
       return;
     const blob = await exportPng(svg);
     downloadBlob(blob, "goalscape.png");
-    new import_obsidian9.Notice("PNG exported");
+    new import_obsidian11.Notice("PNG exported");
   }
   exportSvg() {
     const svg = this.getRadialSvg();
@@ -2259,7 +2359,7 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
       return;
     const str = exportSvg(svg);
     downloadText(str, "goalscape.svg", "image/svg+xml");
-    new import_obsidian9.Notice("SVG exported");
+    new import_obsidian11.Notice("SVG exported");
   }
   exportCsv() {
     const scape = this.store.scape;
@@ -2267,7 +2367,7 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
       return;
     const csv = exportCsv(scape);
     downloadText(csv, "goalscape.csv", "text/csv");
-    new import_obsidian9.Notice("CSV exported");
+    new import_obsidian11.Notice("CSV exported");
   }
   exportMarkdown() {
     const scape = this.store.scape;
@@ -2275,14 +2375,14 @@ var GoalscapePlugin = class extends import_obsidian9.Plugin {
       return;
     const md = exportMarkdownOutline(scape);
     downloadText(md, "goalscape-outline.md", "text/markdown");
-    new import_obsidian9.Notice("Markdown outline exported");
+    new import_obsidian11.Notice("Markdown outline exported");
   }
   // ──────────────────────────── 模板 ────────────────────────────
   showTemplateModal() {
     new TemplateModal(this.app, this).open();
   }
 };
-var TemplateModal = class extends import_obsidian9.Modal {
+var TemplateModal = class extends import_obsidian11.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -2293,7 +2393,7 @@ var TemplateModal = class extends import_obsidian9.Modal {
     contentEl.createEl("h3", { text: "Choose a template" });
     contentEl.createEl("p", { text: "This will replace your current goal tree. This cannot be undone.", cls: "goalscape-template-warning" });
     for (const t of TEMPLATES) {
-      new import_obsidian9.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
+      new import_obsidian11.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
         (btn) => btn.setButtonText("Apply").onClick(() => {
           this.plugin.store.mutate((s) => {
             const template = t.build();
@@ -2304,11 +2404,11 @@ var TemplateModal = class extends import_obsidian9.Modal {
             view.clearSelection();
           }
           this.close();
-          new import_obsidian9.Notice(`Template "${t.name}" applied`);
+          new import_obsidian11.Notice(`Template "${t.name}" applied`);
         })
       );
     }
-    new import_obsidian9.Setting(contentEl).addButton(
+    new import_obsidian11.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
     );
   }

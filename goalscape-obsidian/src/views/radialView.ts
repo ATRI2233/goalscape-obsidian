@@ -1,13 +1,12 @@
 // src/views/radialView.ts
-// Goalscape 放射图视图：工具栏 + SVG 渲染 + 选中态。
-// 几何/配色在 radialGeometry.ts，两类拖拽在 radialDrag.ts，右键菜单在 radialMenu.ts，
-// 过滤谓词在 focusFilter.ts —— 本文件只负责把它们接到 Obsidian 的 ItemView 生命周期上。
+// Goalscape 放射图视图：单行工具栏（呈现方式 + 图文件 + 筛选）+ SVG 渲染 + 选中态。
+// 增删改一律走扇区右键菜单（radialMenu.ts），工具栏不重复提供入口。
+// 几何/配色在 radialGeometry.ts，两类拖拽在 radialDrag.ts，过滤谓词在 focusFilter.ts
+// —— 本文件只负责把它们接到 Obsidian 的 ItemView 生命周期上。
 
-import { ItemView, WorkspaceLeaf, Notice } from "obsidian";
+import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, flattenTree, findNode } from "../data/types";
-import { addGoal, deleteGoal } from "../data/crud";
-import { promptInput } from "./promptModal";
+import { GoalNode, flattenTree } from "../data/types";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
@@ -16,9 +15,14 @@ import {
   RingGeometry, SectorAngles,
 } from "./radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
-import { buildGoalMenu, confirmDeleteGoal } from "./radialMenu";
+import { buildGoalMenu } from "./radialMenu";
+import { VIEW_RADIAL } from "./viewTypes";
+import { createViewSwitcher } from "./viewSwitcher";
 
-export const VIEW_RADIAL = "goalscape-radial-view";
+/** Goalscapes/life.goalscape.json → life */
+function scapeName(path: string): string {
+  return path.split("/").pop()!.replace(/\.goalscape\.json$/, "");
+}
 
 export class RadialGoalMapView extends ItemView {
   private unsubscribe?: () => void;
@@ -44,11 +48,16 @@ export class RadialGoalMapView extends ItemView {
     this.contentEl.addClass("goalscape-container");
 
     const toolbar = this.contentEl.createDiv({ cls: "goalscape-toolbar" });
-    this.buildActions(toolbar);
-    const filterWrap = toolbar.createDiv({ cls: "goalscape-filter-wrap" });
-    this.filterBar = new FocusFilter(filterWrap, this.plugin, (criteria) => {
-      this.filterCriteria = criteria;
-      this.render();
+    this.buildToolbar(toolbar);
+
+    // 筛选浮层的关闭监听挂在视图上：registerDomEvent 会随视图销毁自动解绑，
+    // 不像手写 document.addEventListener 那样需要在 onClose 里手动配对。
+    // 用捕获阶段，才能在按钮自己的 click 处理之前判定"点的是浮层外面"。
+    this.registerDomEvent(document, "click", (e) => {
+      if (this.filterBar.isOpen && !this.filterBar.containsTarget(e.target)) this.filterBar.close();
+    }, true);
+    this.registerDomEvent(document, "keydown", (e) => {
+      if (e.key === "Escape") this.filterBar.close();
     });
 
     const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
@@ -85,78 +94,52 @@ export class RadialGoalMapView extends ItemView {
 
   // ──────────────────────────── 工具栏 ────────────────────────────
 
-  private mapSelect!: HTMLSelectElement;
+  private mapButton!: HTMLButtonElement;
 
-  private buildActions(toolbar: HTMLElement): void {
-    const actions = toolbar.createDiv({ cls: "goalscape-actions" });
+  private buildToolbar(toolbar: HTMLElement): void {
+    createViewSwitcher(toolbar, this.plugin, this.leaf, VIEW_RADIAL);
 
-    this.mapSelect = actions.createEl("select", { cls: "goalscape-map-select" });
-    this.mapSelect.addEventListener("change", () => {
-      void this.plugin.switchGoalscape(this.mapSelect.value);
+    this.mapButton = toolbar.createEl("button", { cls: "goalscape-map-btn" });
+    this.mapButton.setAttr("aria-label", "Switch goalscape");
+    this.mapButton.addEventListener("click", (e) => this.showMapMenu(e as MouseEvent));
+    this.refreshMapButton();
+
+    this.filterBar = new FocusFilter(toolbar, (criteria) => {
+      this.filterCriteria = criteria;
+      this.render();
     });
-
-    const mk = (text: string, cls: string, onClick: () => void) => {
-      const b = actions.createEl("button", { cls: `goalscape-btn ${cls}`.trim(), text });
-      b.addEventListener("click", onClick);
-      return b;
-    };
-
-    mk("New map", "", () => void this.newMap());
-    mk("+ Subgoal", "", () => void this.addViaToolbar("child"));
-    mk("+ Sibling", "", () => void this.addViaToolbar("sibling"));
-    mk("Delete", "goalscape-btn-danger", () => this.deleteSelected());
-
-    this.refreshMapList();
   }
 
-  refreshMapList(): void {
-    if (!this.mapSelect) return;
+  /**
+   * 工具栏只放当前图的文件名，完整列表在点开后的原生菜单里 ——
+   * 一排 `<select>` 会被长文件名撑宽，菜单则按内容自适应、还能给当前项打勾。
+   * 供 main.ts 在换图/新建图后刷新标签。
+   */
+  refreshMapButton(): void {
     const current = this.plugin.store.path;
-    const maps = this.plugin.listGoalscapes();
-    this.mapSelect.empty();
-    for (const p of maps) {
-      const name = p.split("/").pop()!.replace(/\.goalscape\.json$/, "");
-      const opt = this.mapSelect.createEl("option", { value: p, text: name });
-      if (p === current) opt.selected = true;
-    }
-    if (!maps.includes(current)) {
-      const opt = this.mapSelect.createEl("option", { value: current, text: current.split("/").pop()!.replace(/\.goalscape\.json$/, "") });
-      opt.selected = true;
-    }
+    this.mapButton.empty();
+    this.mapButton.createSpan({ cls: "goalscape-map-name", text: scapeName(current) });
+    const chevron = this.mapButton.createSpan({ cls: "goalscape-map-chevron" });
+    setIcon(chevron, "chevron-down");
+    this.mapButton.setAttr("title", current);
   }
 
-  private async newMap(): Promise<void> {
-    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
-    if (!name || !name.trim()) return;
-    await this.plugin.createGoalscape(name.trim());
-    this.clearSelection();
-    this.refreshMapList();
-  }
+  private showMapMenu(event: MouseEvent): void {
+    const current = this.plugin.store.path;
+    const paths = this.plugin.listGoalscapes();
+    // 当前图可能在别的目录、或文件还没建出来：菜单里也得列出它，否则没有打勾项
+    if (!paths.includes(current)) paths.unshift(current);
 
-  private async addViaToolbar(position: "child" | "sibling"): Promise<void> {
-    const scape = this.plugin.store.scape;
-    if (!scape) return;
-    if (position === "sibling" && !this.selectedId) {
-      new Notice("Select a goal first");
-      return;
+    const menu = new Menu();
+    for (const p of paths) {
+      menu.addItem((item) =>
+        item.setTitle(scapeName(p))
+          .setIcon("target")
+          .setChecked(p === current)
+          .onClick(() => void this.plugin.switchGoalscape(p))
+      );
     }
-    const refId = this.selectedId ?? scape.mainGoal.id;
-    const title = await promptInput(this.app, position === "child" ? "New subgoal" : "New sibling goal", "New Goal");
-    if (title === null) return;
-    this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
-  }
-
-  private async deleteSelected(): Promise<void> {
-    if (!this.selectedId) {
-      new Notice("Select a goal first");
-      return;
-    }
-    const id = this.selectedId;
-    const scape = this.plugin.store.scape;
-    const found = scape ? findNode(scape.mainGoal, id) : null;
-    if (!found || !(await confirmDeleteGoal(this.app, found.node))) return;
-    this.plugin.store.mutate((s) => deleteGoal(s, id));
-    this.clearSelection();
+    menu.showAtMouseEvent(event);
   }
 
   // ──────────────────────────── 渲染 ────────────────────────────

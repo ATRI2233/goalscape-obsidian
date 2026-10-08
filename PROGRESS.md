@@ -309,6 +309,81 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
   5. 脚本读盘要重试：`adapter.write` 先截断再写，`fs.statSync` 可能正好撞上 0 字节（实测随后就是完整 656B，
      不是数据丢失；但也说明**落盘不是原子的**，进程在写中途被杀有留空文件的风险，读侧已有"拒空文件 + 保留内存副本"兜底）。
 
+### 新增：上栏的"呈现方式切换器"（已构建部署 + CDP 实测）
+- 需求：把三种已有呈现方式的切换放进上栏，放在图文件选择器右边；随后又要求把 `.canvas` 也放进去。
+- 实现：
+  - `src/views/viewTypes.ts` —— 三个 `VIEW_*` 常量与 `VIEW_OPTIONS` 挪到这个中立模块。原先常量各自
+    export 在视图文件里，切换器要列全三种就得 import `radialView`，而 `radialView` 又 import 切换器 →
+    循环依赖，esbuild 打包后 `radialView` 还没初始化完就被读常量，拿到的是 undefined。
+  - `src/views/viewSwitcher.ts` —— `createViewSwitcher(container, plugin, leaf, currentType)`，共 4 项：
+    Radial map / Goal list / Gantt / Canvas (白板)。
+  - **前三项走 `leaf.setViewState({type, active:true})` 在原标签页内换视图**，故意不走 `plugin.openView()`：
+    后者每种视图各占一个标签，来回切几轮工作区就堆出三个 Goalscape 标签（和命令面板的"打开某视图"语义不同）。
+  - Canvas 不是本插件的视图而是 vault 里的 `.canvas` 文件 → 走 `plugin.openCanvas()`，并把下拉选中项
+    退回当前视图（否则选中项会停在本标签页并不存在的模式上）；白板标签页由 Obsidian 自己接管。
+  - 放射图：切换器插在 `mapSelect` 之后、`New map` 之前。列表/甘特原本连顶栏都没有，各加一条
+    `.goalscape-view-bar`（只放切换器，内边距与下边框对齐放射图工具栏）。
+- **白板是单向导出**（回答"在白板里改了会不会回数据库"）：`toCanvas()`  scape→canvas 单向，
+  `canvasToJson()` 只是 `JSON.stringify`，**没有任何反向解析**；`GoalNode` 里也没有 x/y 字段，
+  位置在数据层无处可存。所以白板里改文字、挪位置、加连线都不会回到 `*.goalscape.json`。
+  据此把切换器的 Canvas 项做成**文件已存在就原样打开、只在缺失时生成**，避免一点就把手工布局冲掉；
+  要重算布局仍用命令面板的 "Export to .canvas"（它 `vault.modify` 整文件覆盖）。
+- **白板文件名改为按图文件名派生**（`canvasPathFor()`，命令与切换器共用一处规则）：原实现用
+  `scape.mainGoal.title` 清洗后当文件名，而每张新图默认根标题都是 "Main Goal" → 多张图抢同一个
+  `Main_Goal.canvas`；且根标题一改（实测用户把 life 的根改成 "Main"）白板就"落"在旧文件里。
+- 实测（`D:/tmp/wrap6.mjs`、`D:/tmp/wrap7.mjs`，共 18 项断言全过）：控件顺序
+  `select:map → select:view → New map → +Subgoal → +Sibling → Delete`；下拉 4 项；
+  前三项连切 5 轮全程恰好 1 个 Goalscape 标签、选中项始终等于当前视图、内容各自正常；
+  Canvas：无文件时生成 `Goalscapes/<图名>.canvas`（4 节点 / 3 连线，与树一致）并开白板标签、原视图标签不动、
+  下拉回退；手工把某节点改成 x=9999/y=-8888/文本改字后再点 Canvas → **值原样保留**（未重算）、复用同一白板标签；
+  跑 "Export to .canvas" → 坐标回到 75/521、文本恢复（证明只有命令导出会覆盖）；
+  两张 `.goalscape.json` 的 size+mtime 全程未变。测试生成的 canvas 已删除。
+- 未做：列表/甘特的顶栏里没有图文件选择器（换图仍要去放射图或命令面板）。要补的话，把 `mapSelect` 连同
+  `refreshMapList` 抽成共享组件，三个视图共用一条顶栏。
+  （**本节的两处下拉已被下一节的单行工具栏整体取代**，这条"未做"里的组件抽取仍然成立，名字换成
+  `.goalscape-map-btn` + `refreshMapButton`。）
+
+### 工具栏瘦身：单行、只留切换与筛选（已构建部署 + CDP 实测）
+- 需求（用户 2026-10-08）：`+ Subgoal` / `+ Sibling` / `Delete` 右键菜单里都有，`New map` 也该走
+  目录栏右键（Obsidian 在那里本来就提供"新建笔记/白板"），工具栏**只做切换与筛选**、收成一行别撑宽；
+  "点下拉切换"这个交互太原始。三个开放点用 AskUserQuestion 拍板：分段图标按钮 + 图文件原生菜单、
+  筛选全部收进漏斗浮层、新建仍固定落 `Goalscapes/`。
+- 实现：
+  - `viewSwitcher.ts`：`<select>` → 一排图标按钮（`.goalscape-view-switch` / `.goalscape-view-seg`），
+    当前项 `.is-active` 高亮、单击即切。切换仍走 `leaf.setViewState`（同一标签页内换视图），
+    Canvas 仍走 `plugin.openCanvas()` 且**高亮段不动**（本标签页没换视图）。`viewTypes.ts` 的
+    `ViewOption` 因此多了 `icon` 字段。
+  - `radialView.ts`：`mapSelect` → `.goalscape-map-btn`，只显示当前图文件名（长名省略号截断，不撑宽），
+    点开是 Obsidian 原生 `Menu`，当前项 `setChecked(true)`（DOM 上是 `.menu-item.mod-checked`）。
+  - `focusFilter.ts`：常驻第二行 → 漏斗按钮 + 绝对定位浮层。浮层是 `.goalscape-toolbar` 的子元素，
+    所以工具栏要 `position:relative` **且不能设 overflow**，否则浮层被裁。筛选生效时漏斗右上角亮小圆点。
+    控件语义一个没动（Tag/Min/Max/Color/Clear 原样，**没有**借这次改版加 `Color` 文字标签——那件事仍等点头）。
+    构造函数不再收 `plugin`（原本就没用到）。
+  - 点浮层外关闭 + Escape：监听挂在视图的 `registerDomEvent(document, 'click', …, true)`（捕获阶段），
+    随视图销毁自动解绑；不手写 `addEventListener`，避免重演信息面板那次监听泄漏。
+  - 删掉 `New map` / `+ Subgoal` / `+ Sibling` / `Delete` 四按钮和 `newMap`/`addViaToolbar`/`deleteSelected`，
+    `radialView` 的 `addGoal`/`deleteGoal`/`findNode`/`promptInput`/`Notice`/`confirmDeleteGoal` import 一并去掉
+    （`confirmDeleteGoal` 现在只有 `radialMenu` 内部用）。
+  - `main.ts`：`workspace.on('file-menu')` 里**只对 `TFolder`** 加 "New goalscape"（目录栏空白处右键拿到的
+    就是根目录，所以也有）；`promptNewGoalscape` 建完 `openView(VIEW_RADIAL)` —— 入口挪到目录栏后用户
+    可能正看着笔记，不打开就只剩一条 Notice 什么都没有。
+  - **连带修复**：`refreshMapSelectors` 现在同时 `clearSelection()`。原 `New map` 按钮里有这句清理，
+    入口搬走后必须挪到这里，否则从命令面板/目录栏新建换图后，信息面板会显示上一张图的 "Goal not found."；
+    `refreshMapList()` 随之改名 `refreshMapButton()`。
+- 实测（`D:/tmp/tb_a.mjs`、`D:/tmp/tb_b.mjs`）：工具栏正好 4 个子元素、高 40px、无 New map/Subgoal/Sibling/Delete
+  文案、无旧 `select`/`filter-wrap` 残留；4 段图标都被解析（target=3 circle、list=6 line、calendar=4、
+  layout-grid=4 rect，宽度齐 26px）；连切 5 轮全程恰好 1 个 Goalscape 标签、高亮段始终等于当前视图；
+  图名菜单列出 2 张图且当前项 `mod-checked`、点选后标签与扇区同步；选中 Health 后换图 → 面板回到
+  "Select a goal…"；浮层默认收起、点漏斗展开在工具栏下方（233px）、Tag 输无匹配串 → 4/4 降饱和 + 圆点亮、
+  点图区关面板但筛选仍生效、再点漏斗"先开后关"没被抢关、Clear 归零且面板保持展开；
+  `Goalscapes` 文件夹右键 15 项含 New goalscape、目录栏空白处右键 6 项也含；点它 → 弹窗输 `ZZ_tbtest` →
+  Confirm → `Goalscapes/ZZ_tbtest.goalscape.json` 建出、自动切到放射图、标签变 `ZZ_tbtest`。暗/亮两主题截图。
+- 顺手修：`main.ts` 里 `canvasPathFor`/`openCanvas` 两段中文注释被前人写成了 `\u767d\u677f` 这样的转义序列
+  （在注释里就是字面乱码），已解码回可读中文。
+- 现场：`ZZ_tbtest` 已删，`store.path` 与 `data.json` 回到本次开始时的 `Goalscapes/My Goalscape.goalscape.json`，
+  活动标签切回 `Untitled.md`。`life.goalscape.json` 在 12:31 被**用户本人**改动（三段 importance 归一成
+  45.34/39.66/15、Relationships 下新增 "New Goal"、根 color `#57cb82`）——不是测试残留，**未回滚**。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：

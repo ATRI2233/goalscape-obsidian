@@ -5,8 +5,8 @@ import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode } from "../data/types";
 import { renameGoal } from "../data/crud";
-
-export const VIEW_LIST = "goalscape-list-view";
+import { VIEW_LIST } from "./viewTypes";
+import { createViewSwitcher } from "./viewSwitcher";
 
 export class GoalListView extends ItemView {
   private unsubscribe?: () => void;
@@ -23,6 +23,8 @@ export class GoalListView extends ItemView {
   async onOpen(): Promise<void> {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
+    const bar = this.contentEl.createDiv({ cls: "goalscape-view-bar" });
+    createViewSwitcher(bar, this.plugin, this.leaf, VIEW_LIST);
     this.rootEl = this.contentEl.createDiv({ cls: "goalscape-list-root" });
     this.unsubscribe = this.plugin.store.subscribe(() => this.render());
     this.render();

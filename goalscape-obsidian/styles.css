@@ -16,77 +16,168 @@
 
 /* ═══════════════ 工具栏 / Focus Filter ═══════════════ */
 
+/* 单行工具栏：呈现方式分段按钮 + 当前图文件名 + 漏斗。增删改在扇区右键菜单里。
+   position:relative 是给筛选浮层当定位父元素的；不要设 overflow，否则浮层会被裁掉。 */
 .goalscape-toolbar {
   flex: 0 0 auto;
-  border-bottom: 1px solid var(--background-modifier-border);
-  padding: 8px 12px;
+  position: relative;
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
+  align-items: center;
   gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
 }
 
-/* 顶部操作区：图选择器 + 新建 + 增删按钮 */
-.goalscape-actions {
+/* 呈现方式：一排图标按钮，当前项高亮，单击即切 */
+.goalscape-view-switch {
   display: flex;
   align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
 }
 
-.goalscape-map-select {
-  height: 28px;
-  max-width: 180px;
-  padding: 0 8px;
-  font-size: 13px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 5px;
-  background: var(--background-secondary);
-  color: var(--text-normal);
-  margin-right: 4px;
-}
-
-.goalscape-btn {
-  height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 5px;
-  background: var(--background-secondary);
-  color: var(--text-normal);
+.goalscape-view-seg {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: var(--radius-s);
+  background: transparent;
+  color: var(--text-muted);
   cursor: pointer;
 }
 
-.goalscape-btn:hover {
+.goalscape-view-seg:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.goalscape-view-seg.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.goalscape-view-seg svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 当前图文件名：点开是 Obsidian 原生菜单，长名字省略号截断，不撑宽工具栏 */
+.goalscape-map-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 150px;
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.goalscape-map-btn:hover {
   background: var(--background-modifier-hover);
 }
 
-.goalscape-btn-danger:hover {
-  background: var(--background-modifier-error);
-  color: #fff;
+.goalscape-map-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.goalscape-filter-wrap {
+.goalscape-map-chevron {
+  flex: 0 0 auto;
   display: flex;
+  color: var(--text-muted);
 }
 
-.goalscape-filter-bar {
+.goalscape-map-chevron svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* 漏斗按钮：筛选生效时右上角亮一个小圆点 */
+.goalscape-filter-btn {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.goalscape-filter-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.goalscape-filter-btn.is-active {
+  color: var(--interactive-accent);
+}
+
+.goalscape-filter-btn.is-active::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
+}
+
+.goalscape-filter-btn svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 列表与甘特视图顶栏：这两个视图没有完整工具栏，只放切换器；内边距与放射图工具栏对齐 */
+.goalscape-view-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+/* 筛选浮层：贴在工具栏下方，宽度自适应内容，不占工具栏的横向空间 */
+.goalscape-filter-popover {
+  position: absolute;
+  top: calc(100% - 2px);
+  left: 10px;
+  z-index: 20;
   display: flex;
   flex-direction: column;
-  width: 100%;
+  gap: 8px;
+  min-width: 230px;
+  padding: 10px 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
 }
 
 .goalscape-filter-row {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: wrap;
-}
-
-.goalscape-filter-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  white-space: nowrap;
 }
 
 .goalscape-filter-input {
@@ -98,6 +189,11 @@
   background: var(--background-primary-alt);
   color: var(--text-normal);
   width: 100px;
+}
+
+.goalscape-filter-tag {
+  flex: 1 1 auto;
+  width: 100%;
 }
 
 .goalscape-filter-narrow {
