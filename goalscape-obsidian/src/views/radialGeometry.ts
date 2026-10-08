@@ -19,7 +19,7 @@ export const CX = VIEW_SIZE / 2;
 export const CY = VIEW_SIZE / 2;
 export const MAX_R = VIEW_SIZE / 2 - 20;
 
-export const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
+const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
@@ -57,13 +57,13 @@ export function bandScaleOf(node: GoalNode): number {
 }
 
 /** 画得出来的层数（折叠的子树算一层），决定"标准档"下每层的厚度 */
-export function visibleDepth(node: GoalNode, depth = 0): number {
+function visibleDepth(node: GoalNode, depth = 0): number {
   if (!node.children.length || node.collapsed) return depth;
   return Math.max(...node.children.map((c) => visibleDepth(c, depth + 1)));
 }
 
 /** 从根到该节点（含自身）的累计档数，只用于判"会不会画到 MAX_R 之外" */
-export function depthWeight(node: GoalNode): number {
+function depthWeight(node: GoalNode): number {
   let deepest = 0;
   for (const c of node.children) deepest = Math.max(deepest, depthWeight(c));
   return bandScaleOf(node) + deepest;
@@ -140,7 +140,7 @@ export function sectorEdges(
   return { rInner, rOuter, a0: shape.startAngle + pad, a1: shape.endAngle - pad };
 }
 
-export function estimateTextWidth(text: string, fontSize = LABEL_FONT): number {
+function estimateTextWidth(text: string, fontSize = LABEL_FONT): number {
   let w = 0;
   for (const ch of text) w += CJK.test(ch) ? fontSize : fontSize * 0.58;
   return w;

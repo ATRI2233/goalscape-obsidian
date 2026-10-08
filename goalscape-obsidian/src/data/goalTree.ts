@@ -6,7 +6,11 @@ import { TFile, Plugin, Notice } from "obsidian";
 import { GoalScape, GoalNode, createGoalNode } from "./types";
 import { recalcTree } from "./rollup";
 
-export const DEFAULT_GOALSCAPE_PATH = "Goalscapes/life.goalscape.json";
+/** vault 里存放 goalscape 文件的目录与扩展名，多处按它筛选/建档，只在这一处定义 */
+export const GOALSCAPE_FOLDER = "Goalscapes";
+export const GOALSCAPE_SUFFIX = ".goalscape.json";
+
+export const DEFAULT_GOALSCAPE_PATH = `${GOALSCAPE_FOLDER}/life${GOALSCAPE_SUFFIX}`;
 
 /** 已废弃字段：旧 JSON 里仍带着它，读档时清掉，落盘后自然消失 */
 type LegacyNode = GoalNode & { responsible?: unknown };

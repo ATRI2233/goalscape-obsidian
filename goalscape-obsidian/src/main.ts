@@ -1,8 +1,8 @@
 // src/main.ts
 // Goalscape Obsidian 插件入口。负责初始化数据层、注册视图与命令。
 
-import { Plugin, TFile, TFolder, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
-import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH } from "./data/goalTree";
+import { App, Plugin, TFile, TFolder, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
+import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH, GOALSCAPE_FOLDER, GOALSCAPE_SUFFIX } from "./data/goalTree";
 import { RadialGoalMapView } from "./views/radialView";
 import { GoalListView } from "./views/listView";
 import { GanttView } from "./views/ganttView";
@@ -96,7 +96,7 @@ export default class GoalscapePlugin extends Plugin {
   listGoalscapes(): string[] {
     return this.app.vault
       .getFiles()
-      .filter((f) => f.path.startsWith("Goalscapes/") && f.path.endsWith(".goalscape.json"))
+      .filter((f) => f.path.startsWith(`${GOALSCAPE_FOLDER}/`) && f.path.endsWith(GOALSCAPE_SUFFIX))
       .map((f) => f.path)
       .sort();
   }
@@ -110,7 +110,7 @@ export default class GoalscapePlugin extends Plugin {
 
   async createGoalscape(name: string): Promise<void> {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
-    const path = `Goalscapes/${safe}.goalscape.json`;
+    const path = `${GOALSCAPE_FOLDER}/${safe}${GOALSCAPE_SUFFIX}`;
     if (await this.app.vault.adapter.exists(path)) {
       new Notice(`已存在同名 goalscape：${safe}`);
       await this.switchGoalscape(path);
@@ -257,7 +257,7 @@ export default class GoalscapePlugin extends Plugin {
 }
 
 class TemplateModal extends Modal {
-  constructor(app: any, private plugin: GoalscapePlugin) {
+  constructor(app: App, private plugin: GoalscapePlugin) {
     super(app);
   }
 

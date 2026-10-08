@@ -39,7 +39,7 @@ export class SubtreeClipboard {
 }
 
 /** 删除没有撤销，带后代的节点会一整支消失，所以这种情况必须先确认 */
-export async function confirmDeleteGoal(app: App, node: GoalNode): Promise<boolean> {
+async function confirmDeleteGoal(app: App, node: GoalNode): Promise<boolean> {
   const descendants = flattenTree(node).length - 1;
   if (!descendants) return true;
   return confirmAction(

@@ -108,7 +108,9 @@ function recalcTree(root) {
 }
 
 // src/data/goalTree.ts
-var DEFAULT_GOALSCAPE_PATH = "Goalscapes/life.goalscape.json";
+var GOALSCAPE_FOLDER = "Goalscapes";
+var GOALSCAPE_SUFFIX = ".goalscape.json";
+var DEFAULT_GOALSCAPE_PATH = `${GOALSCAPE_FOLDER}/life${GOALSCAPE_SUFFIX}`;
 function createDefaultScape() {
   return {
     version: 1,
@@ -2310,7 +2312,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
   }
   // ──────────────────────────── 多 goalscape 管理 ────────────────────────────
   listGoalscapes() {
-    return this.app.vault.getFiles().filter((f) => f.path.startsWith("Goalscapes/") && f.path.endsWith(".goalscape.json")).map((f) => f.path).sort();
+    return this.app.vault.getFiles().filter((f) => f.path.startsWith(`${GOALSCAPE_FOLDER}/`) && f.path.endsWith(GOALSCAPE_SUFFIX)).map((f) => f.path).sort();
   }
   async switchGoalscape(path) {
     if (path === this.store.path)
@@ -2321,7 +2323,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
   }
   async createGoalscape(name) {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
-    const path = `Goalscapes/${safe}.goalscape.json`;
+    const path = `${GOALSCAPE_FOLDER}/${safe}${GOALSCAPE_SUFFIX}`;
     if (await this.app.vault.adapter.exists(path)) {
       new import_obsidian11.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
       await this.switchGoalscape(path);

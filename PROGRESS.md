@@ -455,6 +455,33 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
 - 未做：① 模板数值仍是"和=100"，在新语义下会铺满整圆，要不要出留白版模板待用户点头；
   ② 深图钻取（超过 4 层只展开到第 K 层）没做；③ 三档之外的"任意环厚微调"没做。
 
+### 架构健康度复查 + 干净度清理（2026-10-08，构建/tsc/单测全过，零行为变化）
+- 复查数据：`src` 里**没有超过 500 行的文件**（最大 `radialView.ts` 334、`infoPanel.ts` 332、`main.ts` 299），
+  唯一的长文件是 `test/ui-regression.mjs` 593 行——回归脚本，不参与打包。
+  `npm run build`（`tsc -noEmit -skipLibCheck` + esbuild production）干净，`npm test` 78/78。
+  **`main.js` 与 `src` 同步**：build 之后 `git status` 对 main.js 无 diff，说明 HEAD 里的包确实是从 HEAD 的源码构建的
+  （此前发现过它落后于源码，这次核对已对齐）。
+- 四处小清理（都是"去掉不存在的依赖面"，不碰逻辑）：
+  1. `TemplateModal` 构造参数 `app: any` → `App`。至此 `src`（排除测试）里 `as any` 与 `: any` **全为 0**。
+  2. 取消 5 个"只在自己文件里用"的 `export`：`radialGeometry` 的 `PROGRESS_STOPS` / `visibleDepth` /
+     `depthWeight` / `estimateTextWidth`，`radialMenu` 的 `confirmDeleteGoal`。
+     判据是跨文件 grep 零命中——留着等于对外承诺了一组没人用的入口，以后改签名会被误当作公共 API。
+  3. `"Goalscapes/"` 与 `".goalscape.json"` 原散在 `main.ts` 三处 + `goalTree.ts` 的默认路径里，
+     抽成 `GOALSCAPE_FOLDER` / `GOALSCAPE_SUFFIX`，`DEFAULT_GOALSCAPE_PATH` 由两者拼出。
+     `ensureFolder()` 本来就是从 `this.path` 反推目录、没有字面量，所以只有这一处真源。
+  4. 确认三个视图各自的 `store.subscribe(() => this.render())` 不算重复——没有共同的 `onClose`/根节点结构可抽，
+     为三行相同代码造基类是本末倒置。
+- **构建脚本的结论：不需要新增**。现有 `dev`（watch）/ `build`（tsc + 打包）/ `tsc`（只查类型）/
+  `test`（数据层）/ `test:ui`（真实 Obsidian 回归）+ 仓库根 `install-plugin.bat`（GBK+CRLF）已经覆盖
+  "改→查→打包→测→部署"全链，再叠一层脚本只会多一个会过期的入口。
+  两个可选项，等点头再加：`check` = `build && test`（一条命令跑完离线校验）；`deploy` = `build` 后调 bat。
+  **注意 bat 只替换 vault 里的 `main.js`，正在运行的 Obsidian 不会热加载**，必须 disable/enable 插件才生效。
+- 已知偏差（记录，不返工）：`tech-plan.txt` §六 骨架里的 `README.md` 没有（文档职责由本文件承担）、
+  `src/export/pngSvgCsv.ts` 实际叫 `exporters.ts`；`tsconfig.json` 的 `strict` 仍是关着的（只开 `strictNullChecks`），
+  真开 strict 是一轮独立的类型修正，不属于"清理"。
+- `D:/tmp` 里 67 个 CDP/穷举验证脚本仍在，本文件引用了其中几个（`color2.mjs`、`drag.mjs` 等）作证据，
+  既没入库也没删。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
@@ -470,6 +497,9 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
   提亮，见"收口实测"一节。
 - Focus Filter 色块的**可读性改造**没做（加 `Color` 文字标签，或换成"本图已用颜色"下拉以避开严格相等的坑）——
   已把语义讲清楚给用户，等点头再做。
+- 上一节那次清理**没跑 `npm run test:ui`**（不碰真实 Obsidian）：改动只有 `export` 关键字、一处类型标注、
+  常量拼接，打包后 `main.js` 只差 3 行同义字面量，`tsc` + 78 条数据层断言足以覆盖。
+  若要走完整收口，补一次 `test:ui` 即可。
 
 ## 后续计划（按优先级）
 
