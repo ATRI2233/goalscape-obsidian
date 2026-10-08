@@ -3,6 +3,8 @@
 //
 //   npm run test:ui                          全部
 //   node test/ui-regression.mjs toolbar map  只跑名字含这些词的步骤
+//   npm run check                            一条命令跑完：检查/打包/部署/单测 + 这一步
+//                                            （9333 不通时这一步记 SKIP，不当失败）
 //
 // 前提：Obsidian 以 --remote-debugging-port=9333 启动，**窗口必须在最前台**
 // （后台 renderer 会被挂起，任何 CDP 命令都不响应），且 vault 里已装好本插件的
@@ -15,7 +17,12 @@
 //
 // 断言按**结构**写、不按界面文案写（类名、svg 子元素个数、input type 计数）：
 // 上一版 4 个"FAIL"全是脚本期望错（打勾类名是 mod-checked、lucide 图标是 circle/line/rect
-// 而非 path），界面微调也会连带改坏断言。等待统一走 waitFor 轮询，不再撒固定 setTimeout。
+// 而非 path），界面微调也会连带改坏断言。
+//
+// 等待分三等，从快到慢依次是：waitFor(谓词) → 页内 __gsSettle(两帧，上限兜底) →
+// 固定 setTimeout。最后一种只剩 6 处，等的都是 Obsidian 自己的异步
+// （插件重载、换视图、开原生菜单、建文件），不是"我们渲染完了没"。
+// 能在 npm test（2 秒、不开界面）里判的东西一律不放这儿。
 
 import fs from "node:fs";
 import path from "node:path";
@@ -94,6 +101,11 @@ async function connect() {
     const m = JSON.parse(e.data);
     if (m.id && conn.pend.has(m.id)) { conn.pend.get(m.id)(m); conn.pend.delete(m.id); }
   });
+  // 页内等待原语：视图渲染在 mutate 的那一个 JS 任务里就同步跑完了，所以页内"等一下"
+  // 其实只要等浏览器出两帧。跟调用方给的上限时间赛跑 —— 窗口被遮挡时 rAF 不回来，
+  // 也就退化成原来那记固定等待，不会更久。
+  await ev(`window.__gsSettle=(cap=400)=>new Promise(r=>{
+    requestAnimationFrame(()=>requestAnimationFrame(()=>r(1)));setTimeout(()=>r(1),cap)})`);
 }
 
 function send(method, params = {}) {
@@ -119,7 +131,7 @@ async function waitFor(expr, label, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (await ev(`!!(${expr})`)) return;
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => setTimeout(r, 40));
   }
   throw new Error(`等待超时（${timeout}ms）：${label}`);
 }
@@ -165,7 +177,7 @@ async function restore() {
         const f=app.vault.getAbstractFileByPath(p); if(f) await app.vault.delete(f);
       }
       if(pl.store.path!==${JSON.stringify(start.path)}) await pl.switchGoalscape(${JSON.stringify(start.path)});
-      await new Promise(r=>setTimeout(r,400));
+      await __gsSettle(400);
       return pl.store.path;})()`);
     notes.push(`path=${start.path}`);
   } catch (e) { notes.push(`还原 store 失败：${e.message}`); }
@@ -286,7 +298,7 @@ step("map-menu 图文件名按钮与原生菜单", async () => {
     const pl=${PL}; const v=pl.radialViews()[0];
     const id=[...document.querySelectorAll('svg.goalscape-radial-svg path[data-id]')]
       .map(p=>p.getAttribute('data-id')).find(x=>x!==pl.store.scape.mainGoal.id);
-    v.select(id); await new Promise(r=>setTimeout(r,300));
+    v.select(id); await __gsSettle(300);
     const withSel=document.querySelector('.goalscape-panel').textContent.trim();
     [...document.querySelectorAll('.menu .menu-item')].find(i=>i.textContent.trim()===${JSON.stringify(targetName)})
       .dispatchEvent(new MouseEvent('click',{bubbles:true}));
@@ -324,7 +336,7 @@ step("filter 漏斗浮层筛选", async () => {
   const dim = await json(`(async()=>{
     const tag=document.querySelector('.goalscape-filter-tag');
     tag.value='zzz-no-such-tag'; tag.dispatchEvent(new Event('change',{bubbles:true}));
-    await new Promise(r=>setTimeout(r,400));
+    await __gsSettle(400);
     return {dimmed:document.querySelectorAll('svg.goalscape-radial-svg path[data-id].goalscape-dimmed').length,
       all:document.querySelectorAll('svg.goalscape-radial-svg path[data-id]').length,
       sheen:document.querySelectorAll('svg.goalscape-radial-svg .goalscape-bevel.goalscape-dimmed').length,
@@ -335,7 +347,7 @@ step("filter 漏斗浮层筛选", async () => {
 
   const away = await json(`(async()=>{
     document.querySelector('svg.goalscape-radial-svg').dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:500,clientY:400}));
-    await new Promise(r=>setTimeout(r,300));
+    await __gsSettle(300);
     return {closed:!document.querySelector('.goalscape-filter-popover').offsetParent,
       dot:document.querySelector('.goalscape-filter-btn').classList.contains('is-active'),
       dimmed:document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-dimmed').length};})()`);
@@ -343,17 +355,17 @@ step("filter 漏斗浮层筛选", async () => {
 
   const toggle = await json(`(async()=>{
     const b=document.querySelector('.goalscape-filter-btn');
-    b.dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,250));
+    b.dispatchEvent(new MouseEvent('click',{bubbles:true})); await __gsSettle(250);
     const open=!!document.querySelector('.goalscape-filter-popover').offsetParent;
-    b.dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,250));
+    b.dispatchEvent(new MouseEvent('click',{bubbles:true})); await __gsSettle(250);
     return {open, closedAgain:!document.querySelector('.goalscape-filter-popover').offsetParent};})()`);
   ok("再点漏斗：先开后关（捕获阶段的点外面判定没抢关）", toggle.open && toggle.closedAgain, JSON.stringify(toggle));
 
   const cleared = await json(`(async()=>{
     document.querySelector('.goalscape-filter-btn').dispatchEvent(new MouseEvent('click',{bubbles:true}));
-    await new Promise(r=>setTimeout(r,250));
+    await __gsSettle(250);
     document.querySelector('.goalscape-filter-clear').dispatchEvent(new MouseEvent('click',{bubbles:true}));
-    await new Promise(r=>setTimeout(r,400));
+    await __gsSettle(400);
     return {dimmed:document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-dimmed').length,
       dot:document.querySelector('.goalscape-filter-btn').classList.contains('is-active'),
       tag:document.querySelector('.goalscape-filter-tag').value,
@@ -369,7 +381,7 @@ step("file-menu 目录栏右键新建图", async () => {
     if(!title) return {err:'目录栏里找不到 ${SCAPE_DIR_NAME} 文件夹（可能被折叠）'};
     const r=title.getBoundingClientRect();
     title.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true,button:2,clientX:r.left+30,clientY:r.top+8}));
-    await new Promise(x=>setTimeout(x,500));
+    await new Promise(r=>setTimeout(r,500));
     return {items:[...document.querySelectorAll('.menu .menu-item')].map(i=>i.textContent.trim())};})()`);
   if (folder.err) { skipped(folder.err); return; }
   const clicked = await json(`(()=>{const i=[...document.querySelectorAll('.menu .menu-item')]
@@ -482,11 +494,32 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
   const tree = await json(`(async()=>{
     const pl=${PL};
     pl.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(FOREST))};});
-    await new Promise(r=>setTimeout(r,600));
+    // 不用等：mutate → notify → render 是同一个 JS 任务里同步跑完的
     const v=pl.radialViews()[0];
     const shapes={}; for(const [id,s] of v.nodePositions) shapes[id]={rIn:Math.round(s.rInner),rOut:Math.round(s.rOuter),span:+(s.endAngle-s.startAngle).toFixed(4)};
     const bbox=document.querySelector('svg.goalscape-radial-svg').getBBox();
+    // 标签到底有没有画在自己那块扇区里：拿浏览器真实排出来的包围盒（不是代码里的字宽估算），
+    // 四个角映回用户坐标逐角比半径和角度。上一版"预算按弧长、字却沿半径写"就是这么露馅的。
+    const svg=document.querySelector('svg.goalscape-radial-svg');
+    const toUser=svg.getScreenCTM().inverse();
+    const spill=[], modes={};
+    for(const t of svg.querySelectorAll('text.goalscape-label[data-id]')){
+      const id=t.getAttribute('data-id'), s=v.nodePositions.get(id);
+      modes[t.getAttribute('data-mode')]=(modes[t.getAttribute('data-mode')]||0)+1;
+      if(!s) continue;
+      const m=t.getScreenCTM().multiply(toUser), b=t.getBBox(), mid=(s.startAngle+s.endAngle)/2;
+      let out=0;
+      for(const [x,y] of [[b.x,b.y],[b.x+b.width,b.y],[b.x,b.y+b.height],[b.x+b.width,b.y+b.height]]){
+        const p=new DOMPoint(x,y).matrixTransform(m), r=Math.hypot(p.x-500,p.y-500);
+        if(r<s.rInner-1||r>s.rOuter+1){out++;break;}
+        let d=Math.atan2(p.y-500,p.x-500)-mid;
+        while(d>Math.PI)d-=Math.PI*2; while(d<-Math.PI)d+=Math.PI*2;
+        if(Math.abs(d)>(s.endAngle-s.startAngle)/2+0.01){out++;break;}
+      }
+      if(out)spill.push(id+'（'+t.textContent+'）');
+    }
     return {shapes,bbox:{x:Math.round(bbox.x),y:Math.round(bbox.y),w:Math.round(bbox.width),h:Math.round(bbox.height)},
+      spill,modes,
       labels:[...document.querySelectorAll('.goalscape-label')].map(t=>t.textContent),
       sectors:[...document.querySelectorAll('svg.goalscape-radial-svg path[data-id]')]
         .map(p=>({id:p.getAttribute('data-id'),tip:p.querySelector('title')?.textContent||''}))};})()`);
@@ -513,12 +546,15 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     JSON.stringify(tree.bbox));
   const truncated = tree.labels.filter((t) => t.endsWith("…"));
   ok("画不下的长标题截断成省略号（而不是整格空白）", truncated.length > 0, JSON.stringify(tree.labels));
+  ok("标签的渲染包围盒全在自己扇区里（不捅出外径、不压到隔壁分支）",
+    tree.spill.length === 0, tree.spill.join(" | "));
+  ok("顺环写和沿半径写两种都用上了（宽扇区不再被环带厚度卡住字数）",
+    tree.modes.tangential > 0 && tree.modes.radial > 0, JSON.stringify(tree.modes));
   // 根节点会画两行（标题 + 百分比），所以不能拿 label 数和 sector 数比大小，按内容判
   const narrow = tree.shapes["n-极窄也要有个名字的小目标"];
-  const narrowArc = narrow.span * (narrow.rIn + narrow.rOut) / 2;
-  ok("弧长不够的窄格不画字，但扇区仍在、<title> 全名也在（悬停可辨）",
-    narrowArc < 26 && !tree.labels.some((t) => t.includes("极窄")) && !!narrow,
-    `arc=${narrowArc.toFixed(1)}px labels含极窄=${tree.labels.some((t) => t.includes("极窄"))}`);
+  ok("1.5% 的细条连 11px 的字高都放不下 → 不写字，但扇区仍在、<title> 全名也在（悬停可辨）",
+    !!narrow && !tree.labels.some((t) => t.includes("极窄")),
+    `span=${((narrow?.span ?? 0) * 180 / Math.PI).toFixed(1)}°`);
   ok("每个扇区都带 <title> 全名",
     tree.sectors.every((s) => s.tip.startsWith(s.id.replace(/^n-/, ""))),
     JSON.stringify(tree.sectors.filter((s) => !s.tip.startsWith(s.id.replace(/^n-/, ""))).slice(0, 2)));
@@ -533,7 +569,7 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     const el=document.elementFromPoint(p.x,p.y);
     el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7,isPrimary:true,clientX:p.x,clientY:p.y}));
     el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7,isPrimary:true,clientX:p.x,clientY:p.y}));
-    await new Promise(r=>setTimeout(r,400));
+    await __gsSettle(400);
     return {hit:el.getAttribute('data-id'), panel:document.querySelector('.goalscape-panel').textContent.trim().slice(0,20)};})()`);
   ok("深链扇区中心点能被命中并选中（命中测试按各自环带半径）",
     hit.hit === "n-C3" && hit.panel.includes("C3"), JSON.stringify(hit));
@@ -552,7 +588,7 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     const el=document.elementFromPoint(p.x,p.y);
     el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:9,isPrimary:true,clientX:p.x,clientY:p.y}));
     el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:9,isPrimary:true,clientX:p.x,clientY:p.y}));
-    await new Promise(r=>setTimeout(r,400));
+    await __gsSettle(400);
 
     const out={title:document.querySelector('.goalscape-panel-title').textContent,
       before:byTitle('Over').bandScale,
@@ -561,11 +597,11 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     // 父块与别的分支必须原样（早先按"累计最厚链"归一 unit，改一处全图跟着变宽窄）
     const snap=()=>{const o={};for(const [id,s] of v.nodePositions)o[id]=[Math.round(s.rInner),Math.round(s.rOuter)];return o;};
     const shapesBefore=snap();
-    btns(3).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    btns(3).dispatchEvent(new MouseEvent('click',{bubbles:true})); await __gsSettle(400);
     out.thick=byTitle('Over').bandScale;
     const shapesThick=snap();
     out.moved=Object.keys(shapesThick).filter((k)=>shapesThick[k].join()!==(shapesBefore[k]||[]).join()).sort();
-    btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await __gsSettle(400);
     out.back=byTitle('Over').bandScale;
     out.backToSame=snap()[ 'n-Root'].join()===shapesBefore['n-Root'].join() && byTitle('Over').bandScale===undefined;
     out.activeAfter=[...row().querySelectorAll('.goalscape-band-btn')].filter(b=>b.classList.contains('is-active')).length;
@@ -634,7 +670,6 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
 
   const painted = await json(`(async()=>{
     ${PL}.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(BRANCHES))};});
-    await new Promise(r=>setTimeout(r,600));
     ${FILLS}
     return fills;})()`);
   const H = (id) => hsl(painted[id]);
@@ -711,7 +746,7 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
 
   const panelAt = (id) => json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select(${JSON.stringify(id)});
-    await new Promise(r=>setTimeout(r,350));
+    await __gsSettle(350);
     const p=document.querySelector('.goalscape-panel');
     return {title:p.querySelector('.goalscape-panel-title').textContent,
       names:[...p.querySelectorAll('.setting-item-name')].map(e=>e.textContent.trim()),
@@ -731,12 +766,12 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
 
   const recolored = await json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select('n-Blue');
-    await new Promise(r=>setTimeout(r,350));
+    await __gsSettle(350);
     // 点色盘第一格（取色器和 Auto 的 title 不是 hex），不写死 hex：色盘由 palette.ts 生成，会跟着基调变
     const sw=[...document.querySelectorAll('.goalscape-panel .goalscape-swatch')].find(s=>(s.title||'').startsWith('#'));
     const pickedHex=sw.title;
     sw.dispatchEvent(new MouseEvent('click',{bubbles:true}));
-    await new Promise(r=>setTimeout(r,600));
+    await __gsSettle(600);
     ${FILLS}
     return {fills, pickedHex};})()`);
   const BLUE_IDS = ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"];
@@ -750,14 +785,14 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
 
   await json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select('n-B-mid');
-    await new Promise(r=>setTimeout(r,350));
+    await __gsSettle(350);
     const row=[...document.querySelectorAll('.goalscape-panel .setting-item')]
       .find(r=>r.querySelector('.setting-item-name')?.textContent.trim()==='Brightness');
     const el=row.querySelector('input[type=range]');
     el.value='-15';
     el.dispatchEvent(new Event('input',{bubbles:true}));
     el.dispatchEvent(new Event('change',{bubbles:true}));
-    await new Promise(r=>setTimeout(r,600));
+    await __gsSettle(600);
     // 程序化拖动留下的动态 tooltip 会一直悬在界面上，把后面的截图糊一块
     document.querySelectorAll('.tooltip').forEach(t=>t.remove());
     return 1;})()`);
@@ -782,7 +817,7 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
       const pink=s.mainGoal.children.find(c=>c.id==='n-Pink');
       pink.children.push(blue.children.splice(blue.children.findIndex(c=>c.id==='n-B-mid'),1)[0]);
     });
-    await new Promise(r=>setTimeout(r,600));
+    await __gsSettle(600);
     ${FILLS}
     return fills;})()`);
   ok("挪到别的分支下自动跟新分支的色相（旧色值根本不存在，无需同步）",
@@ -807,9 +842,9 @@ step("settings 颜色基调两根滑杆", async () => {
   const r = await json(`(async()=>{
     const pl=${PL};
     pl.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(BRANCHES))};});
-    await new Promise(x=>setTimeout(x,600));
+    await __gsSettle(600);
     app.setting.close(); app.setting.open(); app.setting.openTabById('goalscape-obsidian');
-    await new Promise(x=>setTimeout(x,500));
+    await __gsSettle(500);
     // 设置模态框会把之前看过的标签页留在 DOM 里（只是 display:none），
     // 不按可见性筛就会捞到别人的 setting-item
     const rows=[...document.querySelectorAll('.modal .setting-item')].filter(e=>e.offsetParent);
@@ -820,20 +855,20 @@ step("settings 颜色基调两根滑杆", async () => {
       if(!el) throw new Error('第 '+i+' 行没有滑杆：'+JSON.stringify(rows.map(e=>e.querySelector('.setting-item-name')?.textContent)));
       el.value=String(v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};
     const a=snap();
-    set(0,0); await new Promise(x=>setTimeout(x,450)); const soft=snap();
-    set(0,100); await new Promise(x=>setTimeout(x,450)); const loud=snap();
-    set(0,84); await new Promise(x=>setTimeout(x,450)); const back=snap();
+    set(0,0); await __gsSettle(450); const soft=snap();
+    set(0,100); await __gsSettle(450); const loud=snap();
+    set(0,84); await __gsSettle(450); const back=snap();
     const spread=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
       const v=[c(16),c(8),c(0)];return Math.max(...v)-Math.min(...v);};
     const lumOf=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
       return 0.2126*c(16)+0.7152*c(8)+0.0722*c(0);};
     // 第二根：层次调平缓，外圈与二级分支的亮度差要被压小，但不能反过来
     const gapBefore=lumOf(a['n-B-done'])-lumOf(a['n-Blue']);
-    set(1,0); await new Promise(x=>setTimeout(x,450)); const flat=snap();
+    set(1,0); await __gsSettle(450); const flat=snap();
     const gapFlat=lumOf(flat['n-B-done'])-lumOf(flat['n-Blue']);
-    set(1,100); await new Promise(x=>setTimeout(x,450)); const steep=snap();
+    set(1,100); await __gsSettle(450); const steep=snap();
     const gapSteep=lumOf(steep['n-B-done'])-lumOf(steep['n-Blue']);
-    set(1,50); await new Promise(x=>setTimeout(x,450));
+    set(1,50); await __gsSettle(450);
     app.setting.close();
     return {names, count:rows.length,
       saved:await app.vault.adapter.read('.obsidian/plugins/goalscape-obsidian/data.json').then((t)=>JSON.parse(t)).catch(()=>({})),
@@ -858,9 +893,9 @@ step("themes 暗/亮两主题截图", async () => {
   await json(`(async()=>{
     const pl=${PL};
     if(pl.store.path!==${JSON.stringify(start.path)}) await pl.switchGoalscape(${JSON.stringify(start.path)});
-    await new Promise(r=>setTimeout(r,400));
+    await __gsSettle(400);
     app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0]);
-    await new Promise(r=>setTimeout(r,300));
+    await __gsSettle(300);
     document.querySelector('.goalscape-filter-btn').dispatchEvent(new MouseEvent('click',{bubbles:true}));
     return 1;})()`);
   await waitFor(`document.querySelector('.goalscape-filter-popover').offsetParent`, "浮层展开（截图用）");

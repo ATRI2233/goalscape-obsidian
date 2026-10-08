@@ -261,16 +261,19 @@ export class RadialGoalMapView extends ItemView {
         pct.textContent = `${node.progress ?? 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        // 判"弧长够不够"而不是"角度够不够"：同样 0.14 弧度在内圈约 34px、外圈约 56px
-        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${node.progress ?? 0}%`);
-        if (text) {
+        // 顺环还是沿半径，由 fitLabel 按"哪边写得下更多字"定，这里只管落笔
+        const fit = fitLabel(node.title, edge, `${node.progress ?? 0}%`);
+        if (fit) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
           const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
-          const deg = (midAngle * 180) / Math.PI;
-          const flip = deg > 90 && deg < 270;
-          label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
-          label.textContent = text;
+          // 回归要拿"这条文字属于哪个扇区"对回环带半径，光看文案对不上（截断过的不一样）
+          label.setAttribute("data-id", node.id);
+          label.setAttribute("data-mode", fit.mode);
+          // CSS 里那档 14px 是基准，压小的字号只能内联盖过它
+          label.style.setProperty("font-size", `${fit.fontSize}px`);
+          label.setAttribute("transform", `rotate(${fit.angle.toFixed(2)} ${lx} ${ly})`);
+          label.textContent = fit.text;
         }
       }
 

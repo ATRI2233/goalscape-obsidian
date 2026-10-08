@@ -516,9 +516,11 @@ var BAND_DEFAULT_INDEX = 2;
 var INK_LIGHT = "#ffffff";
 var INK_DARK = "#0f172a";
 var LABEL_FONT = 14;
+var LABEL_SIZES = [LABEL_FONT, 13, 12, 11];
 var CJK = /[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
 var LABEL_PADDING = 10;
-var MIN_LABEL_ARC = 26;
+var LABEL_SIDE_GAP = 4;
+var LABEL_HALF_HEIGHT = LABEL_FONT / 2 + 1.5;
 function bandScaleOf(node) {
   const s = node.bandScale;
   return s && Number.isFinite(s) && s > 0 ? s : BAND_STEPS[BAND_DEFAULT_INDEX];
@@ -589,25 +591,59 @@ function estimateTextWidth(text, fontSize = LABEL_FONT) {
     w += CJK.test(ch) ? fontSize : fontSize * 0.58;
   return w;
 }
-function fitLabel(title, arc, band, progressText) {
-  if (band < 18 || arc < MIN_LABEL_ARC)
-    return null;
+function upright(deg) {
+  let a = deg;
+  while (a >= 90)
+    a -= 180;
+  while (a < -90)
+    a += 180;
+  return a;
+}
+function fitLabel(title, edge, progressText) {
+  const band = edge.rOuter - edge.rInner;
+  const rMid = (edge.rInner + edge.rOuter) / 2;
+  const mid = (edge.a0 + edge.a1) / 2;
+  const half = (edge.a1 - edge.a0) / 2;
   const suffix = progressText ? ` ${progressText}` : "";
-  const budget = arc - LABEL_PADDING;
-  if (estimateTextWidth(title + suffix) <= budget)
-    return title + suffix;
-  if (estimateTextWidth(title) <= budget)
-    return title;
-  let out = "";
-  let used = 0;
-  for (const ch of title) {
-    const w = CJK.test(ch) ? LABEL_FONT : LABEL_FONT * 0.58;
-    if (used + w + estimateTextWidth("\u2026") > budget)
-      break;
-    out += ch;
-    used += w;
+  const smallest = LABEL_SIZES[LABEL_SIZES.length - 1];
+  const rOut = edge.rOuter - LABEL_HALF_HEIGHT;
+  const tanRoom = 2 * Math.min(
+    // 直线顺环走会往外凸，端点得落在"外径减去半字高"那一圈之内
+    Math.sqrt(Math.max(0, rOut * rOut - rMid * rMid)),
+    // 半张角超过 ~74° 时早就是外径先卡住，tan 再往上只会变成负数
+    (rMid - LABEL_HALF_HEIGHT) * Math.tan(Math.min(half, 1.3))
+  ) - LABEL_PADDING;
+  const radRoom = band - LABEL_PADDING;
+  const modes = tanRoom >= radRoom ? ["tangential", "radial"] : ["radial", "tangential"];
+  for (const mode of modes) {
+    const room = mode === "tangential" ? tanRoom : radRoom;
+    if (room < smallest)
+      continue;
+    const ok = (text2, size) => mode === "tangential" ? band >= size + LABEL_SIDE_GAP : half * 2 * (rMid - estimateTextWidth(text2, size) / 2) >= size + LABEL_SIDE_GAP;
+    const angle = upright((mode === "tangential" ? mid + Math.PI / 2 : mid) * 180 / Math.PI);
+    for (const size of LABEL_SIZES) {
+      if (estimateTextWidth(title, size) > room)
+        continue;
+      const full = title + suffix;
+      const text2 = suffix && estimateTextWidth(full, size) <= room && ok(full, size) ? full : title;
+      if (ok(text2, size))
+        return { text: text2, fontSize: size, mode, angle };
+    }
+    let out = "";
+    let used = 0;
+    for (const ch of title) {
+      const w = CJK.test(ch) ? smallest : smallest * 0.58;
+      if (used + w + smallest * 0.58 > room)
+        break;
+      out += ch;
+      used += w;
+    }
+    const text = `${out}\u2026`;
+    if (out.length >= 2 && ok(text, smallest)) {
+      return { text, fontSize: smallest, mode, angle };
+    }
   }
-  return out.length >= 2 ? `${out}\u2026` : null;
+  return null;
 }
 function luminance(hex) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
@@ -1711,15 +1747,16 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         pct.textContent = `${(_c = node.progress) != null ? _c : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_d = node.progress) != null ? _d : 0}%`);
-        if (text) {
+        const fit = fitLabel(node.title, edge, `${(_d = node.progress) != null ? _d : 0}%`);
+        if (fit) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
           const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
-          const deg = midAngle * 180 / Math.PI;
-          const flip = deg > 90 && deg < 270;
-          label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
-          label.textContent = text;
+          label.setAttribute("data-id", node.id);
+          label.setAttribute("data-mode", fit.mode);
+          label.style.setProperty("font-size", `${fit.fontSize}px`);
+          label.setAttribute("transform", `rotate(${fit.angle.toFixed(2)} ${lx} ${ly})`);
+          label.textContent = fit.text;
         }
       }
       if (node.id === this.selectedId && depth > 0) {

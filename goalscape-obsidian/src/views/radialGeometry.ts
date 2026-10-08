@@ -8,8 +8,8 @@
 //    超过 100 时按同一比例整体缩回，只影响渲染、不改数据。
 // 2. 每层环带厚度由节点自己的 bandScale 决定，所以各分支的半径互不对齐，
 //    整图按"最深一条链的累计厚度"归一到 MAX_R（这才是需要的智能缩放）。
-// 3. 标签可见性按**弧长像素**判，不再按角度阈值 —— 同样 0.14 弧度在内圈约 34px、
-//    在外圈约 56px，按角度判会同时造成内圈糊、外圈空。
+// 3. 标签按"哪个方向写得下更多字"选向：宽扇区顺环写、窄扇区沿半径写，字号再按实际
+//    可用长度自适应；判据全是像素，不按角度阈值。
 
 import { GoalNode } from "../data/types";
 
@@ -31,14 +31,18 @@ export const BAND_DEFAULT_INDEX = 2;
 const INK_LIGHT = "#ffffff";
 const INK_DARK = "#0f172a";
 
-/** 标签字号与 .goalscape-label 的 font-size 对齐；改 CSS 要同步这里，否则截断宽度会算偏 */
+/** 基准字号，与 .goalscape-label 的 font-size 对齐；改 CSS 要同步这里，否则截断宽度会算偏 */
 const LABEL_FONT = 14;
+/** 薄环上宁可字小一点也要保住全名，所以先降字号、降到底还是写不下才截断 */
+const LABEL_SIZES = [LABEL_FONT, 13, 12, 11];
 /** 字宽估算：CJK 按整宽，其余按 0.58em */
 const CJK = /[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
-/** 标签左右各留一点呼吸空间 */
+/** 标签沿半径方向的头尾各留一点呼吸空间 */
 const LABEL_PADDING = 10;
-/** 弧长小于这个值就干脆不写字（写了也只会糊成一片），交给 <title> 悬停看全名 */
-const MIN_LABEL_ARC = 26;
+/** 字高之外的余量：3px 光晕描边外扩 1.5，扇区边界还有 1px 描边 */
+const LABEL_SIDE_GAP = 4;
+/** 文字是条"带子"：顺环写时两端的外凸按外沿那一侧算，取最大字号的一半 + 光晕 */
+const LABEL_HALF_HEIGHT = LABEL_FONT / 2 + 1.5;
 
 export interface SectorShape {
   rInner: number;
@@ -144,32 +148,84 @@ function estimateTextWidth(text: string, fontSize = LABEL_FONT): number {
   return w;
 }
 
+export interface LabelFit {
+  text: string;
+  fontSize: number;
+  /** 基线旋转角（度），已归一到 (-90, 90]，保证没有倒着读的字 */
+  angle: number;
+  /** radial = 沿半径往外读；tangential = 顺着环的方向读 */
+  mode: "radial" | "tangential";
+}
+
+/** 归一到 [-90, 90)：垂直那一律取"由下往上"，避免同一个方向有两种写法 */
+function upright(deg: number): number {
+  let a = deg;
+  while (a >= 90) a -= 180;
+  while (a < -90) a += 180;
+  return a;
+}
+
 /**
- * 按弧长决定标签怎么显示：
- * 全名放得下就全名，放不下就截断加省略号，弧长太短干脆不画（悬停仍有 <title>）。
- * 返回 null 表示这一格不该出现文字。
+ * 标签可以沿半径写，也可以顺环写，**哪个方向写得下更多字就用哪个**。
+ * 之前一律沿半径写，于是字数被环带厚度卡死：87px 的环只放得下 6 个字，
+ * 而同一条分支顺环有 400px 以上可用（扇区角度是按 importance 分的，宽扇区很常见）。
+ *
+ * 顺环写是一条直线，会往外凸，所以被"外径"和"扇区两条边"各卡一次；
+ * 沿半径写则受楔形 taper 约束 —— 靠圆心那一端最窄，那一端容得下字高才算放得下。
+ * 两个方向都先在 14→11 里找能写全名的最大字号，都写不下才按最小字号截断。
  */
 export function fitLabel(
   title: string,
-  arc: number,
-  band: number,
+  edge: { rInner: number; rOuter: number; a0: number; a1: number },
   progressText?: string
-): string | null {
-  if (band < 18 || arc < MIN_LABEL_ARC) return null;
+): LabelFit | null {
+  const band = edge.rOuter - edge.rInner;
+  const rMid = (edge.rInner + edge.rOuter) / 2;
+  const mid = (edge.a0 + edge.a1) / 2;
+  const half = (edge.a1 - edge.a0) / 2;
   const suffix = progressText ? ` ${progressText}` : "";
-  const budget = arc - LABEL_PADDING;
-  if (estimateTextWidth(title + suffix) <= budget) return title + suffix;
-  if (estimateTextWidth(title) <= budget) return title;
+  const smallest = LABEL_SIZES[LABEL_SIZES.length - 1];
+  const rOut = edge.rOuter - LABEL_HALF_HEIGHT;
+  const tanRoom =
+    2 * Math.min(
+      // 直线顺环走会往外凸，端点得落在"外径减去半字高"那一圈之内
+      Math.sqrt(Math.max(0, rOut * rOut - rMid * rMid)),
+      // 半张角超过 ~74° 时早就是外径先卡住，tan 再往上只会变成负数
+      (rMid - LABEL_HALF_HEIGHT) * Math.tan(Math.min(half, 1.3))
+    ) - LABEL_PADDING;
+  const radRoom = band - LABEL_PADDING;
+  const modes: LabelFit["mode"][] = tanRoom >= radRoom
+    ? ["tangential", "radial"] : ["radial", "tangential"];
 
-  let out = "";
-  let used = 0;
-  for (const ch of title) {
-    const w = CJK.test(ch) ? LABEL_FONT : LABEL_FONT * 0.58;
-    if (used + w + estimateTextWidth("…") > budget) break;
-    out += ch;
-    used += w;
+  for (const mode of modes) {
+    const room = mode === "tangential" ? tanRoom : radRoom;
+    if (room < smallest) continue;
+    const ok = (text: string, size: number) =>
+      mode === "tangential"
+        ? band >= size + LABEL_SIDE_GAP
+        : half * 2 * (rMid - estimateTextWidth(text, size) / 2) >= size + LABEL_SIDE_GAP;
+    const angle = upright((((mode === "tangential" ? mid + Math.PI / 2 : mid) * 180) / Math.PI));
+    for (const size of LABEL_SIZES) {
+      if (estimateTextWidth(title, size) > room) continue;
+      const full = title + suffix;
+      const text =
+        suffix && estimateTextWidth(full, size) <= room && ok(full, size) ? full : title;
+      if (ok(text, size)) return { text, fontSize: size, mode, angle };
+    }
+    let out = "";
+    let used = 0;
+    for (const ch of title) {
+      const w = CJK.test(ch) ? smallest : smallest * 0.58;
+      if (used + w + smallest * 0.58 > room) break;
+      out += ch;
+      used += w;
+    }
+    const text = `${out}…`;
+    if (out.length >= 2 && ok(text, smallest)) {
+      return { text, fontSize: smallest, mode, angle };
+    }
   }
-  return out.length >= 2 ? `${out}…` : null;
+  return null;
 }
 
 /** 扇区自身的相对亮度，用来决定标签该用深色字还是浅色字 */
