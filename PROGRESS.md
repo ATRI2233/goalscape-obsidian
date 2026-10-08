@@ -410,6 +410,45 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
   且脚本会 disable→enable 插件一次（别在手编辑正忙时跑）。
 
 
+### 放射图改成"森林"几何：importance 语义变更 + 每节点环厚（分支 `radial-forest-geometry`）
+- 需求（用户 2026-10-08）：① 每圈宽度可调、三档按钮放右侧面板 Importance 右边；② 新建子层级不要
+  把父级那一圈占满（只有一个子节点时也占满整圈是错的）；③ 子任务随便加、同级之间不要求首尾相接；
+  ④ 接受"树与树层数不齐、层间有缺口"的样子。
+- **破坏性语义变更（B 方案，用户拍板）**：`importance` 从"同级归一化权重（和恒为 100）"改成
+  **"占父扇区角度的百分比"**。兄弟和 <100 → 父扇区留白；>100 → 渲染时按同一比例整体缩回
+  （**只缩渲染，不改数据**，所以不丢节点、不越出父扇区）。
+  - 为什么不能沿用旧语义：`adjustImportance`/`renormalizeSiblings` 保证兄弟和恒为 100，
+    那样"子级占父级多少"永远是 100%，**留白在数学上不可能出现**。
+  - **对用户数据的影响**：`life` 图根层是 40+35+25=100 → 根层仍然满圆；要看到留白得把数值调到 100 以下。
+    认知 下的 New Goal（importance 50）现在只占认知的一半弧长，截图里已经能看出来。
+  - `adjustImportance` 不再等比缩放兄弟；`renormalizeSiblings` 整个删掉，`moveGoal` 两端都不再归一化；
+    `addGoal` 新节点默认给"父级剩余角度"（`min(50, 100-已用)`，下限 5），避免连点三次 Add subgoal 就 150% 全被缩回。
+  - `rollup.computeProgress` 不受影响（父进度 = Σ(权重×进度)/Σ权重，本来就和"和是否为 100"无关）。
+- **几何改成逐节点递推**（`radialGeometry.ts` 重写）：
+  - `bandScale`（新字段，0.6 / 1 / 1.6 三档，**标准档不落字段**）→ 每个节点自己的环厚；
+    `depthWeight()` 求"累计最厚的那条链"，`radialUnit = MAX_R / depthWeight(root)` 把整图归一，
+    所以各分支半径互不对齐、又都不会越出 viewBox —— 这才是需要的"智能缩放"。
+  - `childShares(node)` 取代 `(c.importance / Σ兄弟)`；`sectorEdges(SectorShape)` 取代
+    `(depth, start, end, ring)`；`hitTestSector` 改成拿点半径比对**每个扇区自己的** `[rInner, rOuter]`
+    （旧的 `Math.floor(r / ringW)` 反推层级在逐节点环厚下直接失效）。
+  - 标签可见性从**角度**阈值（`span > 0.14`）改成**弧长像素**阈值（`fitLabel`）：同样 0.14 弧度
+    在内圈约 34px、外圈约 56px，按角度判会同时造成"内圈糊、外圈空"。放不下截断成省略号，
+    弧长 <26px 干脆不画字。
+  - `<title>` 全名挂到 **path** 上而不是文字上：`.goalscape-label` 是 `pointer-events:none`，
+    挂在文字上永远不会触发悬停（上一版就白挂了）。现在没画字的窄格也能悬停看出是谁。
+- `canvasSync.toCanvas` 改用同一套 `childShares`/`bandScaleOf` 递推半径与角度，白板布局才和图对得上；
+  节点文案从"权重 X"改成"占父级 X%"。
+- 面板：`Importance` 行右边三档按钮（`.goalscape-band-btn`，按钮里小横条的高度就是那一档的厚度，
+  不用读字也能选）；中心盘没有 Importance 行，给它独立的 `Hub size` 行。CSS 用
+  `.setting-item-control:has(.goalscape-band) .slider-container` 让滑杆让位，不然 320px 面板里按钮会被顶出去。
+- 测试：数据层 78 项（+2，`adjustImportance`/`moveGoal` 的"归一化到 100"断言全部按新语义重写，
+  删掉不再使用的 `assertClose`）；`test/ui-regression.mjs` 新增 **forest 步骤**（往临时图里灌一棵
+  刻意不对称的合成树：厚档分支 / 薄档 5 层深链 / 兄弟和 180% 溢出 / importance 0 / 长标题窄格），
+  12 项断言覆盖留白角度、逐节点环厚、层不对齐、`getBBox` 不越界、截断省略号、`<title>`、
+  深链扇区命中选中、面板三档写值与回默认删字段。全套 **40 项 / 13.7s** 通过，暗亮两主题 + 森林截图。
+- 未做：① 模板数值仍是"和=100"，在新语义下会铺满整圆，要不要出留白版模板待用户点头；
+  ② 深图钻取（超过 4 层只展开到第 K 层）没做；③ 三档之外的"任意环厚微调"没做。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：

@@ -1,6 +1,15 @@
 // src/views/radialGeometry.ts
-// 放射图的纯几何与配色：环层划分、扇区路径、标签对比度、极坐标命中测试。
-// render() 与拖拽命中测试共用这一套换算，避免环数公式在两处各写一遍而漂移。
+// 放射图的纯几何与配色：每节点的环带厚度、子级在父扇区里切走多少角度、扇区路径、
+// 标签对比度与截断、极坐标命中测试。render() 与拖拽命中测试共用这一套换算，
+// 避免"角度/半径"公式在两处各写一遍而漂移。
+//
+// 与旧版（同心等宽环 + 子级按同级归一化铺满父级）的三点区别：
+// 1. importance 是"占父扇区角度的绝对百分比"，兄弟之和可以小于 100（留白）；
+//    超过 100 时按同一比例整体缩回，只影响渲染、不改数据。
+// 2. 每层环带厚度由节点自己的 bandScale 决定，所以各分支的半径互不对齐，
+//    整图按"最深一条链的累计厚度"归一到 MAX_R（这才是需要的智能缩放）。
+// 3. 标签可见性按**弧长像素**判，不再按角度阈值 —— 同样 0.14 弧度在内圈约 34px、
+//    在外圈约 56px，按角度判会同时造成内圈糊、外圈空。
 
 import { GoalNode } from "../data/types";
 
@@ -15,51 +24,65 @@ export const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
+/** 环带厚度的三档（面板上的 薄/标准/厚）；未设 bandScale 的节点用第 2 档 */
+export const BAND_STEPS = [0.6, 1, 1.6];
+export const BAND_DEFAULT_INDEX = 1;
+
 const INK_LIGHT = "#ffffff";
 const INK_DARK = "#0f172a";
 
-export interface SectorAngles {
+/** 标签字号与 .goalscape-label 的 font-size 对齐；改 CSS 要同步这里，否则截断宽度会算偏 */
+const LABEL_FONT = 14;
+/** 字宽估算：CJK 按整宽，其余按 0.58em */
+const CJK = /[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+/** 标签左右各留一点呼吸空间 */
+const LABEL_PADDING = 10;
+/** 弧长小于这个值就干脆不写字（写了也只会糊成一片），交给 <title> 悬停看全名 */
+const MIN_LABEL_ARC = 26;
+
+export interface SectorShape {
+  rInner: number;
+  rOuter: number;
   startAngle: number;
   endAngle: number;
   depth: number;
 }
 
-export interface RingGeometry {
-  ringCount: number;
-  ringW: number;
-  ringGap: number;
+/** bandScale 只接受正数：外部手改 JSON 写 0 会让整支从图上消失，且命中测试也摸不到 */
+export function bandScaleOf(node: GoalNode): number {
+  const s = node.bandScale;
+  return s && Number.isFinite(s) && s > 0 ? s : BAND_STEPS[BAND_DEFAULT_INDEX];
 }
 
-export function ringGeometry(maxDepth: number): RingGeometry {
-  // 环数 = 最深 depth 索引 + 1（depth 从 0 起）；写成 maxDepth 会让最外环画到 MAX_R 之外被裁切
-  const ringCount = maxDepth + 1;
-  return { ringCount, ringW: MAX_R / ringCount, ringGap: Math.min(5, (MAX_R / ringCount) * 0.045) };
+/** 从根到该节点（含自身）的累计厚度档数，用于把整图缩放到 viewBox 内 */
+export function depthWeight(node: GoalNode): number {
+  let deepest = 0;
+  for (const c of node.children) deepest = Math.max(deepest, depthWeight(c));
+  return bandScaleOf(node) + deepest;
 }
 
-export function visibleDepth(node: GoalNode, depth = 0): number {
-  if (!node.children.length || node.collapsed) return depth;
-  return Math.max(...node.children.map((c) => visibleDepth(c, depth + 1)));
+/** 一档厚度对应多少用户单位：让最深的那条链恰好铺到 MAX_R */
+export function radialUnit(root: GoalNode): number {
+  const total = depthWeight(root);
+  return total > 0 ? MAX_R / total : MAX_R;
 }
 
-/** 扇形的实际画布边界：环间隙 + 弧长留白，根盘无留白 */
-export function sectorEdges(
-  depth: number,
-  startAngle: number,
-  endAngle: number,
-  ring: RingGeometry
-): { rInner: number; rOuter: number; a0: number; a1: number } {
-  const span = endAngle - startAngle;
-  const rOuter = (depth + 1) * ring.ringW - ring.ringGap;
-  const rInner = depth === 0 ? 0 : depth * ring.ringW + ring.ringGap;
-  const pad = depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
-  return { rInner, rOuter, a0: startAngle + pad, a1: endAngle - pad };
+/**
+ * 子级各占父扇区的比例（0-1，和 ≤ 1）。
+ * importance 直接当占比用；Σ>100 时整体缩回，保证不重叠、不越出父扇区。
+ */
+export function childShares(node: GoalNode): number[] {
+  const total = node.children.reduce((s, c) => s + Math.max(0, c.importance), 0);
+  if (total <= 0) return node.children.map(() => 0);
+  const scale = total > 100 ? 100 / total : 1;
+  return node.children.map((c) => (Math.max(0, c.importance) / 100) * scale);
 }
 
 /** 把角度归一到 [floor, floor + 2π)，用于把指针角度对回父扇区的取值域 */
 export function normalizeAngleInto(angle: number, floor: number): number {
   let a = angle;
   while (a < floor) a += Math.PI * 2;
-  while (a >= floor + Math.PI * 2) a -= Math.PI * 2;
+  while (a >= floor + 2 * Math.PI) a -= Math.PI * 2;
   return a;
 }
 
@@ -70,25 +93,71 @@ export function toLogicalPoint(svg: SVGSVGElement, clientX: number, clientY: num
   return { x: p.x, y: p.y };
 }
 
-/** 命中测试：先按半径定环层，再在该层里找角度落在其扇区内的节点 */
+/**
+ * 命中测试：环带半径逐节点不同，所以只能拿点的半径比对每个扇区自己的
+ * [rInner, rOuter]，不能再按"半径 ÷ 固定环宽"反推层级。
+ */
 export function hitTestSector(
-  positions: Map<string, SectorAngles>,
-  ring: RingGeometry,
+  positions: Map<string, SectorShape>,
   point: { x: number; y: number }
 ): string | null {
   const dx = point.x - CX;
   const dy = point.y - CY;
   const r = Math.hypot(dx, dy);
-  if (r > MAX_R) return null;
   const angle = Math.atan2(dy, dx);
-  const depth = Math.floor(r / ring.ringW);
 
-  for (const [id, pos] of positions) {
-    if (pos.depth !== depth) continue;
-    const a = normalizeAngleInto(angle, pos.startAngle);
-    if (a >= pos.startAngle && a <= pos.endAngle) return id;
+  for (const [id, s] of positions) {
+    if (r < s.rInner || r > s.rOuter) continue;
+    const a = normalizeAngleInto(angle, s.startAngle);
+    if (a >= s.startAngle && a <= s.endAngle) return id;
   }
   return null;
+}
+
+/** 扇区的实际画布边界：环间隙 + 弧长留白，根盘无留白 */
+export function sectorEdges(
+  shape: SectorShape
+): { rInner: number; rOuter: number; a0: number; a1: number } {
+  const span = shape.endAngle - shape.startAngle;
+  const gap = Math.min(5, (shape.rOuter - shape.rInner) * 0.045);
+  const rInner = shape.depth === 0 ? 0 : shape.rInner + gap;
+  const rOuter = Math.max(rInner + 1, shape.rOuter - gap);
+  const pad = shape.depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
+  return { rInner, rOuter, a0: shape.startAngle + pad, a1: shape.endAngle - pad };
+}
+
+export function estimateTextWidth(text: string, fontSize = LABEL_FONT): number {
+  let w = 0;
+  for (const ch of text) w += CJK.test(ch) ? fontSize : fontSize * 0.58;
+  return w;
+}
+
+/**
+ * 按弧长决定标签怎么显示：
+ * 全名放得下就全名，放不下就截断加省略号，弧长太短干脆不画（悬停仍有 <title>）。
+ * 返回 null 表示这一格不该出现文字。
+ */
+export function fitLabel(
+  title: string,
+  arc: number,
+  band: number,
+  progressText?: string
+): string | null {
+  if (band < 18 || arc < MIN_LABEL_ARC) return null;
+  const suffix = progressText ? ` ${progressText}` : "";
+  const budget = arc - LABEL_PADDING;
+  if (estimateTextWidth(title + suffix) <= budget) return title + suffix;
+  if (estimateTextWidth(title) <= budget) return title;
+
+  let out = "";
+  let used = 0;
+  for (const ch of title) {
+    const w = CJK.test(ch) ? LABEL_FONT : LABEL_FONT * 0.58;
+    if (used + w + estimateTextWidth("…") > budget) break;
+    out += ch;
+    used += w;
+  }
+  return out.length >= 2 ? `${out}…` : null;
 }
 
 /** 扇区自身的相对亮度，用来决定标签该用深色字还是浅色字 */

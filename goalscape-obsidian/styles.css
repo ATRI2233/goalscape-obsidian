@@ -383,6 +383,54 @@
   width: 100%;
 }
 
+/* 环带厚度三档挤在 Importance 滑杆右边时，滑杆要让位而不是把按钮顶出面板 */
+.goalscape-panel .setting-item-control:has(.goalscape-band) .slider-container {
+  width: auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.goalscape-band {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 3px;
+  margin-left: 6px;
+}
+
+.goalscape-band-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-secondary);
+  cursor: pointer;
+}
+
+.goalscape-band-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+/* 按钮里那根小横条的高度即"这一档有多厚"，不用读文字也能选 */
+.goalscape-band-btn i {
+  display: block;
+  width: 14px;
+  border-radius: 1px;
+  background: var(--text-muted);
+}
+
+.goalscape-band-btn.is-active {
+  border-color: var(--interactive-accent);
+  background: var(--background-modifier-hover);
+}
+
+.goalscape-band-btn.is-active i {
+  background: var(--interactive-accent);
+}
+
 .goalscape-panel-empty {
   color: var(--text-muted);
   font-style: italic;

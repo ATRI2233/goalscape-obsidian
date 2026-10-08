@@ -2,11 +2,15 @@
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
 // Tags / Color / Notes / 自定义字段。所有改动统一走 store.mutate。
 
-import { Setting, Notice } from "obsidian";
+import { Setting, Notice, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode, GoalScape, findNode } from "../data/types";
 import { renameGoal, adjustImportance, applyColorToSubtree } from "../data/crud";
+import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
 import { promptInput } from "./promptModal";
+
+/** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
+const BAND_LABELS = ["Thin ring", "Standard ring", "Thick ring"];
 
 /** 面板色盘预设：全部 6 位小写，与 normalizeHex 的归一化结果同形 */
 const COLOR_PALETTE = [
@@ -86,9 +90,9 @@ export class InfoPanel {
     });
 
     if (!isMain) {
-      new Setting(this.container)
+      const importance = new Setting(this.container)
         .setName("Importance")
-        .setDesc(`${Math.round(node.importance)}`)
+        .setDesc(`${Math.round(node.importance)}% of parent arc`)
         .addSlider((slider) => {
           slider.setLimits(0, 100, 1);
           slider.setValue(Math.round(node.importance));
@@ -98,6 +102,13 @@ export class InfoPanel {
             this.mutate((s) => adjustImportance(s, node.id, v));
           });
         });
+      this.addBandControl(importance, node);
+    } else {
+      // 中心盘没有 Importance 行，但它的厚度就是 hub 半径，同样要能调
+      this.addBandControl(
+        new Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
+        node
+      );
     }
 
     if (isLeaf) {
@@ -253,6 +264,39 @@ export class InfoPanel {
         );
       })
     );
+  }
+
+  /**
+   * 环带厚度三档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
+   * 档位是**每个节点自己的**，所以不同分支可以长到不同半径、层与层互不对齐；
+   * "标准"档不落字段（bandScale 未设即默认），免得整份 JSON 被一堆 1 淹没。
+   */
+  private addBandControl(setting: Setting, node: GoalNode): void {
+    const group = setting.controlEl.createDiv({ cls: "goalscape-band" });
+    group.setAttr("role", "group");
+    group.setAttr("aria-label", "Ring thickness");
+
+    BAND_STEPS.forEach((step, i) => {
+      const btn = group.createEl("button", { cls: "goalscape-band-btn" });
+      const isCurrent = node.bandScale === undefined
+        ? i === BAND_DEFAULT_INDEX
+        : Math.abs(node.bandScale - step) < 0.001;
+      if (isCurrent) {
+        btn.addClass("is-active");
+        btn.setAttr("aria-pressed", "true");
+      }
+      btn.setAttr("aria-label", BAND_LABELS[i]);
+      setTooltip(btn, BAND_LABELS[i], { placement: "top" });
+      btn.createEl("i").style.height = `${[4, 8, 13][i]}px`;
+      btn.addEventListener("click", () => {
+        this.mutate((s) => {
+          const found = findNode(s.mainGoal, node.id);
+          if (!found) return;
+          if (i === BAND_DEFAULT_INDEX) delete found.node.bandScale;
+          else found.node.bandScale = step;
+        });
+      });
+    });
   }
 
   /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */

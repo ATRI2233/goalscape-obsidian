@@ -12,10 +12,11 @@ export function addGoal(
   position: AddPosition,
   title = "New Goal"
 ): string {
-  const node = createGoalNode({ title });
   const found = findNode(scape.mainGoal, refId);
-  if (!found) return node.id;
+  if (!found) return createGoalNode({ title }).id;
   const { node: ref, parent } = found;
+  const host = position === "child" || !parent ? ref : parent;
+  const node = createGoalNode({ title, importance: defaultImportance(host.children) });
   if (position === "child" || !parent) {
     ref.children.push(node);
   } else {
@@ -39,41 +40,29 @@ export function renameGoal(scape: GoalScape, id: string, title: string): void {
   if (found) found.node.title = title;
 }
 
-/** 权重调整：等比缩放 siblings 中除自身外的权重，保证总和恒定（邻居互斥） */
+/**
+ * importance = 该节点占**父扇区角度**的百分比，兄弟之间不互相补偿：改一个不碰别人。
+ * （旧语义是"同级权重等比缩放、和恒为 100"，那正是子级永远铺满父级一整圈的原因。）
+ * 中心目标没有父级，恒为 100（整圆）。
+ */
 export function adjustImportance(
   scape: GoalScape,
   id: string,
   newImportance: number
 ): void {
   const found = findNode(scape.mainGoal, id);
-  if (!found?.parent) return;
-  const siblings = found.parent.children;
-  const others = siblings.filter((c) => c.id !== id);
-  const othersTotal = others.reduce((s, c) => s + c.importance, 0);
-  const target = Math.max(0, Math.min(100, newImportance));
-  found.node.importance = target;
-  if (othersTotal > 0) {
-    const scale = (100 - target) / othersTotal;
-    for (const c of others) c.importance = Math.round(c.importance * scale * 100) / 100;
-  }
+  if (!found || !found.parent) return;
+  found.node.importance = Math.max(0, Math.min(100, newImportance));
 }
 
 /**
- * 把一组 siblings 的 importance 等比缩放到总和为 100。
- * adjustImportance 假设"同级权重总和恒为 100"，moveGoal 改变了两端父级的
- * 子节点集合，必须在这里重新归一化，否则该假设在跨父级移动后失真
- * （已用临时单测复现：移动后剩余 siblings 总和会漂移到 100 以外；测试脚本未入库，见 PROGRESS.md）。
+ * 新节点默认占父级"还剩多少角度"，上限 50、下限 5。
+ * 固定给 50 的话，连点三次 Add subgoal 就是 150%，全被渲染层的溢出缩回放平，
+ * 用户看不出"这块地盘其实已经分完了"。
  */
-function renormalizeSiblings(children: GoalNode[]): void {
-  if (!children.length) return;
-  const total = children.reduce((s, c) => s + c.importance, 0);
-  if (total <= 0) {
-    const even = Math.round((100 / children.length) * 100) / 100;
-    for (const c of children) c.importance = even;
-    return;
-  }
-  const scale = 100 / total;
-  for (const c of children) c.importance = Math.round(c.importance * scale * 100) / 100;
+function defaultImportance(siblings: GoalNode[]): number {
+  const free = 100 - siblings.reduce((s, c) => s + c.importance, 0);
+  return Math.max(5, Math.min(50, Math.round(free)));
 }
 
 /** 拖拽重挂载：把节点从旧父移到新父下。禁止移到自己或自己的后代下。 */
@@ -92,8 +81,8 @@ export function moveGoal(scape: GoalScape, id: string, newParentId: string): boo
   const idx = moving.parent.children.findIndex((c) => c.id === id);
   const [node] = moving.parent.children.splice(idx, 1);
   target.node.children.push(node);
-  renormalizeSiblings(moving.parent.children);
-  renormalizeSiblings(target.node.children);
+  // 移动后不重新归一化：importance 是"占父级多少"，带着原值去新父下即可，
+  // 两端兄弟和因此可能不等于 100 —— 留白由渲染层照实画，溢出由渲染层整体缩回。
   return true;
 }
 
@@ -102,6 +91,7 @@ function cloneSubtree(node: GoalNode): GoalNode {
   return createGoalNode({
     title: node.title,
     importance: node.importance,
+    bandScale: node.bandScale,
     progress: node.progress,
     due: node.due,
     start: node.start,

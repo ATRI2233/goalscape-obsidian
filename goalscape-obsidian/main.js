@@ -39,6 +39,7 @@ function createGoalNode(partial) {
     id: (_a = partial.id) != null ? _a : generateId(),
     title: partial.title,
     importance: (_b = partial.importance) != null ? _b : 50,
+    bandScale: partial.bandScale,
     progress: partial.progress,
     due: partial.due,
     start: partial.start,
@@ -272,11 +273,12 @@ var import_obsidian3 = require("obsidian");
 
 // src/data/crud.ts
 function addGoal(scape, refId, position, title = "New Goal") {
-  const node = createGoalNode({ title });
   const found = findNode(scape.mainGoal, refId);
   if (!found)
-    return node.id;
+    return createGoalNode({ title }).id;
   const { node: ref, parent } = found;
+  const host = position === "child" || !parent ? ref : parent;
+  const node = createGoalNode({ title, importance: defaultImportance(host.children) });
   if (position === "child" || !parent) {
     ref.children.push(node);
   } else {
@@ -303,32 +305,13 @@ function renameGoal(scape, id, title) {
 }
 function adjustImportance(scape, id, newImportance) {
   const found = findNode(scape.mainGoal, id);
-  if (!(found == null ? void 0 : found.parent))
+  if (!found || !found.parent)
     return;
-  const siblings = found.parent.children;
-  const others = siblings.filter((c) => c.id !== id);
-  const othersTotal = others.reduce((s, c) => s + c.importance, 0);
-  const target = Math.max(0, Math.min(100, newImportance));
-  found.node.importance = target;
-  if (othersTotal > 0) {
-    const scale = (100 - target) / othersTotal;
-    for (const c of others)
-      c.importance = Math.round(c.importance * scale * 100) / 100;
-  }
+  found.node.importance = Math.max(0, Math.min(100, newImportance));
 }
-function renormalizeSiblings(children) {
-  if (!children.length)
-    return;
-  const total = children.reduce((s, c) => s + c.importance, 0);
-  if (total <= 0) {
-    const even = Math.round(100 / children.length * 100) / 100;
-    for (const c of children)
-      c.importance = even;
-    return;
-  }
-  const scale = 100 / total;
-  for (const c of children)
-    c.importance = Math.round(c.importance * scale * 100) / 100;
+function defaultImportance(siblings) {
+  const free = 100 - siblings.reduce((s, c) => s + c.importance, 0);
+  return Math.max(5, Math.min(50, Math.round(free)));
 }
 function moveGoal(scape, id, newParentId) {
   var _a;
@@ -348,14 +331,13 @@ function moveGoal(scape, id, newParentId) {
   const idx = moving.parent.children.findIndex((c) => c.id === id);
   const [node] = moving.parent.children.splice(idx, 1);
   target.node.children.push(node);
-  renormalizeSiblings(moving.parent.children);
-  renormalizeSiblings(target.node.children);
   return true;
 }
 function cloneSubtree(node) {
   return createGoalNode({
     title: node.title,
     importance: node.importance,
+    bandScale: node.bandScale,
     progress: node.progress,
     due: node.due,
     start: node.start,
@@ -396,6 +378,187 @@ function applyColorToSubtree(scape, id) {
     }
   };
   walk(found.node);
+}
+
+// src/views/radialGeometry.ts
+var SVG_NS = "http://www.w3.org/2000/svg";
+var VIEW_SIZE = 1e3;
+var CX = VIEW_SIZE / 2;
+var CY = VIEW_SIZE / 2;
+var MAX_R = VIEW_SIZE / 2 - 20;
+var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
+var SECTOR_GAP_ARC = 7;
+var BAND_STEPS = [0.6, 1, 1.6];
+var BAND_DEFAULT_INDEX = 1;
+var INK_LIGHT = "#ffffff";
+var INK_DARK = "#0f172a";
+var LABEL_FONT = 14;
+var CJK = /[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
+var LABEL_PADDING = 10;
+var MIN_LABEL_ARC = 26;
+function bandScaleOf(node) {
+  const s = node.bandScale;
+  return s && Number.isFinite(s) && s > 0 ? s : BAND_STEPS[BAND_DEFAULT_INDEX];
+}
+function depthWeight(node) {
+  let deepest = 0;
+  for (const c of node.children)
+    deepest = Math.max(deepest, depthWeight(c));
+  return bandScaleOf(node) + deepest;
+}
+function radialUnit(root) {
+  const total = depthWeight(root);
+  return total > 0 ? MAX_R / total : MAX_R;
+}
+function childShares(node) {
+  const total = node.children.reduce((s, c) => s + Math.max(0, c.importance), 0);
+  if (total <= 0)
+    return node.children.map(() => 0);
+  const scale = total > 100 ? 100 / total : 1;
+  return node.children.map((c) => Math.max(0, c.importance) / 100 * scale);
+}
+function normalizeAngleInto(angle, floor) {
+  let a = angle;
+  while (a < floor)
+    a += Math.PI * 2;
+  while (a >= floor + 2 * Math.PI)
+    a -= Math.PI * 2;
+  return a;
+}
+function toLogicalPoint(svg, clientX, clientY) {
+  const ctm = svg.getScreenCTM();
+  if (!ctm)
+    return { x: CX, y: CY };
+  const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+  return { x: p.x, y: p.y };
+}
+function hitTestSector(positions, point) {
+  const dx = point.x - CX;
+  const dy = point.y - CY;
+  const r = Math.hypot(dx, dy);
+  const angle = Math.atan2(dy, dx);
+  for (const [id, s] of positions) {
+    if (r < s.rInner || r > s.rOuter)
+      continue;
+    const a = normalizeAngleInto(angle, s.startAngle);
+    if (a >= s.startAngle && a <= s.endAngle)
+      return id;
+  }
+  return null;
+}
+function sectorEdges(shape) {
+  const span = shape.endAngle - shape.startAngle;
+  const gap = Math.min(5, (shape.rOuter - shape.rInner) * 0.045);
+  const rInner = shape.depth === 0 ? 0 : shape.rInner + gap;
+  const rOuter = Math.max(rInner + 1, shape.rOuter - gap);
+  const pad = shape.depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
+  return { rInner, rOuter, a0: shape.startAngle + pad, a1: shape.endAngle - pad };
+}
+function estimateTextWidth(text, fontSize = LABEL_FONT) {
+  let w = 0;
+  for (const ch of text)
+    w += CJK.test(ch) ? fontSize : fontSize * 0.58;
+  return w;
+}
+function fitLabel(title, arc, band, progressText) {
+  if (band < 18 || arc < MIN_LABEL_ARC)
+    return null;
+  const suffix = progressText ? ` ${progressText}` : "";
+  const budget = arc - LABEL_PADDING;
+  if (estimateTextWidth(title + suffix) <= budget)
+    return title + suffix;
+  if (estimateTextWidth(title) <= budget)
+    return title;
+  let out = "";
+  let used = 0;
+  for (const ch of title) {
+    const w = CJK.test(ch) ? LABEL_FONT : LABEL_FONT * 0.58;
+    if (used + w + estimateTextWidth("\u2026") > budget)
+      break;
+    out += ch;
+    used += w;
+  }
+  return out.length >= 2 ? `${out}\u2026` : null;
+}
+function luminance(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m)
+    return 0;
+  const n = parseInt(m[1], 16);
+  const ch = (shift) => {
+    const v = (n >> shift & 255) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
+}
+function labelInk(sectorColor) {
+  const l = luminance(sectorColor);
+  const ratio = (ink) => {
+    const li = luminance(ink);
+    return (Math.max(l, li) + 0.05) / (Math.min(l, li) + 0.05);
+  };
+  return ratio(INK_DARK) > ratio(INK_LIGHT) ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" } : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
+}
+function shadeColor(hex, percent) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m)
+    return hex;
+  const n = parseInt(m[1], 16);
+  const t = Math.max(-100, Math.min(100, percent)) / 100;
+  const target = t >= 0 ? 255 : 0;
+  const k = Math.abs(t);
+  const mix = (shift) => {
+    const c = n >> shift & 255;
+    return Math.round(c + (target - c) * k);
+  };
+  const r = mix(16), g = mix(8), b = mix(0);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+function nodeColor(node, depth, siblingIndex = 0) {
+  var _a;
+  const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor(((_a = node.progress) != null ? _a : 0) / 25))];
+  if (depth === 0)
+    return shadeColor(base, -22);
+  return shadeColor(base, Math.min(depth, 4) * 9 + siblingIndex % 3 * 6);
+}
+var FULL_CIRCLE_EPSILON = 1e-4;
+function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
+  const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+  if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
+    const a0 = startAngle;
+    const a1 = startAngle + Math.PI;
+    const outer = [
+      `M ${p(rOuter, a0)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a1)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a0)}`,
+      "Z"
+    ];
+    if (rInner <= 0)
+      return outer.join(" ");
+    const inner = [
+      `M ${p(rInner, a0)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a1)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a0)}`,
+      "Z"
+    ];
+    return outer.join(" ") + " " + inner.join(" ");
+  }
+  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
+  if (rInner <= 0) {
+    return [
+      `M ${cx} ${cy}`,
+      `L ${p(rOuter, startAngle)}`,
+      `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p(rOuter, endAngle)}`,
+      "Z"
+    ].join(" ");
+  }
+  return [
+    `M ${p(rOuter, startAngle)}`,
+    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p(rOuter, endAngle)}`,
+    `L ${p(rInner, endAngle)}`,
+    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p(rInner, startAngle)}`,
+    "Z"
+  ].join(" ");
 }
 
 // src/views/promptModal.ts
@@ -489,6 +652,7 @@ var PromptModal = class extends import_obsidian2.Modal {
 };
 
 // src/views/infoPanel.ts
+var BAND_LABELS = ["Thin ring", "Standard ring", "Thick ring"];
 var COLOR_PALETTE = [
   "#f87171",
   "#fb923c",
@@ -565,7 +729,7 @@ var InfoPanel = class {
       });
     });
     if (!isMain) {
-      new import_obsidian3.Setting(this.container).setName("Importance").setDesc(`${Math.round(node.importance)}`).addSlider((slider) => {
+      const importance = new import_obsidian3.Setting(this.container).setName("Importance").setDesc(`${Math.round(node.importance)}% of parent arc`).addSlider((slider) => {
         slider.setLimits(0, 100, 1);
         slider.setValue(Math.round(node.importance));
         slider.setDynamicTooltip();
@@ -574,6 +738,12 @@ var InfoPanel = class {
           this.mutate((s) => adjustImportance(s, node.id, v));
         });
       });
+      this.addBandControl(importance, node);
+    } else {
+      this.addBandControl(
+        new import_obsidian3.Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
+        node
+      );
     }
     if (isLeaf) {
       new import_obsidian3.Setting(this.container).setName("Progress").setDesc(`${(_a = node.progress) != null ? _a : 0}%`).addSlider((slider) => {
@@ -707,6 +877,38 @@ var InfoPanel = class {
         );
       })
     );
+  }
+  /**
+   * 环带厚度三档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
+   * 档位是**每个节点自己的**，所以不同分支可以长到不同半径、层与层互不对齐；
+   * "标准"档不落字段（bandScale 未设即默认），免得整份 JSON 被一堆 1 淹没。
+   */
+  addBandControl(setting, node) {
+    const group = setting.controlEl.createDiv({ cls: "goalscape-band" });
+    group.setAttr("role", "group");
+    group.setAttr("aria-label", "Ring thickness");
+    BAND_STEPS.forEach((step, i) => {
+      const btn = group.createEl("button", { cls: "goalscape-band-btn" });
+      const isCurrent = node.bandScale === void 0 ? i === BAND_DEFAULT_INDEX : Math.abs(node.bandScale - step) < 1e-3;
+      if (isCurrent) {
+        btn.addClass("is-active");
+        btn.setAttr("aria-pressed", "true");
+      }
+      btn.setAttr("aria-label", BAND_LABELS[i]);
+      (0, import_obsidian3.setTooltip)(btn, BAND_LABELS[i], { placement: "top" });
+      btn.createEl("i").style.height = `${[4, 8, 13][i]}px`;
+      btn.addEventListener("click", () => {
+        this.mutate((s) => {
+          const found = findNode(s.mainGoal, node.id);
+          if (!found)
+            return;
+          if (i === BAND_DEFAULT_INDEX)
+            delete found.node.bandScale;
+          else
+            found.node.bandScale = step;
+        });
+      });
+    });
   }
   /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
   trackInteraction(el) {
@@ -861,145 +1063,6 @@ var FocusFilter = class {
   }
 };
 
-// src/views/radialGeometry.ts
-var SVG_NS = "http://www.w3.org/2000/svg";
-var VIEW_SIZE = 1e3;
-var CX = VIEW_SIZE / 2;
-var CY = VIEW_SIZE / 2;
-var MAX_R = VIEW_SIZE / 2 - 20;
-var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
-var SECTOR_GAP_ARC = 7;
-var INK_LIGHT = "#ffffff";
-var INK_DARK = "#0f172a";
-function ringGeometry(maxDepth) {
-  const ringCount = maxDepth + 1;
-  return { ringCount, ringW: MAX_R / ringCount, ringGap: Math.min(5, MAX_R / ringCount * 0.045) };
-}
-function visibleDepth(node, depth = 0) {
-  if (!node.children.length || node.collapsed)
-    return depth;
-  return Math.max(...node.children.map((c) => visibleDepth(c, depth + 1)));
-}
-function sectorEdges(depth, startAngle, endAngle, ring) {
-  const span = endAngle - startAngle;
-  const rOuter = (depth + 1) * ring.ringW - ring.ringGap;
-  const rInner = depth === 0 ? 0 : depth * ring.ringW + ring.ringGap;
-  const pad = depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
-  return { rInner, rOuter, a0: startAngle + pad, a1: endAngle - pad };
-}
-function normalizeAngleInto(angle, floor) {
-  let a = angle;
-  while (a < floor)
-    a += Math.PI * 2;
-  while (a >= floor + Math.PI * 2)
-    a -= Math.PI * 2;
-  return a;
-}
-function toLogicalPoint(svg, clientX, clientY) {
-  const ctm = svg.getScreenCTM();
-  if (!ctm)
-    return { x: CX, y: CY };
-  const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
-  return { x: p.x, y: p.y };
-}
-function hitTestSector(positions, ring, point) {
-  const dx = point.x - CX;
-  const dy = point.y - CY;
-  const r = Math.hypot(dx, dy);
-  if (r > MAX_R)
-    return null;
-  const angle = Math.atan2(dy, dx);
-  const depth = Math.floor(r / ring.ringW);
-  for (const [id, pos] of positions) {
-    if (pos.depth !== depth)
-      continue;
-    const a = normalizeAngleInto(angle, pos.startAngle);
-    if (a >= pos.startAngle && a <= pos.endAngle)
-      return id;
-  }
-  return null;
-}
-function luminance(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m)
-    return 0;
-  const n = parseInt(m[1], 16);
-  const ch = (shift) => {
-    const v = (n >> shift & 255) / 255;
-    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
-  };
-  return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
-}
-function labelInk(sectorColor) {
-  const l = luminance(sectorColor);
-  const ratio = (ink) => {
-    const li = luminance(ink);
-    return (Math.max(l, li) + 0.05) / (Math.min(l, li) + 0.05);
-  };
-  return ratio(INK_DARK) > ratio(INK_LIGHT) ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" } : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
-}
-function shadeColor(hex, percent) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m)
-    return hex;
-  const n = parseInt(m[1], 16);
-  const t = Math.max(-100, Math.min(100, percent)) / 100;
-  const target = t >= 0 ? 255 : 0;
-  const k = Math.abs(t);
-  const mix = (shift) => {
-    const c = n >> shift & 255;
-    return Math.round(c + (target - c) * k);
-  };
-  const r = mix(16), g = mix(8), b = mix(0);
-  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
-}
-function nodeColor(node, depth, siblingIndex = 0) {
-  var _a;
-  const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor(((_a = node.progress) != null ? _a : 0) / 25))];
-  if (depth === 0)
-    return shadeColor(base, -22);
-  return shadeColor(base, Math.min(depth, 4) * 9 + siblingIndex % 3 * 6);
-}
-var FULL_CIRCLE_EPSILON = 1e-4;
-function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
-  const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
-  if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
-    const a0 = startAngle;
-    const a1 = startAngle + Math.PI;
-    const outer = [
-      `M ${p(rOuter, a0)}`,
-      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a1)}`,
-      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a0)}`,
-      "Z"
-    ];
-    if (rInner <= 0)
-      return outer.join(" ");
-    const inner = [
-      `M ${p(rInner, a0)}`,
-      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a1)}`,
-      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a0)}`,
-      "Z"
-    ];
-    return outer.join(" ") + " " + inner.join(" ");
-  }
-  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
-  if (rInner <= 0) {
-    return [
-      `M ${cx} ${cy}`,
-      `L ${p(rOuter, startAngle)}`,
-      `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p(rOuter, endAngle)}`,
-      "Z"
-    ].join(" ");
-  }
-  return [
-    `M ${p(rOuter, startAngle)}`,
-    `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p(rOuter, endAngle)}`,
-    `L ${p(rInner, endAngle)}`,
-    `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p(rInner, startAngle)}`,
-    "Z"
-  ].join(" ");
-}
-
 // src/views/radialDrag.ts
 var import_obsidian5 = require("obsidian");
 var WeightDragController = class {
@@ -1105,7 +1168,7 @@ var _ReparentDragController = class _ReparentDragController {
     const svg = this.surface.liveSvg();
     if (!svg)
       return null;
-    return hitTestSector(this.surface.positions(), this.surface.ring(), toLogicalPoint(svg, clientX, clientY));
+    return hitTestSector(this.surface.positions(), toLogicalPoint(svg, clientX, clientY));
   }
   highlight(targetId) {
     const svg = this.surface.liveSvg();
@@ -1408,19 +1471,21 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     svg.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
-    const ring = ringGeometry(visibleDepth(scape.mainGoal));
+    const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
-    const drawNode = (node, depth, startAngle, endAngle, parentStart, parentEnd, siblingIndex = 0) => {
-      var _a, _b;
+    const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles, siblingIndex = 0) => {
+      var _a, _b, _c;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
-      this.nodePositions.set(node.id, { startAngle, endAngle, depth });
-      const { rInner, rOuter, a0, a1 } = sectorEdges(depth, startAngle, endAngle, ring);
+      const rOuter = rInner + bandScaleOf(node) * unit;
+      const shape = { rInner, rOuter, startAngle, endAngle, depth };
+      this.nodePositions.set(node.id, shape);
+      const edge = sectorEdges(shape);
       const color = nodeColor(node, depth, siblingIndex);
       const ink = labelInk(color);
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
+      path.setAttribute("d", arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1));
       path.setAttribute("fill", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
@@ -1447,47 +1512,52 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
           return;
         this.reparentDrag.start(e, node.id);
       });
+      const tip = document.createElementNS(SVG_NS, "title");
+      tip.textContent = `${node.title} \xB7 ${(_a = node.progress) != null ? _a : 0}%`;
+      path.appendChild(tip);
       svg.appendChild(path);
       const midAngle = (startAngle + endAngle) / 2;
       if (depth === 0) {
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_a = node.progress) != null ? _a : 0}%`;
-      } else if (span > 0.14 && rOuter - rInner > 24) {
-        const rMid = (rInner + rOuter) / 2;
-        const lx = CX + Math.cos(midAngle) * rMid;
-        const ly = CY + Math.sin(midAngle) * rMid;
-        const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
-        const deg = midAngle * 180 / Math.PI;
-        const flip = deg > 90 && deg < 270;
-        label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
-        label.textContent = span > 0.28 ? `${node.title} ${(_b = node.progress) != null ? _b : 0}%` : node.title;
+        pct.textContent = `${(_b = node.progress) != null ? _b : 0}%`;
+      } else {
+        const rMid = (edge.rInner + edge.rOuter) / 2;
+        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_c = node.progress) != null ? _c : 0}%`);
+        if (text) {
+          const lx = CX + Math.cos(midAngle) * rMid;
+          const ly = CY + Math.sin(midAngle) * rMid;
+          const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
+          const deg = midAngle * 180 / Math.PI;
+          const flip = deg > 90 && deg < 270;
+          label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
+          label.textContent = text;
+        }
       }
       if (node.id === this.selectedId && depth > 0) {
         const handle = document.createElementNS(SVG_NS, "circle");
-        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * rOuter));
-        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * rOuter));
+        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * edge.rOuter));
+        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * edge.rOuter));
         handle.setAttribute("r", "9");
         handle.addClass("goalscape-weight-handle");
         handle.addEventListener("pointerdown", (e) => {
-          this.weightDrag.start(e, node.id, startAngle, parentStart, parentEnd);
+          const p = parentAngles != null ? parentAngles : { startAngle, endAngle };
+          this.weightDrag.start(e, node.id, startAngle, p.startAngle, p.endAngle);
         });
         svg.appendChild(handle);
       }
       if (node.collapsed)
         return;
-      const total = node.children.reduce((s, c) => s + c.importance, 0);
-      if (total <= 0)
-        return;
+      const shares = childShares(node);
       let cursor = startAngle;
       node.children.forEach((c, i) => {
-        const cSpan = c.importance / total * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle, i);
+        const cSpan = shares[i] * span;
+        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle }, i);
         cursor += cSpan;
       });
     };
-    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, -Math.PI / 2, Math.PI * 1.5);
+    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
     svg.addEventListener("click", () => {
       if (this.selectedId)
         this.clearSelection();
@@ -1537,7 +1607,6 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     return {
       liveSvg: () => this.liveSvg(),
       positions: () => this.nodePositions,
-      ring: () => this.ringNow(),
       titleOf: (id) => this.titleOf(id),
       render: () => this.render(),
       setSelectedId: (id) => {
@@ -1549,10 +1618,6 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
   /** render() 会 empty+重建 rootEl，任何早先捕获的引用都可能已游离，所以每次都要现查 */
   liveSvg() {
     return this.rootEl.querySelector("svg");
-  }
-  ringNow() {
-    const scape = this.plugin.store.scape;
-    return scape ? ringGeometry(visibleDepth(scape.mainGoal)) : ringGeometry(0);
   }
   titleOf(id) {
     var _a, _b;
@@ -1999,10 +2064,11 @@ function toCanvas(scape) {
   const R = 600;
   const NODE_W = 220;
   const NODE_H = 100;
-  function walk(node, depth, startAngle, endAngle, parentId) {
+  function walk(node, depth, startAngle, endAngle, rInner, parentId) {
     var _a, _b;
     const mid = (startAngle + endAngle) / 2;
-    const radius = depth === 0 ? 0 : depth * R;
+    const rOuter = rInner + bandScaleOf(node) * R;
+    const radius = depth === 0 ? 0 : (rInner + rOuter) / 2;
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
@@ -2014,26 +2080,24 @@ function toCanvas(scape) {
       width: NODE_W,
       height: NODE_H,
       text: `**${node.title}**
-\u6743\u91CD ${node.importance} \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`,
+\u5360\u7236\u7EA7 ${node.importance}% \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`,
       color: progressToPreset((_b = node.progress) != null ? _b : 0)
     });
     if (parentId) {
       edges.push({ id: `e-${id}`, fromNode: parentId, toNode: id });
     }
-    if (!node.children.length)
-      return;
-    const total = node.children.reduce((s, c) => s + c.importance, 0);
-    if (total <= 0)
+    const shares = childShares(node);
+    if (!shares.some((s) => s > 0))
       return;
     let acc = startAngle;
     const span = endAngle - startAngle;
-    for (const c of node.children) {
-      const cSpan = c.importance / total * span;
-      walk(c, depth + 1, acc, acc + cSpan, id);
+    node.children.forEach((c, i) => {
+      const cSpan = shares[i] * span;
+      walk(c, depth + 1, acc, acc + cSpan, rOuter, id);
       acc += cSpan;
-    }
+    });
   }
-  walk(scape.mainGoal, 0, 0, Math.PI * 2);
+  walk(scape.mainGoal, 0, 0, Math.PI * 2, 0);
   return { nodes, edges };
 }
 function canvasToJson(canvas) {

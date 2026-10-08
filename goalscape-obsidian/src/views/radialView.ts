@@ -11,8 +11,8 @@ import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
   SVG_NS, VIEW_SIZE, CX, CY,
-  arcPath, labelInk, nodeColor, ringGeometry, sectorEdges, visibleDepth,
-  RingGeometry, SectorAngles,
+  arcPath, bandScaleOf, childShares, fitLabel, labelInk, nodeColor, radialUnit, sectorEdges,
+  SectorShape,
 } from "./radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
 import { buildGoalMenu } from "./radialMenu";
@@ -31,7 +31,7 @@ export class RadialGoalMapView extends ItemView {
   private infoPanel!: InfoPanel;
   private filterBar!: FocusFilter;
   private filterCriteria: FilterCriteria = {};
-  private nodePositions = new Map<string, SectorAngles>();
+  private nodePositions = new Map<string, SectorShape>();
   private weightDrag!: WeightDragController;
   private reparentDrag!: ReparentDragController;
 
@@ -155,7 +155,9 @@ export class RadialGoalMapView extends ItemView {
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
 
-    const ring = ringGeometry(visibleDepth(scape.mainGoal));
+    // 一档厚度对应多少半径：让"累计最厚的那条链"恰好铺到 MAX_R，
+    // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
+    const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
 
     const drawNode = (
@@ -163,20 +165,22 @@ export class RadialGoalMapView extends ItemView {
       depth: number,
       startAngle: number,
       endAngle: number,
-      parentStart: number,
-      parentEnd: number,
+      rInner: number,
+      parentAngles: { startAngle: number; endAngle: number } | null,
       siblingIndex = 0
     ) => {
       const span = endAngle - startAngle;
       if (span <= 0.0005) return;
-      this.nodePositions.set(node.id, { startAngle, endAngle, depth });
+      const rOuter = rInner + bandScaleOf(node) * unit;
+      const shape: SectorShape = { rInner, rOuter, startAngle, endAngle, depth };
+      this.nodePositions.set(node.id, shape);
 
-      const { rInner, rOuter, a0, a1 } = sectorEdges(depth, startAngle, endAngle, ring);
+      const edge = sectorEdges(shape);
       const color = nodeColor(node, depth, siblingIndex);
       const ink = labelInk(color);
 
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
+      path.setAttribute("d", arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1));
       path.setAttribute("fill", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
@@ -201,6 +205,11 @@ export class RadialGoalMapView extends ItemView {
         if (depth === 0) return;
         this.reparentDrag.start(e as PointerEvent, node.id);
       });
+      // 原生 <title> 挂在扇区上：标签被截断、或者弧长太干脆没画字的格子，悬停也认得出是谁
+      // （.goalscape-label 是 pointer-events:none，挂在文字上永远不会触发）
+      const tip = document.createElementNS(SVG_NS, "title");
+      tip.textContent = `${node.title} · ${node.progress ?? 0}%`;
+      path.appendChild(tip);
       svg.appendChild(path);
 
       const midAngle = (startAngle + endAngle) / 2;
@@ -210,41 +219,46 @@ export class RadialGoalMapView extends ItemView {
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
         pct.textContent = `${node.progress ?? 0}%`;
-      } else if (span > 0.14 && rOuter - rInner > 24) {
-        const rMid = (rInner + rOuter) / 2;
-        const lx = CX + Math.cos(midAngle) * rMid;
-        const ly = CY + Math.sin(midAngle) * rMid;
-        const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
-        const deg = (midAngle * 180) / Math.PI;
-        const flip = deg > 90 && deg < 270;
-        label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
-        label.textContent = span > 0.28 ? `${node.title} ${node.progress ?? 0}%` : node.title;
+      } else {
+        const rMid = (edge.rInner + edge.rOuter) / 2;
+        // 判"弧长够不够"而不是"角度够不够"：同样 0.14 弧度在内圈约 34px、外圈约 56px
+        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${node.progress ?? 0}%`);
+        if (text) {
+          const lx = CX + Math.cos(midAngle) * rMid;
+          const ly = CY + Math.sin(midAngle) * rMid;
+          const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
+          const deg = (midAngle * 180) / Math.PI;
+          const flip = deg > 90 && deg < 270;
+          label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
+          label.textContent = text;
+        }
       }
 
       if (node.id === this.selectedId && depth > 0) {
         const handle = document.createElementNS(SVG_NS, "circle");
-        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * rOuter));
-        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * rOuter));
+        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * edge.rOuter));
+        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * edge.rOuter));
         handle.setAttribute("r", "9");
         handle.addClass("goalscape-weight-handle");
         handle.addEventListener("pointerdown", (e) => {
-          this.weightDrag.start(e as PointerEvent, node.id, startAngle, parentStart, parentEnd);
+          const p = parentAngles ?? { startAngle, endAngle };
+          this.weightDrag.start(e as PointerEvent, node.id, startAngle, p.startAngle, p.endAngle);
         });
         svg.appendChild(handle);
       }
 
       if (node.collapsed) return;
-      const total = node.children.reduce((s, c) => s + c.importance, 0);
-      if (total <= 0) return;
+      const shares = childShares(node);
       let cursor = startAngle;
       node.children.forEach((c, i) => {
-        const cSpan = (c.importance / total) * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle, i);
+        // 子级只吃 shares[i] 这一份，父扇区剩下的角度就是留白
+        const cSpan = shares[i] * span;
+        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle }, i);
         cursor += cSpan;
       });
     };
 
-    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, -Math.PI / 2, Math.PI * 1.5);
+    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
 
     svg.addEventListener("click", () => {
       if (this.selectedId) this.clearSelection();
@@ -300,7 +314,6 @@ export class RadialGoalMapView extends ItemView {
     return {
       liveSvg: () => this.liveSvg(),
       positions: () => this.nodePositions,
-      ring: () => this.ringNow(),
       titleOf: (id) => this.titleOf(id),
       render: () => this.render(),
       setSelectedId: (id) => { this.selectedId = id; },
@@ -311,11 +324,6 @@ export class RadialGoalMapView extends ItemView {
   /** render() 会 empty+重建 rootEl，任何早先捕获的引用都可能已游离，所以每次都要现查 */
   private liveSvg(): SVGSVGElement | null {
     return this.rootEl.querySelector("svg");
-  }
-
-  private ringNow(): RingGeometry {
-    const scape = this.plugin.store.scape;
-    return scape ? ringGeometry(visibleDepth(scape.mainGoal)) : ringGeometry(0);
   }
 
   private titleOf(id: string): string {

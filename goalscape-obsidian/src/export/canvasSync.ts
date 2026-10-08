@@ -2,6 +2,7 @@
 // 把 GoalScape 导出为 JSON Canvas (.canvas) 格式，可在 Obsidian 原生 Canvas 里打开编辑。
 
 import { GoalNode, GoalScape } from "../data/types";
+import { bandScaleOf, childShares } from "../views/radialGeometry";
 
 interface CanvasNode {
   id: string;
@@ -49,10 +50,13 @@ export function toCanvas(scape: GoalScape): JsonCanvas {
     depth: number,
     startAngle: number,
     endAngle: number,
+    rInner: number,
     parentId?: string
   ): void {
     const mid = (startAngle + endAngle) / 2;
-    const radius = depth === 0 ? 0 : depth * R;
+    // 半径与角度都按放射图同一套规则递推，白板布局才和图对得上
+    const rOuter = rInner + bandScaleOf(node) * R;
+    const radius = depth === 0 ? 0 : (rInner + rOuter) / 2;
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
@@ -64,7 +68,7 @@ export function toCanvas(scape: GoalScape): JsonCanvas {
       y: Math.round(y - NODE_H / 2),
       width: NODE_W,
       height: NODE_H,
-      text: `**${node.title}**\n权重 ${node.importance} · 进度 ${node.progress ?? 0}%`,
+      text: `**${node.title}**\n占父级 ${node.importance}% · 进度 ${node.progress ?? 0}%`,
       color: progressToPreset(node.progress ?? 0),
     });
 
@@ -72,19 +76,18 @@ export function toCanvas(scape: GoalScape): JsonCanvas {
       edges.push({ id: `e-${id}`, fromNode: parentId, toNode: id });
     }
 
-    if (!node.children.length) return;
-    const total = node.children.reduce((s, c) => s + c.importance, 0);
-    if (total <= 0) return;
+    const shares = childShares(node);
+    if (!shares.some((s) => s > 0)) return;
     let acc = startAngle;
     const span = endAngle - startAngle;
-    for (const c of node.children) {
-      const cSpan = (c.importance / total) * span;
-      walk(c, depth + 1, acc, acc + cSpan, id);
+    node.children.forEach((c, i) => {
+      const cSpan = shares[i] * span;
+      walk(c, depth + 1, acc, acc + cSpan, rOuter, id);
       acc += cSpan;
-    }
+    });
   }
 
-  walk(scape.mainGoal, 0, 0, Math.PI * 2);
+  walk(scape.mainGoal, 0, 0, Math.PI * 2, 0);
   return { nodes, edges };
 }
 

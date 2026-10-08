@@ -92,10 +92,6 @@ function last(nodes: GoalNode[]): GoalNode | undefined {
   return nodes[nodes.length - 1];
 }
 
-function assertClose(actual: number, expected: number, message: string): void {
-  assert.ok(Math.abs(actual - expected) < 0.01, `${message}（实际 ${actual}）`);
-}
-
 let scape: GoalScape;
 beforeEach(() => {
   scape = makeScape();
@@ -106,7 +102,25 @@ describe("addGoal", () => {
     const id = addGoal(scape, "health", "child", "New");
     assert.equal(last(node(scape, "health").children)?.id, id);
     assert.equal(node(scape, id).title, "New");
-    assert.equal(node(scape, id).importance, 50, "新节点走 createGoalNode 默认权重");
+    assert.equal(node(scape, id).importance, 5, "父级已分满时只给最小一档 5");
+  });
+
+  it("child：父级余量充足时封顶 50", () => {
+    node(scape, "c1").importance = 10;
+    node(scape, "c2").importance = 10; // career 下合计 20，剩 80
+    const id = addGoal(scape, "career", "child", "Roomy");
+    assert.equal(node(scape, id).importance, 50, "剩 80 → 只给上限 50");
+  });
+
+  it("child：余量不足 50 时照实给余量", () => {
+    node(scape, "c1").importance = 20; // career 下合计 70，剩 30
+    const id = addGoal(scape, "career", "child", "Tight");
+    assert.equal(node(scape, id).importance, 30);
+  });
+
+  it("child：父级已分满时给最小一档 5", () => {
+    const id = addGoal(scape, "career", "child", "Full");
+    assert.equal(node(scape, id).importance, 5);
   });
 
   it("sibling：插在参照节点的下一个位置", () => {
@@ -163,70 +177,65 @@ describe("renameGoal", () => {
 });
 
 describe("adjustImportance", () => {
-  it("改自己，同级等比缩放，总和仍是 100", () => {
+  it("只改自己，兄弟一动不动（importance 是占父级的比例，不再互相补偿）", () => {
     adjustImportance(scape, "health", 40);
-    const siblings = node(scape, "root").children;
-    assert.deepEqual(siblings.map((c) => c.importance), [40, 45, 15]);
-    assert.equal(sum(siblings), 100);
-  });
-
-  it("上限钳到 100，同级被缩到 0", () => {
-    adjustImportance(scape, "health", 150);
-    assert.equal(node(scape, "health").importance, 100);
     assert.deepEqual(
       node(scape, "root").children.map((c) => c.importance),
-      [100, 0, 0]
+      [40, 30, 10],
+      "career / rel 不受影响"
+    );
+    assert.equal(sum(node(scape, "root").children), 80, "兄弟和小于 100，剩下的是留白");
+  });
+
+  it("上限钳到 100、下限钳到 0，都不牵动兄弟", () => {
+    adjustImportance(scape, "health", 150);
+    assert.equal(node(scape, "health").importance, 100);
+    adjustImportance(scape, "health", -20);
+    assert.equal(node(scape, "health").importance, 0);
+    assert.deepEqual(
+      node(scape, "root").children.map((c) => c.importance),
+      [0, 30, 10]
     );
   });
 
-  it("下限钳到 0，同级补足总和 100", () => {
-    adjustImportance(scape, "health", -20);
-    assert.equal(node(scape, "health").importance, 0);
-    assertClose(sum(node(scape, "root").children), 100, "同级权重总和");
+  it("兄弟和超过 100 也照实存着（溢出交给渲染层整体缩回）", () => {
+    adjustImportance(scape, "health", 90);
+    adjustImportance(scape, "career", 80);
+    assert.equal(sum(node(scape, "root").children), 180);
   });
 
-  it("同级权重和为 0 时不做缩放，也不会出现 NaN", () => {
-    const tiny: GoalScape = {
-      version: 1,
-      mainGoal: createGoalNode({
-        id: "r",
-        title: "r",
-        children: [
-          createGoalNode({ id: "a", title: "a", importance: 100 }),
-          createGoalNode({ id: "b", title: "b", importance: 0 }),
-        ],
-      }),
-    };
-    adjustImportance(tiny, "a", 20);
-    assert.equal(node(tiny, "a").importance, 20);
-    assert.equal(node(tiny, "b").importance, 0);
-    assertClose(sum(node(tiny, "r").children), 20, "同级和为 0 时不做缩放");
-  });
-
-  it("中心目标没有同级，调用后不变", () => {
+  it("中心目标没有父级，调用后仍是 100", () => {
     adjustImportance(scape, "root", 33);
     assert.equal(node(scape, "root").importance, 100);
   });
 });
 
 describe("moveGoal", () => {
-  it("跨父级移动后两端同级都重新归一化到 100", () => {
+  it("跨父级移动：原占比原样带过去，两端都不再被归一化", () => {
     assert.equal(moveGoal(scape, "h1", "career"), true);
     assert.equal(parentOf(scape, "h1")?.id, "career");
     assert.deepEqual(
       node(scape, "career").children.map((c) => c.id),
       ["c1", "c2", "h1"]
     );
-    assertClose(sum(node(scape, "career").children), 100, "新父级同级权重总和");
-    assertClose(sum(node(scape, "health").children), 100, "只剩 h2，补成整支权重");
+    assert.equal(node(scape, "h1").importance, 60, "带着原占比去新父");
+    assert.equal(sum(node(scape, "career").children), 160, "新父溢出 160%，由渲染层缩回");
+    assert.deepEqual(
+      node(scape, "health").children.map((c) => c.importance),
+      [40],
+      "旧父剩下的不被放大补满"
+    );
     assert.equal(node(scape, "h1").children[0].id, "h1a", "子树跟着走");
   });
 
-  it("移动到兄弟位置也对两端归一化", () => {
+  it("移动到兄弟位置也不碰任何人的权重", () => {
     assert.equal(moveGoal(scape, "h2", "h1"), true);
-    assertClose(sum(node(scape, "h1").children), 100, "新父级同级权重总和");
+    assert.deepEqual(
+      node(scape, "h1").children.map((c) => [c.id, c.importance]),
+      [["h1a", 100], ["h2", 40]]
+    );
     assert.equal(node(scape, "health").children.length, 1);
-    assert.equal(node(scape, "health").children[0].importance, 100);
+    assert.equal(node(scape, "health").children[0].importance, 60, "h1 没有被补成 100");
   });
 
   it("禁止挂到自己或自己的后代下，且树保持原样", () => {

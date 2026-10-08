@@ -413,6 +413,132 @@ step("canvas 段复用已有白板、不重导出", async () => {
     state.radialTabs === 1 && state.activeSeg === "Radial map" && state.canvasTabs === 0, JSON.stringify(state));
 });
 
+/** 刻意不对称的合成树：分支深度不同、环厚不同、兄弟和既有 <100（留白）也有 >100（溢出） */
+const FOREST = {
+  title: "Root", importance: 100, children: [
+    { title: "Thick", importance: 40, bandScale: 1.6, children: [
+      { title: "A1", importance: 30, children: [{ title: "A1a", importance: 50 }, { title: "A1b", importance: 50 }] },
+      { title: "A2", importance: 20 },
+    ] },
+    { title: "Over", importance: 25, children: [{ title: "B1", importance: 90 }, { title: "B2", importance: 90 }] },
+    // 长标题 + 只占 8% 角度：必然画不下，用来验截断；再一个 1.5% 的连字都放不下，验悬停兜底
+    { title: "长期主义的身体与财务健康储备", importance: 8 },
+    { title: "极窄也要有个名字的小目标", importance: 1.5 },
+    { title: "Thin", importance: 10, bandScale: 0.6, children: [
+      { title: "C1", importance: 100, bandScale: 0.6, children: [
+        { title: "C2", importance: 100, bandScale: 0.6, children: [
+          { title: "C3", importance: 100, bandScale: 0.6, children: [{ title: "C4", importance: 100 }] },
+        ] },
+      ] },
+    ] },
+    { title: "Zero", importance: 0, children: [{ title: "Z1", importance: 100 }] },
+  ],
+};
+
+/** 标题即 id（这棵树里标题唯一），断言里可以直接写 shapes['n-A1'] */
+function toGoalNode(n) {
+  return {
+    id: `n-${n.title}`, title: n.title, importance: n.importance,
+    ...(n.bandScale ? { bandScale: n.bandScale } : {}),
+    tags: [], children: (n.children || []).map(toGoalNode),
+  };
+}
+
+step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断", async () => {
+  await useTmpMap();
+  const tree = await json(`(async()=>{
+    const pl=${PL};
+    pl.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(FOREST))};});
+    await new Promise(r=>setTimeout(r,600));
+    const v=pl.radialViews()[0];
+    const shapes={}; for(const [id,s] of v.nodePositions) shapes[id]={rIn:Math.round(s.rInner),rOut:Math.round(s.rOuter),span:+(s.endAngle-s.startAngle).toFixed(4)};
+    const bbox=document.querySelector('svg.goalscape-radial-svg').getBBox();
+    return {shapes,bbox:{x:Math.round(bbox.x),y:Math.round(bbox.y),w:Math.round(bbox.width),h:Math.round(bbox.height)},
+      labels:[...document.querySelectorAll('.goalscape-label')].map(t=>t.textContent),
+      sectors:[...document.querySelectorAll('svg.goalscape-radial-svg path[data-id]')]
+        .map(p=>({id:p.getAttribute('data-id'),tip:p.querySelector('title')?.textContent||''}))};})()`);
+  const s = tree.shapes;
+  const span = (id) => s[`n-${id}`]?.span ?? -1;
+  const deg = (x) => Math.round((x * 180) / Math.PI);
+
+  ok("importance 0 的节点不画扇区", !("n-Zero" in s) && !("n-Z1" in s), Object.keys(s).join(","));
+  ok("兄弟和 50% → 父扇区留一半空白（Thick 下 A1+A2 = 40°，父 80°）",
+    Math.abs(span("A1") + span("A2") - span("Thick") / 2) < 1e-3,
+    `${deg(span("A1"))}+${deg(span("A2"))} vs 父 ${deg(span("Thick"))}`);
+  ok("兄弟和 180% → 整体缩回、恰好铺满父扇区不越界",
+    Math.abs(span("B1") + span("B2") - span("Over")) < 1e-3 && Math.abs(span("B1") - span("B2")) < 1e-6,
+    `${deg(span("B1"))}/${deg(span("B2"))} vs 父 ${deg(span("Over"))}`);
+  ok("子环内径 = 父环外径（逐节点递推，不再等宽）",
+    s["n-A1"].rIn === s["n-Thick"].rOut, `${s["n-A1"].rIn} vs ${s["n-Thick"].rOut}`);
+  ok("每节点自己的环厚生效：厚档 1.6 的分支比薄档 0.6 的同层半径大",
+    s["n-A1"].rOut > s["n-C1"].rOut, `A1 ${s["n-A1"].rOut} > C1 ${s["n-C1"].rOut}`);
+  ok("层与层互不对齐（各分支半径独立）",
+    s["n-A1"].rOut !== s["n-C1"].rOut && s["n-A1a"].rOut !== s["n-C2"].rOut,
+    `A1 ${s["n-A1"].rOut} / C1 ${s["n-C1"].rOut} · A1a ${s["n-A1a"].rOut} / C2 ${s["n-C2"].rOut}`);
+  ok("最深一条链仍铺在 viewBox 内（getBBox 不越 0..1000）",
+    tree.bbox.x >= 0 && tree.bbox.y >= 0 && tree.bbox.x + tree.bbox.w <= 1000 && tree.bbox.y + tree.bbox.h <= 1000,
+    JSON.stringify(tree.bbox));
+  const truncated = tree.labels.filter((t) => t.endsWith("…"));
+  ok("画不下的长标题截断成省略号（而不是整格空白）", truncated.length > 0, JSON.stringify(tree.labels));
+  // 根节点会画两行（标题 + 百分比），所以不能拿 label 数和 sector 数比大小，按内容判
+  const narrow = tree.shapes["n-极窄也要有个名字的小目标"];
+  const narrowArc = narrow.span * (narrow.rIn + narrow.rOut) / 2;
+  ok("弧长不够的窄格不画字，但扇区仍在、<title> 全名也在（悬停可辨）",
+    narrowArc < 26 && !tree.labels.some((t) => t.includes("极窄")) && !!narrow,
+    `arc=${narrowArc.toFixed(1)}px labels含极窄=${tree.labels.some((t) => t.includes("极窄"))}`);
+  ok("每个扇区都带 <title> 全名",
+    tree.sectors.every((s) => s.tip.startsWith(s.id.replace(/^n-/, ""))),
+    JSON.stringify(tree.sectors.filter((s) => !s.tip.startsWith(s.id.replace(/^n-/, ""))).slice(0, 2)));
+
+  // 命中测试：环带半径逐节点不同，只能按扇区自己的 [rIn,rOut] 判 —— 拿深链上的扇区中心点真点一次
+  const hit = await json(`(async()=>{
+    const v=${PL}.radialViews()[0];
+    const sh=v.nodePositions.get('n-C3');
+    const mid=(sh.startAngle+sh.endAngle)/2, r=(sh.rInner+sh.rOuter)/2;
+    const svg=document.querySelector('svg.goalscape-radial-svg');
+    const p=new DOMPoint(500+Math.cos(mid)*r,500+Math.sin(mid)*r).matrixTransform(svg.getScreenCTM());
+    const el=document.elementFromPoint(p.x,p.y);
+    el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:7,isPrimary:true,clientX:p.x,clientY:p.y}));
+    el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:7,isPrimary:true,clientX:p.x,clientY:p.y}));
+    await new Promise(r=>setTimeout(r,400));
+    return {hit:el.getAttribute('data-id'), panel:document.querySelector('.goalscape-panel').textContent.trim().slice(0,20)};})()`);
+  ok("深链扇区中心点能被命中并选中（命中测试按各自环带半径）",
+    hit.hit === "n-C3" && hit.panel.includes("C3"), JSON.stringify(hit));
+
+  const band = await json(`(async()=>{
+    const pl=${PL}; const v=pl.radialViews()[0];
+    const byTitle=(t)=>{let f=null;(function w(n){if(n.title===t)f=n;n.children.forEach(w);})(pl.store.scape.mainGoal);return f;};
+    const row=()=>[...document.querySelectorAll('.goalscape-panel .setting-item')]
+      .find(r=>r.querySelector('.setting-item-name')?.textContent==='Importance');
+    const btns=(i)=>row().querySelectorAll('.goalscape-band-btn')[i];
+    // 选一个没设过 bandScale 的扇区（Over），选中态是上一步 hit 测试留下的 C3，不能直接读面板
+    const sh=v.nodePositions.get('n-Over');
+    const mid=(sh.startAngle+sh.endAngle)/2, r=(sh.rInner+sh.rOuter)/2;
+    const svg=document.querySelector('svg.goalscape-radial-svg');
+    const p=new DOMPoint(500+Math.cos(mid)*r,500+Math.sin(mid)*r).matrixTransform(svg.getScreenCTM());
+    const el=document.elementFromPoint(p.x,p.y);
+    el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:9,isPrimary:true,clientX:p.x,clientY:p.y}));
+    el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:9,isPrimary:true,clientX:p.x,clientY:p.y}));
+    await new Promise(r=>setTimeout(r,400));
+
+    const out={title:document.querySelector('.goalscape-panel-title').textContent,
+      before:byTitle('Over').bandScale,
+      activeAtStart:[...row().querySelectorAll('.goalscape-band-btn')].findIndex(b=>b.classList.contains('is-active'))};
+    btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    out.thick=byTitle('Over').bandScale;
+    btns(1).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    out.back=byTitle('Over').bandScale;
+    out.activeAfter=[...row().querySelectorAll('.goalscape-band-btn')].filter(b=>b.classList.contains('is-active')).length;
+    return out;})()`);
+  ok("面板三档按钮：默认高亮标准档，厚档写 1.6、回标准档删掉字段",
+    band.title === "Over" && band.before === undefined && band.activeAtStart === 1 &&
+    band.thick === 1.6 && band.back === undefined && band.activeAfter === 1, JSON.stringify(band));
+
+  await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
+  await new Promise((r) => setTimeout(r, 500));
+  info(`森林几何截图：${await shot("forest")}`);
+});
+
 step("themes 暗/亮两主题截图", async () => {
   await json(`(async()=>{
     const pl=${PL};

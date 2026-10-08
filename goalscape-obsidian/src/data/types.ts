@@ -4,7 +4,8 @@
 export interface GoalNode {
   id: string; // uuid
   title: string;
-  importance: number; // 原始权重 0-100，渲染时与同级归一化
+  importance: number; // 占父扇区角度的百分比 0-100；兄弟之和可 <100（留白）或 >100（渲染时整体缩回）
+  bandScale?: number; // 本节点环带厚度倍数，未设即默认档；每棵树各层独立，所以层与层可以不对齐
   progress?: number; // 0-100，仅叶子节点手工填写；父级由引擎计算
   due?: string; // ISO date
   start?: string; // Gantt 用
@@ -27,6 +28,7 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     id: partial.id ?? generateId(),
     title: partial.title,
     importance: partial.importance ?? 50,
+    bandScale: partial.bandScale,
     progress: partial.progress,
     due: partial.due,
     start: partial.start,

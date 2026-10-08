@@ -9,8 +9,7 @@ import type { GoalTreeStore } from "../data/goalTree";
 import {
   CX,
   CY,
-  RingGeometry,
-  SectorAngles,
+  SectorShape,
   hitTestSector,
   normalizeAngleInto,
   toLogicalPoint,
@@ -19,8 +18,7 @@ import {
 /** 拖拽控制器向视图借用的现场，每次 move/up 都重新查询 */
 export interface DragSurface {
   liveSvg(): SVGSVGElement | null;
-  positions(): Map<string, SectorAngles>;
-  ring(): RingGeometry;
+  positions(): Map<string, SectorShape>;
   titleOf(id: string): string;
   render(): void;
   /** 只改选中态不重建面板（拖拽开始时需要静默取消选中） */
@@ -145,7 +143,7 @@ export class ReparentDragController {
   private targetAt(clientX: number, clientY: number): string | null {
     const svg = this.surface.liveSvg();
     if (!svg) return null;
-    return hitTestSector(this.surface.positions(), this.surface.ring(), toLogicalPoint(svg, clientX, clientY));
+    return hitTestSector(this.surface.positions(), toLogicalPoint(svg, clientX, clientY));
   }
 
   private highlight(targetId: string | null): void {
