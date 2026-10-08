@@ -470,7 +470,7 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     `${deg(span("B1"))}/${deg(span("B2"))} vs 父 ${deg(span("Over"))}`);
   ok("子环内径 = 父环外径（逐节点递推，不再等宽）",
     s["n-A1"].rIn === s["n-Thick"].rOut, `${s["n-A1"].rIn} vs ${s["n-Thick"].rOut}`);
-  ok("每节点自己的环厚生效：厚档 1.6 的分支比薄档 0.6 的同层半径大",
+  ok("每节点自己的环厚生效：厚档分支比薄档分支的同层半径大",
     s["n-A1"].rOut > s["n-C1"].rOut, `A1 ${s["n-A1"].rOut} > C1 ${s["n-C1"].rOut}`);
   ok("层与层互不对齐（各分支半径独立）",
     s["n-A1"].rOut !== s["n-C1"].rOut && s["n-A1a"].rOut !== s["n-C2"].rOut,
@@ -524,15 +524,24 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     const out={title:document.querySelector('.goalscape-panel-title').textContent,
       before:byTitle('Over').bandScale,
       activeAtStart:[...row().querySelectorAll('.goalscape-band-btn')].findIndex(b=>b.classList.contains('is-active'))};
+    // 改厚度前先把每个扇区的内外径记下来：调一个块，只允许它自己和它的后代动，
+    // 父块与别的分支必须原样（早先按"累计最厚链"归一 unit，改一处全图跟着变宽窄）
+    const snap=()=>{const o={};for(const [id,s] of v.nodePositions)o[id]=[Math.round(s.rInner),Math.round(s.rOuter)];return o;};
+    const shapesBefore=snap();
     btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
     out.thick=byTitle('Over').bandScale;
+    const shapesThick=snap();
+    out.moved=Object.keys(shapesThick).filter((k)=>shapesThick[k].join()!==(shapesBefore[k]||[]).join()).sort();
     btns(1).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
     out.back=byTitle('Over').bandScale;
+    out.backToSame=snap()[ 'n-Root'].join()===shapesBefore['n-Root'].join() && byTitle('Over').bandScale===undefined;
     out.activeAfter=[...row().querySelectorAll('.goalscape-band-btn')].filter(b=>b.classList.contains('is-active')).length;
     return out;})()`);
-  ok("面板三档按钮：默认高亮标准档，厚档写 1.6、回标准档删掉字段",
+  ok("面板三档按钮：默认高亮标准档，厚档写最大值、回标准档删掉字段",
     band.title === "Over" && band.before === undefined && band.activeAtStart === 1 &&
-    band.thick === 1.6 && band.back === undefined && band.activeAfter === 1, JSON.stringify(band));
+    band.thick > 1 && band.back === undefined && band.activeAfter === 1 && band.backToSame, JSON.stringify(band));
+  ok("调一个块的环厚只影响它自己和它的后代，父块与别的分支不变",
+    band.moved.join(",") === "n-B1,n-B2,n-Over", JSON.stringify(band.moved));
 
   await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
   await new Promise((r) => setTimeout(r, 500));

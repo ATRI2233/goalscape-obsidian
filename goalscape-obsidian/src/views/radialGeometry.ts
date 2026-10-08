@@ -24,8 +24,10 @@ export const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
-/** 环带厚度的三档（面板上的 薄/标准/厚）；未设 bandScale 的节点用第 2 档 */
-export const BAND_STEPS = [0.6, 1, 1.6];
+/** 环带厚度的三档（面板上的 薄/标准/厚）；未设 bandScale 的节点用第 2 档。
+ *  标准档刻意等于旧版"等宽环"的厚度，所以没调过的图看起来和以前一致；厚档只加 30%，
+ *  再加就挤占可读面积、实际用不上 */
+export const BAND_STEPS = [0.6, 1, 1.3];
 export const BAND_DEFAULT_INDEX = 1;
 
 const INK_LIGHT = "#ffffff";
@@ -54,17 +56,29 @@ export function bandScaleOf(node: GoalNode): number {
   return s && Number.isFinite(s) && s > 0 ? s : BAND_STEPS[BAND_DEFAULT_INDEX];
 }
 
-/** 从根到该节点（含自身）的累计厚度档数，用于把整图缩放到 viewBox 内 */
+/** 画得出来的层数（折叠的子树算一层），决定"标准档"下每层的厚度 */
+export function visibleDepth(node: GoalNode, depth = 0): number {
+  if (!node.children.length || node.collapsed) return depth;
+  return Math.max(...node.children.map((c) => visibleDepth(c, depth + 1)));
+}
+
+/** 从根到该节点（含自身）的累计档数，只用于判"会不会画到 MAX_R 之外" */
 export function depthWeight(node: GoalNode): number {
   let deepest = 0;
   for (const c of node.children) deepest = Math.max(deepest, depthWeight(c));
   return bandScaleOf(node) + deepest;
 }
 
-/** 一档厚度对应多少用户单位：让最深的那条链恰好铺到 MAX_R */
+/**
+ * 一档厚度对应多少用户单位：**只跟层数挂钩，不跟各节点的 bandScale 挂钩**。
+ * 早先按"累计最厚那条链"归一，于是改任意一个块的厚度都会重算 unit，
+ * 父块和所有别的块跟着一起变宽窄 —— 局部调整被做成了全局缩放。
+ * 现在只有"照层数算会画到 MAX_R 之外"时才整体缩回，平时各块互不影响。
+ */
 export function radialUnit(root: GoalNode): number {
-  const total = depthWeight(root);
-  return total > 0 ? MAX_R / total : MAX_R;
+  const base = MAX_R / (visibleDepth(root) + 1);
+  const needed = depthWeight(root) * base;
+  return needed > MAX_R ? MAX_R / depthWeight(root) : base;
 }
 
 /**

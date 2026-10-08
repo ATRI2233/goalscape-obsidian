@@ -287,7 +287,8 @@ export class InfoPanel {
       }
       btn.setAttr("aria-label", BAND_LABELS[i]);
       setTooltip(btn, BAND_LABELS[i], { placement: "top" });
-      btn.createEl("i").style.height = `${[4, 8, 13][i]}px`;
+      // 小横条的高度按档位比例算，免得改了 BAND_STEPS 忘了改这里
+      btn.createEl("i").style.height = `${Math.max(3, Math.round(7 * step))}px`;
       btn.addEventListener("click", () => {
         this.mutate((s) => {
           const found = findNode(s.mainGoal, node.id);

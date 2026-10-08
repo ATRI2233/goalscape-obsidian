@@ -388,7 +388,7 @@ var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 var SECTOR_GAP_ARC = 7;
-var BAND_STEPS = [0.6, 1, 1.6];
+var BAND_STEPS = [0.6, 1, 1.3];
 var BAND_DEFAULT_INDEX = 1;
 var INK_LIGHT = "#ffffff";
 var INK_DARK = "#0f172a";
@@ -400,6 +400,11 @@ function bandScaleOf(node) {
   const s = node.bandScale;
   return s && Number.isFinite(s) && s > 0 ? s : BAND_STEPS[BAND_DEFAULT_INDEX];
 }
+function visibleDepth(node, depth = 0) {
+  if (!node.children.length || node.collapsed)
+    return depth;
+  return Math.max(...node.children.map((c) => visibleDepth(c, depth + 1)));
+}
 function depthWeight(node) {
   let deepest = 0;
   for (const c of node.children)
@@ -407,8 +412,9 @@ function depthWeight(node) {
   return bandScaleOf(node) + deepest;
 }
 function radialUnit(root) {
-  const total = depthWeight(root);
-  return total > 0 ? MAX_R / total : MAX_R;
+  const base = MAX_R / (visibleDepth(root) + 1);
+  const needed = depthWeight(root) * base;
+  return needed > MAX_R ? MAX_R / depthWeight(root) : base;
 }
 function childShares(node) {
   const total = node.children.reduce((s, c) => s + Math.max(0, c.importance), 0);
@@ -896,7 +902,7 @@ var InfoPanel = class {
       }
       btn.setAttr("aria-label", BAND_LABELS[i]);
       (0, import_obsidian3.setTooltip)(btn, BAND_LABELS[i], { placement: "top" });
-      btn.createEl("i").style.height = `${[4, 8, 13][i]}px`;
+      btn.createEl("i").style.height = `${Math.max(3, Math.round(7 * step))}px`;
       btn.addEventListener("click", () => {
         this.mutate((s) => {
           const found = findNode(s.mainGoal, node.id);

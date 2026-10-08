@@ -425,9 +425,13 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
     `addGoal` 新节点默认给"父级剩余角度"（`min(50, 100-已用)`，下限 5），避免连点三次 Add subgoal 就 150% 全被缩回。
   - `rollup.computeProgress` 不受影响（父进度 = Σ(权重×进度)/Σ权重，本来就和"和是否为 100"无关）。
 - **几何改成逐节点递推**（`radialGeometry.ts` 重写）：
-  - `bandScale`（新字段，0.6 / 1 / 1.6 三档，**标准档不落字段**）→ 每个节点自己的环厚；
-    `depthWeight()` 求"累计最厚的那条链"，`radialUnit = MAX_R / depthWeight(root)` 把整图归一，
-    所以各分支半径互不对齐、又都不会越出 viewBox —— 这才是需要的"智能缩放"。
+  - `bandScale`（新字段，**0.6 / 1 / 1.3** 三档，**标准档不落字段**）→ 每个节点自己的环厚；
+    标准档刻意等于旧版等宽环的厚度，所以没调过的图看起来和以前一致。
+  - `radialUnit` **只跟层数挂钩**（`MAX_R / (visibleDepth+1)`），只有"照层数算会画到 MAX_R 之外"时
+    才整体缩回。**踩过的坑**：第一版按"累计最厚那条链"归一 unit，结果用户改任意一个块的厚度
+    就会重算 unit，父块和所有别的块跟着一起变宽窄 —— 局部调整被做成了全局缩放（用户实测报出）。
+    现在回归里有一条专门盯这个：调厚度前后逐个扇区比对 `[rInner, rOuter]`，
+    只允许"它自己 + 它的后代"三项变化（`n-B1,n-B2,n-Over`）。
   - `childShares(node)` 取代 `(c.importance / Σ兄弟)`；`sectorEdges(SectorShape)` 取代
     `(depth, start, end, ring)`；`hitTestSector` 改成拿点半径比对**每个扇区自己的** `[rInner, rOuter]`
     （旧的 `Math.floor(r / ringW)` 反推层级在逐节点环厚下直接失效）。
@@ -438,14 +442,16 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
     挂在文字上永远不会触发悬停（上一版就白挂了）。现在没画字的窄格也能悬停看出是谁。
 - `canvasSync.toCanvas` 改用同一套 `childShares`/`bandScaleOf` 递推半径与角度，白板布局才和图对得上；
   节点文案从"权重 X"改成"占父级 X%"。
-- 面板：`Importance` 行右边三档按钮（`.goalscape-band-btn`，按钮里小横条的高度就是那一档的厚度，
-  不用读字也能选）；中心盘没有 Importance 行，给它独立的 `Hub size` 行。CSS 用
-  `.setting-item-control:has(.goalscape-band) .slider-container` 让滑杆让位，不然 320px 面板里按钮会被顶出去。
+- 面板：`Importance` 行右边三档按钮（`.goalscape-band-btn`，按钮里小横条的高度按 `BAND_STEPS` 比例算，
+  不用读字也能选；改档位值不会再和按钮图形脱节），中心盘没有 Importance 行，给它独立的 `Hub size` 行。
+  CSS 用 `.setting-item-control:has(.goalscape-band) .slider-container` 让滑杆让位，
+  不然 320px 面板里按钮会被顶出去。
 - 测试：数据层 78 项（+2，`adjustImportance`/`moveGoal` 的"归一化到 100"断言全部按新语义重写，
   删掉不再使用的 `assertClose`）；`test/ui-regression.mjs` 新增 **forest 步骤**（往临时图里灌一棵
   刻意不对称的合成树：厚档分支 / 薄档 5 层深链 / 兄弟和 180% 溢出 / importance 0 / 长标题窄格），
   12 项断言覆盖留白角度、逐节点环厚、层不对齐、`getBBox` 不越界、截断省略号、`<title>`、
-  深链扇区命中选中、面板三档写值与回默认删字段。全套 **40 项 / 13.7s** 通过，暗亮两主题 + 森林截图。
+  深链扇区命中选中、面板三档写值与回默认删字段、**调厚度只动自己和后代**。
+  全套 **41 项 / 13.6s** 通过，暗亮两主题 + 森林截图。
 - 未做：① 模板数值仍是"和=100"，在新语义下会铺满整圆，要不要出留白版模板待用户点头；
   ② 深图钻取（超过 4 层只展开到第 K 层）没做；③ 三档之外的"任意环厚微调"没做。
 
