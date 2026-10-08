@@ -88,7 +88,7 @@ describe("load / 建档", () => {
     assert.equal("responsible" in kid, false);
   });
 
-  it("色相只属于二级节点：根与深层残留的旧 color 读档即清，brightness 收进 ±20", async () => {
+  it("色相只留在中心盘和二级节点：更深层残留的旧 color 读档即清，brightness 收进 ±20", async () => {
     const { store } = createEnvironment({
       [PATH]: json({
         id: "root",
@@ -111,7 +111,7 @@ describe("load / 建档", () => {
 
     const root = store.scape.mainGoal;
     const branch = root.children[0];
-    assert.equal("color" in root, false, "根不持有分支色相");
+    assert.equal(root.color, "#0000ff", "中心盘自己一个色，读档要保留");
     assert.equal(branch.color, "#f87171", "二级节点的原值保留");
     assert.equal("color" in branch.children[0], false, "深层的旧色值清掉，免得留下图上不生效的死字段");
     assert.equal(root.brightness, 3);

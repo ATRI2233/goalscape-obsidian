@@ -10,8 +10,8 @@ import { GoalNode, DEFAULT_BRANCH_COLOR, branchColors, flattenTree } from "../da
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
-  SVG_NS, VIEW_SIZE, CX, CY,
-  arcPath, bandScaleOf, childShares, fitLabel, labelInk, nodeColor, radialUnit, sectorEdges,
+  SVG_NS, VIEW_SIZE, CX, CY, MAX_R,
+  arcPath, bandScaleOf, childShares, fitLabel, labelInk, nodeColor, progressRim, radialUnit, sectorEdges,
   SectorShape,
 } from "./radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
@@ -24,6 +24,9 @@ function scapeName(path: string): string {
   return path.split("/").pop()!.replace(/\.goalscape\.json$/, "");
 }
 
+/** 分屏会同时挂两个 svg：id 撞了以后 url(#id) 只认文档里第一个 defs，那个视图一销毁另一个的渐变就悬空，所以逐视图编号 */
+let sheenSeq = 0;
+
 export class RadialGoalMapView extends ItemView {
   private unsubscribe?: () => void;
   private selectedId: string | null = null;
@@ -32,6 +35,7 @@ export class RadialGoalMapView extends ItemView {
   private filterBar!: FocusFilter;
   private filterCriteria: FilterCriteria = {};
   private nodePositions = new Map<string, SectorShape>();
+  private readonly sheenId = `goalscape-sheen-${++sheenSeq}`;
   private weightDrag!: WeightDragController;
   private reparentDrag!: ReparentDragController;
 
@@ -155,6 +159,17 @@ export class RadialGoalMapView extends ItemView {
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
 
+    // 扇区收进同一个组：投影只按整组的轮廓打一次，逐扇区打会变成一团糊死的灰。
+    // 标签和手柄刻意留在组外 —— 它们要压在**所有**扇区之上（早先内圈标签会被后画的外圈扇区盖住），
+    // 而且不该各自带上阴影。
+    const map = document.createElementNS(SVG_NS, "g");
+    map.addClass("goalscape-map");
+    svg.appendChild(map);
+
+    const defs = document.createElementNS(SVG_NS, "defs");
+    defs.appendChild(this.sheenGradient());
+    svg.appendChild(defs);
+
     // 一档厚度对应多少半径：让"累计最厚的那条链"恰好铺到 MAX_R，
     // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
     const unit = radialUnit(scape.mainGoal);
@@ -180,16 +195,18 @@ export class RadialGoalMapView extends ItemView {
       const edge = sectorEdges(shape);
       const color = nodeColor(node, depth, hues.get(node.id) ?? DEFAULT_BRANCH_COLOR, siblingIndex);
       const ink = labelInk(color);
+      const dim = !!matchingIds && !matchingIds.has(node.id);
+      const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
 
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1));
+      path.setAttribute("d", d);
       path.setAttribute("fill", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
       if (node.id === this.selectedId) path.addClass("goalscape-selected");
       if (node.collapsed && node.children.length) path.addClass("goalscape-collapsed");
-      if (matchingIds && !matchingIds.has(node.id)) path.addClass("goalscape-dimmed");
+      if (dim) path.addClass("goalscape-dimmed");
 
       path.addEventListener("click", (e) => {
         // 挡住冒泡，否则 svg 空白处的"点击清除选中"会把刚选中的节点又清掉。
@@ -212,7 +229,18 @@ export class RadialGoalMapView extends ItemView {
       const tip = document.createElementNS(SVG_NS, "title");
       tip.textContent = `${node.title} · ${node.progress ?? 0}%`;
       path.appendChild(tip);
-      svg.appendChild(path);
+      map.appendChild(path);
+
+      // 光源叠层：跟底色同一条路径、只换填充，于是每格各自"接住"同一束光
+      this.addOverlay(map, d, dim, ["goalscape-sheen"], { fill: `url(#${this.sheenId})` });
+
+      // 进度画在外缘：只画"走完的那一段"，没走到的地方一律不留痕迹（画轨道会糊成一条黑边）
+      const rim = progressRim(edge, node.progress ?? 0);
+      if (rim) {
+        this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
+          stroke: ink.fill, "stroke-dasharray": rim.dash,
+        });
+      }
 
       const midAngle = (startAngle + endAngle) / 2;
       if (depth === 0) {
@@ -285,6 +313,47 @@ export class RadialGoalMapView extends ItemView {
     el.style.setProperty("stroke", ink.halo);
     svg.appendChild(el);
     return el;
+  }
+
+  /**
+   * 扇区之上的一条装饰路径（光源叠层 / 进度条）：不参与命中测试，
+   * 筛选未命中时跟着所属扇区一起变淡。stroke 走属性、不走类，
+   * 因为颜色逐扇区不同，而类规则会盖掉同名属性（见 addText）。
+   */
+  private addOverlay(
+    map: SVGGElement, d: string, dim: boolean, classes: string[], attrs: Record<string, string>
+  ): void {
+    const el = document.createElementNS(SVG_NS, "path");
+    el.setAttribute("d", d);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    el.addClass(...classes);
+    if (dim) el.addClass("goalscape-dimmed");
+    map.appendChild(el);
+  }
+
+  /**
+   * 整图共用的一束"光"：userSpaceOnUse 让渐变按全图坐标算，所以每个扇区取的是
+   * 自己那一段，拼起来是一个中心偏上的光源 + 外圈压暗，而不是每格各打一盏灯。
+   * 两端都极淡，浅色主题下白那一半基本看不见、只剩外圈的暗角。
+   */
+  private sheenGradient(): SVGRadialGradientElement {
+    const grad = document.createElementNS(SVG_NS, "radialGradient") as SVGRadialGradientElement;
+    grad.id = this.sheenId;
+    grad.setAttribute("gradientUnits", "userSpaceOnUse");
+    grad.setAttribute("cx", String(CX));
+    grad.setAttribute("cy", String(CY * 0.86));
+    grad.setAttribute("r", String(MAX_R * 1.15));
+    const stop = (offset: string, color: string, opacity: string): void => {
+      const s = document.createElementNS(SVG_NS, "stop");
+      s.setAttribute("offset", offset);
+      s.setAttribute("stop-color", color);
+      s.setAttribute("stop-opacity", opacity);
+      grad.appendChild(s);
+    };
+    stop("0", "#ffffff", "0.07");
+    stop("45%", "#ffffff", "0");
+    stop("100%", "#000000", "0.1");
+    return grad;
   }
 
   private select(id: string | null): void {

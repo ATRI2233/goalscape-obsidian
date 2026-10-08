@@ -7,8 +7,8 @@ export interface GoalNode {
   importance: number; // 占父扇区角度的百分比 0-100；兄弟之和可 <100（留白）或 >100（渲染时整体缩回）
   bandScale?: number; // 本节点环带厚度倍数，未设即默认档；每棵树各层独立，所以层与层可以不对齐
   /**
-   * 整条分支的色相，**只有二级节点（根的直接子节点）持有**。
-   * 根与更深层一律不存这个字段（读档时清掉），颜色一律由 branchColors 沿父链解析 ——
+   * 本节点自己的色相：**只有中心盘（根）和二级节点（根的直接子节点）持有**。
+   * 更深层一律不存这个字段（读档时清掉），颜色一律由 branchColors 沿父链解析 ——
    * 存两份就会有"父改了子没改"和"父子色系不一致"，不存就没有这两个状态。
    */
   color?: string;
@@ -85,21 +85,22 @@ export function flattenTree(root: GoalNode): GoalNode[] {
   return out;
 }
 
-/** 没设色相时的分支底色（插件的进度绿）；中心大盘也用这个色相，它不参与色系选择 */
+/** 没设色相时的默认底色（插件的进度绿），中心盘与没配色的分支都用它 */
 export const DEFAULT_BRANCH_COLOR = "#4ade80";
-/** 二级节点 = 根的直接子节点。整棵树里只有这一层持有 color */
+/** 持有 color 的最深层：中心盘（0）管自己，二级节点（1）管整条分支，更深层一律继承 */
 export const HUE_OWNER_DEPTH = 1;
 
 /**
  * 沿父链解析每个节点实际使用的色相，一次遍历出全图。
  * 放射图 / Gantt / CSV / Focus Filter 都从这里取 —— 颜色只有一个来源，
  * 所以"父改色子没改""父子色系不一致"这两个状态在数据里根本不存在。
- * 深层节点继承所属的一级分支；把节点拖到别的分支下，颜色自动跟着新分支走。
+ * 中心盘自己一个色（不往下传，各分支照旧认自己那一级的值）；
+ * 深层节点继承所属的二级分支；把节点拖到别的分支下，颜色自动跟着新分支走。
  */
 export function branchColors(root: GoalNode): Map<string, string> {
   const out = new Map<string, string>();
   const rec = (n: GoalNode, inherited: string, depth: number) => {
-    const color = depth === HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
+    const color = depth <= HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
     out.set(n.id, color);
     for (const c of n.children) rec(c, color, depth + 1);
   };

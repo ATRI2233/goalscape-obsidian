@@ -297,11 +297,13 @@ step("filter 漏斗浮层筛选", async () => {
     const tag=document.querySelector('.goalscape-filter-tag');
     tag.value='zzz-no-such-tag'; tag.dispatchEvent(new Event('change',{bubbles:true}));
     await new Promise(r=>setTimeout(r,400));
-    return {dimmed:document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-dimmed').length,
+    return {dimmed:document.querySelectorAll('svg.goalscape-radial-svg path[data-id].goalscape-dimmed').length,
       all:document.querySelectorAll('svg.goalscape-radial-svg path[data-id]').length,
+      sheen:document.querySelectorAll('svg.goalscape-radial-svg .goalscape-sheen.goalscape-dimmed').length,
       dot:document.querySelector('.goalscape-filter-btn').classList.contains('is-active')};})()`);
-  ok("无匹配标签 → 全图降饱和 + 漏斗亮圆点",
-    dim.all > 0 && dim.dimmed === dim.all && dim.dot, JSON.stringify(dim));
+  // 光源叠层也要一起变淡，否则未命中的格子上还留着一圈亮边把眼睛勾过去
+  ok("无匹配标签 → 全图降饱和（含光源叠层）+ 漏斗亮圆点",
+    dim.all > 0 && dim.dimmed === dim.all && dim.sheen === dim.all && dim.dot, JSON.stringify(dim));
 
   const away = await json(`(async()=>{
     document.querySelector('svg.goalscape-radial-svg').dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:500,clientY:400}));
@@ -552,7 +554,7 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
   info(`森林几何截图：${await shot("forest")}`);
 });
 
-/** 两条配色分支 + 一条没配色；叶子进度铺满 0/50/100，饱和度断言才有可比性 */
+/** 两条配色分支 + 一条没配色；叶子进度铺满 0/50/100，底色饱和度和外缘进度条的断言才有可比性 */
 const BRANCHES = {
   title: "Root", importance: 100, children: [
     { title: "Blue", importance: 60, color: "#38bdf8", children: [
@@ -612,10 +614,53 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     sameHue(H("n-Pink").h, PINK) && sameHue(H("n-P-leaf").h, PINK)
       && sameHue(H("n-Plain").h, GREEN) && sameHue(H("n-Root").h, GREEN),
     JSON.stringify(hueMap(painted)));
-  ok("进度只改饱和度：0% 最灰 50、100% 纯色 100、父级按汇总落在中间",
-    Math.abs(H("n-B-zero").s - 50) <= 2 && Math.abs(H("n-B-done").s - 100) <= 2
-      && Math.abs(H("n-B-mid").s - 75) <= 2 && sameHue(H("n-B-done").h, H("n-B-zero").h),
-    JSON.stringify({ zero: H("n-B-zero").s, done: H("n-B-done").s, mid: H("n-B-mid").s }));
+  // 饱和度是"选色"自己的属性，进度不许再碰它：同一条分支上 0% 和 100% 的底色只差明度
+  const picked = hsl(BRANCHES.children[0].color);
+  ok("底色饱和度来自选色，不再被进度覆盖（同分支 0% 与 100% 只差环层明度）",
+    Math.abs(H("n-B-zero").s - picked.s) <= 3 && Math.abs(H("n-B-done").s - picked.s) <= 3
+      && Math.abs(H("n-B-zero").s - H("n-B-done").s) <= 1 && sameHue(H("n-B-done").h, H("n-B-zero").h)
+      && H("n-B-done").l !== H("n-B-zero").l,
+    JSON.stringify({ picked: Math.round(picked.s), zero: painted["n-B-zero"], done: painted["n-B-done"] }));
+
+  // 进度改画在外缘：map 里每个节点是"扇区 → 光源 → 进度条"三连，
+  // 按 DOM 顺序把装饰层归给最近的 data-id 扇区，不用给它们再挂一个 id
+  const rim = await json(`(()=>{
+    const out={}; let cur=null;
+    for(const p of document.querySelectorAll('.goalscape-map > path')){
+      if(p.hasAttribute('data-id')){ cur=p.getAttribute('data-id'); out[cur]={}; continue; }
+      if(!cur) continue;
+      if(p.classList.contains('goalscape-rim')){
+        const done=parseFloat(p.getAttribute('stroke-dasharray'));
+        out[cur].ratio=p.getTotalLength()?done/p.getTotalLength():-1;
+      }
+    }
+    return {rims:out,
+      rimCount:document.querySelectorAll('.goalscape-map > path.goalscape-rim').length,
+      sectors:document.querySelectorAll('.goalscape-map > path[data-id]').length,
+      sheens:document.querySelectorAll('.goalscape-sheen').length,
+      mapFilter:getComputedStyle(document.querySelector('.goalscape-map')).filter,
+      // 全页 radialGradient 不止我们这一个（Obsidian 自带图标里有），必须锁定本视图 svg 内的那一个
+      grad:(()=>{const g=document.querySelector('svg.goalscape-radial-svg radialGradient');
+        if(!g) return null;
+        return {id:g.id, units:g.getAttribute('gradientUnits'),
+          stops:[...g.children].map(s=>s.getAttribute('stop-opacity')),
+          used:[...document.querySelectorAll('.goalscape-sheen')]
+            .every(p=>p.getAttribute('fill')==='url(#'+g.id+')')};})()};})()`);
+  const ratio = (id) => rim.rims[id] && rim.rims[id].ratio;
+  ok("进度条画在扇区外缘：dash 占比即完成度（0/50/100 各归各）",
+    Math.abs(ratio("n-B-zero")) < 0.01 && Math.abs(ratio("n-B-done") - 1) < 0.01
+      && Math.abs(ratio("n-B-mid") - 0.5) < 0.02 && Math.abs(ratio("n-Blue") - 0.5) < 0.02,
+    JSON.stringify({ zero: ratio("n-B-zero"), done: ratio("n-B-done"), mid: ratio("n-B-mid"), blue: ratio("n-Blue") }));
+  ok("每个扇区一层光源 + 一条进度条（没走到的地方不留轨道）",
+    rim.sectors === rim.sheens && rim.sectors === rim.rimCount && rim.grad && rim.grad.used && rim.grad.stops.length === 3
+      && rim.grad.units === "userSpaceOnUse" && /^goalscape-sheen-\d+$/.test(rim.grad.id),
+    JSON.stringify({ sectors: rim.sectors, sheens: rim.sheens, rimCount: rim.rimCount, grad: rim.grad }));
+  ok("整组一份柔和投影（投影打在组上，不是逐扇区）",
+    /drop-shadow/.test(rim.mapFilter), rim.mapFilter);
+  // 截图前清掉选中：强调色描边和权重手柄会把进度条本身糊住
+  await ev(`${PL}.radialViews()[0].clearSelection()`);
+  await new Promise((r) => setTimeout(r, 350));
+  info(`进度条 + 光源 + 投影截图：${await shot("progress-rim")}`);
 
   const panelAt = (id) => json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select(${JSON.stringify(id)});
@@ -631,9 +676,10 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     branch.title === "Blue" && branch.names.includes("Branch color")
       && !branch.names.includes("Brightness") && branch.swatches === 1,
     JSON.stringify(branch));
-  ok("中心盘与三级往内：只有明度滑杆，色系入口已被它替换",
-    hub.names.includes("Brightness") && !hub.names.includes("Branch color") && hub.swatches === 0
-      && deep.names.includes("Brightness") && !deep.names.includes("Branch color") && deep.swatches === 0,
+  ok("中心盘有自己的色系入口（只影响大盘），三级往内只剩明度滑杆",
+    hub.title === "Root" && hub.names.includes("Hub color")
+      && !hub.names.includes("Brightness") && hub.swatches === 1
+      && deep.names.includes("Brightness") && !deep.names.some((n) => /color/i.test(n)) && deep.swatches === 0,
     JSON.stringify({ hub: hub.names, deep: deep.names }));
 
   const recolored = await json(`(async()=>{

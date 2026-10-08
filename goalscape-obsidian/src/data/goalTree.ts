@@ -109,15 +109,15 @@ export class GoalTreeStore {
     }
   }
 
-  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于二级节点"这条规则落到数据上 */
+  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于中心盘和二级节点"这条规则落到数据上 */
   private normalize(node: GoalNode, depth = 0): void {
     node.id ??= createGoalNode({ title: node.title ?? "Untitled" }).id;
     node.title ??= "Untitled";
     node.importance ??= 50;
     delete (node as LegacyNode).responsible;
-    // 旧数据里根和深层节点可能存过 color：读档时一律清掉。
+    // 旧数据里深层节点可能存过 color：读档时一律清掉（中心盘和二级节点各自持有）。
     // 留着就是"文件里有值、图上不生效"的第三种状态，也正是父子颜色不同步的来源
-    if (depth !== HUE_OWNER_DEPTH) delete node.color;
+    if (depth > HUE_OWNER_DEPTH) delete node.color;
     if (node.brightness === undefined || !Number.isFinite(Number(node.brightness))) {
       delete node.brightness;
     } else {

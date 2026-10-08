@@ -87,7 +87,7 @@ var HUE_OWNER_DEPTH = 1;
 function branchColors(root) {
   const out = /* @__PURE__ */ new Map();
   const rec = (n, inherited, depth) => {
-    const color = depth === HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
+    const color = depth <= HUE_OWNER_DEPTH ? n.color || DEFAULT_BRANCH_COLOR : inherited;
     out.set(n.id, color);
     for (const c of n.children)
       rec(c, color, depth + 1);
@@ -206,14 +206,14 @@ var GoalTreeStore = class {
       new import_obsidian.Notice(`Goalscape: failed to parse ${this.path}, keeping in-memory copy`);
     }
   }
-  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于二级节点"这条规则落到数据上 */
+  /** 补齐缺省字段，兼容手写/外部编辑的 JSON；顺带把"色相只属于中心盘和二级节点"这条规则落到数据上 */
   normalize(node, depth = 0) {
     var _a, _b, _c, _d, _e, _f;
     (_b = node.id) != null ? _b : node.id = createGoalNode({ title: (_a = node.title) != null ? _a : "Untitled" }).id;
     (_c = node.title) != null ? _c : node.title = "Untitled";
     (_d = node.importance) != null ? _d : node.importance = 50;
     delete node.responsible;
-    if (depth !== HUE_OWNER_DEPTH)
+    if (depth > HUE_OWNER_DEPTH)
       delete node.color;
     if (node.brightness === void 0 || !Number.isFinite(Number(node.brightness))) {
       delete node.brightness;
@@ -399,8 +399,6 @@ var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var SECTOR_GAP_ARC = 7;
 var DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
-var SATURATION_MIN = 50;
-var SATURATION_SPAN = 50;
 var BAND_STEPS = [0.3, 0.6, 1, 1.3];
 var BAND_DEFAULT_INDEX = 2;
 var INK_LIGHT = "#ffffff";
@@ -551,16 +549,11 @@ function hslToHex(h, s, l) {
   const to = (v) => Math.round(255 * v).toString(16).padStart(2, "0");
   return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
 }
-function progressSaturation(progress) {
-  const p = Math.max(0, Math.min(100, progress || 0));
-  return SATURATION_MIN + SATURATION_SPAN * (p / 100);
-}
 function nodeColor(node, depth, branchColor, siblingIndex = 0) {
-  var _a, _b;
+  var _a;
   const base = hexToHsl(branchColor);
-  const hue = base.s < 5 ? DEFAULT_SECTOR.h : base.h;
   const offset = ((_a = node.brightness) != null ? _a : 0) + (depth === 0 ? -12 : Math.min(depth, 4) * 3 + siblingIndex % 3 * 2);
-  return hslToHex(hue, progressSaturation((_b = node.progress) != null ? _b : 0), Math.max(20, Math.min(82, base.l + offset)));
+  return hslToHex(base.h, base.s, Math.max(20, Math.min(82, base.l + offset)));
 }
 var FULL_CIRCLE_EPSILON = 1e-4;
 function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
@@ -600,6 +593,34 @@ function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
     `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p(rInner, startAngle)}`,
     "Z"
   ].join(" ");
+}
+function arcLinePath(cx, cy, r, startAngle, endAngle) {
+  const p = (a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+  if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
+    const mid = startAngle + Math.PI;
+    return `M ${p(startAngle)} A ${r} ${r} 0 1 1 ${p(mid)} A ${r} ${r} 0 1 1 ${p(endAngle)}`;
+  }
+  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
+  return `M ${p(startAngle)} A ${r} ${r} 0 ${largeArc} 1 ${p(endAngle)}`;
+}
+var RIM_WIDTH = 3.5;
+var RIM_INSET = 1.5;
+var RIM_MIN_BAND = 14;
+function progressRim(edge, progress) {
+  const band = edge.rOuter - edge.rInner;
+  if (band < RIM_MIN_BAND)
+    return null;
+  const r = edge.rOuter - RIM_INSET - RIM_WIDTH / 2;
+  if (r <= edge.rInner + RIM_WIDTH)
+    return null;
+  const len = r * (edge.a1 - edge.a0);
+  if (len <= 0)
+    return null;
+  const p = Math.max(0, Math.min(100, progress || 0)) / 100;
+  return {
+    d: arcLinePath(CX, CY, r, edge.a0, edge.a1),
+    dash: `${(len * p).toFixed(2)} ${(len + 1).toFixed(2)}`
+  };
 }
 
 // src/views/promptModal.ts
@@ -759,7 +780,7 @@ var InfoPanel = class {
     }
     const node = found.node;
     const isMain = !found.parent;
-    const isBranch = !isMain && found.parent.id === scape.mainGoal.id;
+    const ownsHue = isMain || found.parent.id === scape.mainGoal.id;
     const isLeaf = node.children.length === 0;
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
     new import_obsidian3.Setting(this.container).setName("Title").addText((text) => {
@@ -826,8 +847,8 @@ var InfoPanel = class {
         this.mutate((s) => this.patch(s, node.id, (n) => n.tags = list));
       });
     });
-    if (isBranch)
-      this.addHueControls(node);
+    if (ownsHue)
+      this.addHueControls(node, isMain);
     else
       this.addBrightnessControl(node);
     this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
@@ -913,12 +934,12 @@ var InfoPanel = class {
     });
   }
   /**
-   * 色系选择只出现在二级节点：这一层存的值就是整条分支的颜色，
-   * 后代一律沿父链继承，所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
+   * 色系选择只出现在持有 color 的两层：中心盘只管自己，二级节点那一份就是整条分支的颜色、
+   * 后代一律沿父链继承 —— 所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
    */
-  addHueControls(node) {
+  addHueControls(node, isHub) {
     var _a;
-    new import_obsidian3.Setting(this.container).setName("Branch color").setDesc("Applies to this whole branch \xB7 Empty = default green").addText((text) => {
+    new import_obsidian3.Setting(this.container).setName(isHub ? "Hub color" : "Branch color").setDesc(isHub ? "Center disc only \xB7 Subgoals keep their own hue" : "Applies to this whole branch \xB7 Empty = default green").addText((text) => {
       var _a2;
       text.inputEl.placeholder = "#4ade80";
       text.setValue((_a2 = node.color) != null ? _a2 : "");
@@ -945,7 +966,7 @@ var InfoPanel = class {
       cls: "goalscape-swatch goalscape-swatch-auto",
       text: "Auto"
     });
-    auto.title = "Default hue; saturation shows progress";
+    auto.title = "Default hue; progress shows on the sector rim";
     if (!node.color)
       auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, void 0));
@@ -958,7 +979,7 @@ var InfoPanel = class {
       swatch.addEventListener("click", () => this.setColor(node, hex));
     }
   }
-  /** 中心盘和三级往内不能选色系，这里换成明度偏移：0 即分支默认色 */
+  /** 三级往内不能选色系，这里换成明度偏移：0 即所属分支的默认色 */
   addBrightnessControl(node) {
     new import_obsidian3.Setting(this.container).setName("Brightness").setDesc("Hue comes from its branch \xB7 0 = default, -20 darker, +20 lighter").addSlider((slider) => {
       var _a;
@@ -1436,6 +1457,7 @@ function createViewSwitcher(container, plugin, leaf, currentType) {
 function scapeName(path) {
   return path.split("/").pop().replace(/\.goalscape\.json$/, "");
 }
+var sheenSeq = 0;
 var RadialGoalMapView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -1443,6 +1465,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.selectedId = null;
     this.filterCriteria = {};
     this.nodePositions = /* @__PURE__ */ new Map();
+    this.sheenId = `goalscape-sheen-${++sheenSeq}`;
   }
   getViewType() {
     return VIEW_RADIAL;
@@ -1540,11 +1563,17 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     svg.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
+    const map = document.createElementNS(SVG_NS, "g");
+    map.addClass("goalscape-map");
+    svg.appendChild(map);
+    const defs = document.createElementNS(SVG_NS, "defs");
+    defs.appendChild(this.sheenGradient());
+    svg.appendChild(defs);
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
     const hues = branchColors(scape.mainGoal);
     const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles, siblingIndex = 0) => {
-      var _a, _b, _c, _d;
+      var _a, _b, _c, _d, _e;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
@@ -1554,8 +1583,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       const edge = sectorEdges(shape);
       const color = nodeColor(node, depth, (_a = hues.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR, siblingIndex);
       const ink = labelInk(color);
+      const dim = !!matchingIds && !matchingIds.has(node.id);
+      const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1));
+      path.setAttribute("d", d);
       path.setAttribute("fill", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
@@ -1564,7 +1595,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         path.addClass("goalscape-selected");
       if (node.collapsed && node.children.length)
         path.addClass("goalscape-collapsed");
-      if (matchingIds && !matchingIds.has(node.id))
+      if (dim)
         path.addClass("goalscape-dimmed");
       path.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1585,16 +1616,24 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       const tip = document.createElementNS(SVG_NS, "title");
       tip.textContent = `${node.title} \xB7 ${(_b = node.progress) != null ? _b : 0}%`;
       path.appendChild(tip);
-      svg.appendChild(path);
+      map.appendChild(path);
+      this.addOverlay(map, d, dim, ["goalscape-sheen"], { fill: `url(#${this.sheenId})` });
+      const rim = progressRim(edge, (_c = node.progress) != null ? _c : 0);
+      if (rim) {
+        this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
+          stroke: ink.fill,
+          "stroke-dasharray": rim.dash
+        });
+      }
       const midAngle = (startAngle + endAngle) / 2;
       if (depth === 0) {
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_c = node.progress) != null ? _c : 0}%`;
+        pct.textContent = `${(_d = node.progress) != null ? _d : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_d = node.progress) != null ? _d : 0}%`);
+        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_e = node.progress) != null ? _e : 0}%`);
         if (text) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
@@ -1648,6 +1687,45 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     el.style.setProperty("stroke", ink.halo);
     svg.appendChild(el);
     return el;
+  }
+  /**
+   * 扇区之上的一条装饰路径（光源叠层 / 进度条）：不参与命中测试，
+   * 筛选未命中时跟着所属扇区一起变淡。stroke 走属性、不走类，
+   * 因为颜色逐扇区不同，而类规则会盖掉同名属性（见 addText）。
+   */
+  addOverlay(map, d, dim, classes, attrs) {
+    const el = document.createElementNS(SVG_NS, "path");
+    el.setAttribute("d", d);
+    for (const [k, v] of Object.entries(attrs))
+      el.setAttribute(k, v);
+    el.addClass(...classes);
+    if (dim)
+      el.addClass("goalscape-dimmed");
+    map.appendChild(el);
+  }
+  /**
+   * 整图共用的一束"光"：userSpaceOnUse 让渐变按全图坐标算，所以每个扇区取的是
+   * 自己那一段，拼起来是一个中心偏上的光源 + 外圈压暗，而不是每格各打一盏灯。
+   * 两端都极淡，浅色主题下白那一半基本看不见、只剩外圈的暗角。
+   */
+  sheenGradient() {
+    const grad = document.createElementNS(SVG_NS, "radialGradient");
+    grad.id = this.sheenId;
+    grad.setAttribute("gradientUnits", "userSpaceOnUse");
+    grad.setAttribute("cx", String(CX));
+    grad.setAttribute("cy", String(CY * 0.86));
+    grad.setAttribute("r", String(MAX_R * 1.15));
+    const stop = (offset, color, opacity) => {
+      const s = document.createElementNS(SVG_NS, "stop");
+      s.setAttribute("offset", offset);
+      s.setAttribute("stop-color", color);
+      s.setAttribute("stop-opacity", opacity);
+      grad.appendChild(s);
+    };
+    stop("0", "#ffffff", "0.07");
+    stop("45%", "#ffffff", "0");
+    stop("100%", "#000000", "0.1");
+    return grad;
   }
   select(id) {
     this.selectedId = id;

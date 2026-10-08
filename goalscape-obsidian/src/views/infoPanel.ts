@@ -1,6 +1,6 @@
 // src/views/infoPanel.ts
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
-// Tags / 色系（仅二级节点）或明度（其余层级）/ Notes / 自定义字段。
+// Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes / 自定义字段。
 // 所有改动统一走 store.mutate。
 
 import { Setting, Notice, setTooltip } from "obsidian";
@@ -78,8 +78,8 @@ export class InfoPanel {
     }
     const node = found.node;
     const isMain = !found.parent;
-    // 二级节点 = 中心盘外那一圈，也是整棵树里唯一能选色系的层级
-    const isBranch = !isMain && found.parent!.id === scape.mainGoal.id;
+    // 能选色系的层级：中心盘只管自己，二级节点（中心盘外那一圈）管整条分支
+    const ownsHue = isMain || found.parent!.id === scape.mainGoal.id;
     const isLeaf = node.children.length === 0;
 
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
@@ -162,7 +162,7 @@ export class InfoPanel {
         });
       });
 
-    if (isBranch) this.addHueControls(node);
+    if (ownsHue) this.addHueControls(node, isMain);
     else this.addBrightnessControl(node);
 
     this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
@@ -254,13 +254,15 @@ export class InfoPanel {
   }
 
   /**
-   * 色系选择只出现在二级节点：这一层存的值就是整条分支的颜色，
-   * 后代一律沿父链继承，所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
+   * 色系选择只出现在持有 color 的两层：中心盘只管自己，二级节点那一份就是整条分支的颜色、
+   * 后代一律沿父链继承 —— 所以没有"父改了子没改"这种状态，也不需要"应用到子目标"按钮。
    */
-  private addHueControls(node: GoalNode): void {
+  private addHueControls(node: GoalNode, isHub: boolean): void {
     new Setting(this.container)
-      .setName("Branch color")
-      .setDesc("Applies to this whole branch · Empty = default green")
+      .setName(isHub ? "Hub color" : "Branch color")
+      .setDesc(isHub
+        ? "Center disc only · Subgoals keep their own hue"
+        : "Applies to this whole branch · Empty = default green")
       .addText((text) => {
         text.inputEl.placeholder = "#4ade80";
         text.setValue(node.color ?? "");
@@ -290,7 +292,7 @@ export class InfoPanel {
       cls: "goalscape-swatch goalscape-swatch-auto",
       text: "Auto",
     });
-    auto.title = "Default hue; saturation shows progress";
+    auto.title = "Default hue; progress shows on the sector rim";
     if (!node.color) auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, undefined));
 
@@ -303,7 +305,7 @@ export class InfoPanel {
     }
   }
 
-  /** 中心盘和三级往内不能选色系，这里换成明度偏移：0 即分支默认色 */
+  /** 三级往内不能选色系，这里换成明度偏移：0 即所属分支的默认色 */
   private addBrightnessControl(node: GoalNode): void {
     new Setting(this.container)
       .setName("Brightness")

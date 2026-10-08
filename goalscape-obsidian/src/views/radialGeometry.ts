@@ -22,11 +22,8 @@ export const MAX_R = VIEW_SIZE / 2 - 20;
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
-/** 未手工设色相时的默认色相来源（插件原来的进度绿）；纯灰配色也借用它的色相 */
+/** 未手工设色相时的默认色相来源（插件原来的进度绿）；hexToHsl 解析失败也退回它 */
 const DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
-/** 进度 → 饱和度的取值区间：0% 进度 50%（发灰），100% 进度 100%（纯色） */
-const SATURATION_MIN = 50;
-const SATURATION_SPAN = 50;
 
 /** 环带厚度的四档（面板上从左到右：极薄/薄/标准/厚）；未设 bandScale 的节点用"标准"档。
  *  标准档刻意等于旧版"等宽环"的厚度，所以没调过的图看起来和以前一致；厚档只加 30%，
@@ -238,24 +235,12 @@ function hslToHex(h: number, s: number, l: number): string {
 }
 
 /**
- * 进度 → 饱和度：0% 进度 50%（发灰、看着就"没做成"），100% 进度 100%（纯色）。
- * 这是**所有**扇区统一的表达，不再区分"设过色"和"没设色"。
- */
-function progressSaturation(progress: number): number {
-  const p = Math.max(0, Math.min(100, progress || 0));
-  return SATURATION_MIN + SATURATION_SPAN * (p / 100);
-}
-
-/**
- * 扇区底色：色相由所属分支决定（调用方传 branchColors 解析出来的那个色），
- * **饱和度即进度**，明度承担环层区分 + 节点自己的 brightness 偏移。
+ * 扇区底色：色相与饱和度都来自所属分支选的那个颜色（调用方传 branchColors 解析出来的），
+ * 明度承担环层区分 + 节点自己的 brightness 偏移。
  *
- * 旧实现是"没设色 → 按进度在红/橙/黄/绿四档里挑一档；设了色 → 进度完全不影响"，
- * 所以进度和颜色的关系只对默认那一条色带成立，手工配的颜色一律不随进度变。
- * 环层与相邻扇区的区分因此只能挪到**明度**上：shadeColor 那种往白/黑混的做法
- * 会连带把饱和度冲掉，等于自己盖住进度信号。
- *
- * 纯灰（色相无意义）时借用默认绿色相，否则灰底的进度就没地方显示了。
+ * 进度**不再参与底色** —— 早先它占用饱和度通道（0% → 50%、100% → 100%），
+ * 于是面板上精心挑的低饱和配色一律被强行提纯成同一档，五个分支饱和度和明度全持平、
+ * 只剩色相区别，整图糊成一片。进度现在画在扇区外缘的细进度条上（见 progressRim）。
  */
 export function nodeColor(
   node: GoalNode,
@@ -264,11 +249,10 @@ export function nodeColor(
   siblingIndex = 0
 ): string {
   const base = hexToHsl(branchColor);
-  const hue = base.s < 5 ? DEFAULT_SECTOR.h : base.h;
   const offset = (node.brightness ?? 0) + (depth === 0
     ? -12
     : Math.min(depth, 4) * 3 + (siblingIndex % 3) * 2);
-  return hslToHex(hue, progressSaturation(node.progress ?? 0), Math.max(20, Math.min(82, base.l + offset)));
+  return hslToHex(base.h, base.s, Math.max(20, Math.min(82, base.l + offset)));
 }
 
 const FULL_CIRCLE_EPSILON = 1e-4;
@@ -310,4 +294,46 @@ export function arcPath(
     `A ${rInner} ${rInner} 0 ${largeArc} 0 ${p(rInner, startAngle)}`,
     "Z",
   ].join(" ");
+}
+
+/** 只描一条弧线（不闭合）：外缘进度条用它 */
+function arcLinePath(
+  cx: number, cy: number, r: number, startAngle: number, endAngle: number
+): string {
+  const p = (a: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+  // 整圆时起止点重合，一条 A 弧会被渲染器判成零长度，所以拆成两段半弧
+  if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
+    const mid = startAngle + Math.PI;
+    return `M ${p(startAngle)} A ${r} ${r} 0 1 1 ${p(mid)} A ${r} ${r} 0 1 1 ${p(endAngle)}`;
+  }
+  const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
+  return `M ${p(startAngle)} A ${r} ${r} 0 ${largeArc} 1 ${p(endAngle)}`;
+}
+
+/** 进度条线宽与内缩：和 .goalscape-rim 的 stroke-width 成对，改一处要改两处 */
+const RIM_WIDTH = 3.5;
+const RIM_INSET = 1.5;
+/** 环带薄到装不下这条线就干脆不画，别让进度条反过来啃掉扇区本色 */
+const RIM_MIN_BAND = 14;
+
+/**
+ * 扇区外缘的细进度条：贴着 rOuter 内侧走一条弧，用 stroke-dasharray 表示完成了多少。
+ * 只画走完的那一段 —— 没走到的地方留一条淡轨道，看着就是每个格子外缘一道黑线。
+ * 返回 null 表示这一格不该出现进度条（环带太薄装不下，或弧长为零）。
+ */
+export function progressRim(
+  edge: { rInner: number; rOuter: number; a0: number; a1: number },
+  progress: number
+): { d: string; dash: string } | null {
+  const band = edge.rOuter - edge.rInner;
+  if (band < RIM_MIN_BAND) return null;
+  const r = edge.rOuter - RIM_INSET - RIM_WIDTH / 2;
+  if (r <= edge.rInner + RIM_WIDTH) return null;
+  const len = r * (edge.a1 - edge.a0);
+  if (len <= 0) return null;
+  const p = Math.max(0, Math.min(100, progress || 0)) / 100;
+  return {
+    d: arcLinePath(CX, CY, r, edge.a0, edge.a1),
+    dash: `${(len * p).toFixed(2)} ${(len + 1).toFixed(2)}`,
+  };
 }

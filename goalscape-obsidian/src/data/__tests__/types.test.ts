@@ -125,10 +125,11 @@ describe("branchColors", () => {
     assert.equal(hues.get("shoes"), "#f87171", "继承一直传到叶子");
   });
 
-  it("根和没配色的分支用默认色", () => {
+  it("中心盘自己一个色，且不往下传", () => {
     const hues = branchColors(colored());
-    assert.equal(hues.get("root"), DEFAULT_BRANCH_COLOR, "根不持有也不需要色相");
-    assert.equal(hues.get("career"), DEFAULT_BRANCH_COLOR);
+    assert.equal(hues.get("root"), "#0000ff", "根持有的色相只归中心盘");
+    assert.equal(hues.get("run"), "#f87171", "分支不跟着中心盘走，仍认自己那一级的值");
+    assert.equal(hues.get("career"), DEFAULT_BRANCH_COLOR, "没配色的分支用默认色");
   });
 
   it("改二级节点即改整条分支，不存在父子不一致的状态", () => {
