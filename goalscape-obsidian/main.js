@@ -720,6 +720,27 @@ var CX = VIEW_SIZE / 2;
 var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
+function luminance(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m)
+    return 0;
+  const n = parseInt(m[1], 16);
+  const ch = (shift) => {
+    const v = (n >> shift & 255) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
+}
+var INK_LIGHT = "#ffffff";
+var INK_DARK = "#0f172a";
+function labelInk(sectorColor) {
+  const l = luminance(sectorColor);
+  const ratio = (ink) => {
+    const li = luminance(ink);
+    return (Math.max(l, li) + 0.05) / (Math.min(l, li) + 0.05);
+  };
+  return ratio(INK_DARK) > ratio(INK_LIGHT) ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" } : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
+}
 function shadeColor(hex, percent) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
   if (!m)
@@ -884,8 +905,10 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       const a0 = startAngle + pad;
       const a1 = endAngle - pad;
       const path = document.createElementNS(SVG_NS, "path");
+      const sectorColor = this.colorFor(node, depth, siblingIndex);
+      const ink = labelInk(sectorColor);
       path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
-      path.setAttribute("fill", this.colorFor(node, depth, siblingIndex));
+      path.setAttribute("fill", sectorColor);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
@@ -908,7 +931,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       path.addEventListener("pointerdown", (e) => {
         if (depth === 0)
           return;
-        this.startReparentDrag(e, svg, node.id);
+        this.startReparentDrag(e, node.id);
       });
       svg.appendChild(path);
       const midAngle = (startAngle + endAngle) / 2;
@@ -919,6 +942,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         title.setAttribute("text-anchor", "middle");
         title.setAttribute("dominant-baseline", "middle");
         title.addClass("goalscape-label", "goalscape-label-root");
+        this.applyInk(title, ink);
         title.textContent = node.title;
         svg.appendChild(title);
         const pct = document.createElementNS(SVG_NS, "text");
@@ -927,6 +951,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         pct.setAttribute("text-anchor", "middle");
         pct.setAttribute("dominant-baseline", "middle");
         pct.addClass("goalscape-label", "goalscape-label-root-pct");
+        this.applyInk(pct, ink);
         pct.textContent = `${(_a = node.progress) != null ? _a : 0}%`;
         svg.appendChild(pct);
       } else if (span > 0.14 && rOuter - rInner > 24) {
@@ -939,6 +964,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         label.setAttribute("text-anchor", "middle");
         label.setAttribute("dominant-baseline", "middle");
         label.addClass("goalscape-label");
+        this.applyInk(label, ink);
         const deg = midAngle * 180 / Math.PI;
         const flip = deg > 90 && deg < 270;
         label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
@@ -953,7 +979,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         handle.addClass("goalscape-weight-handle");
         handle.addEventListener("pointerdown", (e) => {
           e.stopPropagation();
-          this.startWeightDrag(e, svg, node.id, startAngle, parentStart, parentEnd);
+          this.startWeightDrag(e, node.id, startAngle, parentStart, parentEnd);
         });
         svg.appendChild(handle);
       }
@@ -1016,12 +1042,17 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       return shadeColor(base, -22);
     return shadeColor(base, Math.min(depth, 4) * 9 + siblingIndex % 3 * 6);
   }
+  /** 用内联样式上色：类选择器优先级高于同名 CSS 属性，setAttribute("fill") 会被 .goalscape-label 的规则盖掉 */
+  applyInk(el, ink) {
+    el.style.setProperty("fill", ink.fill);
+    el.style.setProperty("stroke", ink.halo);
+  }
   // ──────────────────────────── 权重拖拽 ────────────────────────────
-  startWeightDrag(e, svg, nodeId, startAngle, parentStart, parentEnd) {
+  startWeightDrag(e, nodeId, startAngle, parentStart, parentEnd) {
     e.preventDefault();
     e.stopPropagation();
     this.select(nodeId);
-    this.dragState = { nodeId, startAngle, parentStart, parentEnd, svg };
+    this.dragState = { nodeId, startAngle, parentStart, parentEnd, lastImportance: null };
     const move = (ev) => this.onWeightDragMove(ev);
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -1035,7 +1066,10 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     const drag = this.dragState;
     if (!drag)
       return;
-    const point = this.toLogicalPoint(drag.svg, e.clientX, e.clientY);
+    const svg = this.liveSvg();
+    if (!svg)
+      return;
+    const point = this.toLogicalPoint(svg, e.clientX, e.clientY);
     let angle = Math.atan2(point.y - CY, point.x - CX);
     while (angle < drag.parentStart)
       angle += Math.PI * 2;
@@ -1048,13 +1082,16 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     const span = Math.max(0, Math.min(parentSpan, rawSpan));
     const fraction = span / parentSpan;
     const target = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+    if (target === drag.lastImportance)
+      return;
+    drag.lastImportance = target;
     this.plugin.store.mutate((s) => adjustImportance(s, drag.nodeId, target));
   }
   // ──────────────────────────── 拖拽重挂载 ────────────────────────────
-  startReparentDrag(e, svg, nodeId) {
+  startReparentDrag(e, nodeId) {
     if (e.button !== 0)
       return;
-    this.reparentDrag = { nodeId, svg, startX: e.clientX, startY: e.clientY, active: false, ghostEl: null };
+    this.reparentDrag = { nodeId, startX: e.clientX, startY: e.clientY, active: false, ghostEl: null };
     const move = (ev) => {
       const drag = this.reparentDrag;
       if (!drag)
@@ -1073,7 +1110,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       if (drag.active && drag.ghostEl) {
         drag.ghostEl.style.left = `${ev.clientX + 12}px`;
         drag.ghostEl.style.top = `${ev.clientY + 12}px`;
-        const targetId = this.hitTestNode(drag.svg, ev.clientX, ev.clientY);
+        const targetId = this.hitTestNode(this.liveSvg(), ev.clientX, ev.clientY);
         this.highlightDropTarget(targetId);
       }
     };
@@ -1093,7 +1130,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         this.select(drag.nodeId);
         return;
       }
-      const targetId = this.hitTestNode(drag.svg, ev.clientX, ev.clientY);
+      const targetId = this.hitTestNode(this.liveSvg(), ev.clientX, ev.clientY);
       if (targetId && targetId !== drag.nodeId) {
         let ok = false;
         this.plugin.store.mutate((s) => {
@@ -1108,6 +1145,8 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     window.addEventListener("pointerup", up);
   }
   hitTestNode(svg, clientX, clientY) {
+    if (!svg)
+      return null;
     const point = this.toLogicalPoint(svg, clientX, clientY);
     const dx = point.x - CX;
     const dy = point.y - CY;
@@ -1157,6 +1196,10 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       return "";
     const all = flattenTree(scape.mainGoal);
     return (_b = (_a = all.find((n) => n.id === id)) == null ? void 0 : _a.title) != null ? _b : "";
+  }
+  /** 始终返回文档里当前那个 svg：render() 会 empty+重建 rootEl，任何早先捕获的引用都可能已游离 */
+  liveSvg() {
+    return this.rootEl.querySelector("svg");
   }
   toLogicalPoint(svg, clientX, clientY) {
     const ctm = svg.getScreenCTM();
@@ -1797,8 +1840,55 @@ function canvasToJson(canvas) {
 }
 
 // src/export/exporters.ts
-function exportSvg(svgEl) {
+var INLINED_PROPS = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "stroke-linejoin",
+  "paint-order",
+  "font-size",
+  "font-weight",
+  "font-family",
+  "text-anchor",
+  "dominant-baseline",
+  "opacity",
+  "filter"
+];
+function inlineComputedStyles(svgEl) {
   const clone = svgEl.cloneNode(true);
+  const src = svgEl.querySelectorAll("*");
+  const dst = clone.querySelectorAll("*");
+  for (let i = 0; i < src.length; i++) {
+    const cs = getComputedStyle(src[i]);
+    for (const prop of INLINED_PROPS) {
+      const value = cs.getPropertyValue(prop);
+      if (value)
+        dst[i].setAttribute(prop, value);
+    }
+  }
+  return clone;
+}
+function themeBackground(svgEl) {
+  for (let el = svgEl; el; el = el.parentElement) {
+    const bg = getComputedStyle(el).backgroundColor;
+    if (bg && bg !== "transparent" && !bg.startsWith("rgba(0, 0, 0, 0"))
+      return bg;
+  }
+  return "#ffffff";
+}
+function withBackground(clone, color) {
+  const vb = (clone.getAttribute("viewBox") || "").trim().split(/\s+/).map(Number);
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", String(vb.length === 4 ? vb[0] : 0));
+  rect.setAttribute("y", String(vb.length === 4 ? vb[1] : 0));
+  rect.setAttribute("width", String(vb.length === 4 ? vb[2] : 1e3));
+  rect.setAttribute("height", String(vb.length === 4 ? vb[3] : 1e3));
+  rect.setAttribute("fill", color);
+  clone.insertBefore(rect, clone.firstChild);
+  return clone;
+}
+function exportSvg(svgEl) {
+  const clone = withBackground(inlineComputedStyles(svgEl), themeBackground(svgEl));
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("width", "1000");
   clone.setAttribute("height", "1000");
@@ -1818,7 +1908,7 @@ async function exportPng(svgEl, scale = 2) {
   canvas.width = 1e3 * scale;
   canvas.height = 1e3 * scale;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "#1e1e2e";
+  ctx.fillStyle = themeBackground(svgEl);
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
   URL.revokeObjectURL(url);
@@ -1846,7 +1936,7 @@ function exportCsv(scape) {
       walk(c, depth + 1, node.title);
   };
   walk(scape.mainGoal, 0, "");
-  return rows.map((r) => r.map(csvEscape).join(",")).join("\n");
+  return String.fromCharCode(65279) + rows.map((r) => r.map(csvEscape).join(",")).join("\n");
 }
 function csvEscape(val) {
   if (val.includes(",") || val.includes('"') || val.includes("\n")) {
@@ -1861,10 +1951,8 @@ function exportMarkdownOutline(scape) {
     const indent = "  ".repeat(depth);
     const prog = node.children.length ? `(auto: ${(_a = node.progress) != null ? _a : 0}%)` : `(${(_b = node.progress) != null ? _b : 0}%)`;
     lines.push(`${indent}- **${node.title}** ${prog} [w:${node.importance}]`);
-    if (!node.collapsed) {
-      for (const c of node.children)
-        walk(c, depth + 1);
-    }
+    for (const c of node.children)
+      walk(c, depth + 1);
   };
   walk(scape.mainGoal, 0);
   return lines.join("\n");
@@ -1888,7 +1976,6 @@ var GoalscapePlugin = class extends import_obsidian7.Plugin {
   async onload() {
     const saved = await this.loadData();
     this.store = new GoalTreeStore(this, (saved == null ? void 0 : saved.currentPath) || DEFAULT_GOALSCAPE_PATH);
-    await this.store.load();
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
     this.registerView(VIEW_GANTT, (leaf) => new GanttView(leaf, this));
@@ -1906,6 +1993,7 @@ var GoalscapePlugin = class extends import_obsidian7.Plugin {
     this.addCommand({ id: "export-csv", name: "Export goals as CSV", callback: () => this.exportCsv() });
     this.addCommand({ id: "export-markdown", name: "Export goals as Markdown outline", callback: () => this.exportMarkdown() });
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
+    await this.store.load();
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);
     } else {

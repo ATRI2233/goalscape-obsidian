@@ -17,7 +17,6 @@ export default class GoalscapePlugin extends Plugin {
   async onload(): Promise<void> {
     const saved = (await this.loadData()) as { currentPath?: string } | null;
     this.store = new GoalTreeStore(this, saved?.currentPath || DEFAULT_GOALSCAPE_PATH);
-    await this.store.load();
 
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
@@ -40,6 +39,10 @@ export default class GoalscapePlugin extends Plugin {
     this.addCommand({ id: "export-markdown", name: "Export goals as Markdown outline", callback: () => this.exportMarkdown() });
 
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
+
+    // 读档放在视图/命令注册之后：数据出问题只影响图的内容，
+    // 不该连带让视图注册不上、整个标签页退化成"插件不再活动"占位页
+    await this.store.load();
 
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);

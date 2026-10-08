@@ -29,6 +29,36 @@ const MAX_R = VIEW_SIZE / 2 - 20;
 
 const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 
+/** 扇区自身的相对亮度，用来决定标签该用深色字还是浅色字 */
+function luminance(hex: string): number {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return 0;
+  const n = parseInt(m[1], 16);
+  const ch = (shift: number) => {
+    const v = ((n >> shift) & 255) / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  };
+  return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
+}
+
+const INK_LIGHT = "#ffffff";
+const INK_DARK = "#0f172a";
+
+/**
+ * 外环逐层提亮后，固定白字的对比度最低只有 1.3:1（浅色扇区基本读不出）。
+ * 直接在两个候选字色里取对比度更高的那个，并把描边光晕换成反色，两种底色下都能看清。
+ */
+function labelInk(sectorColor: string): { fill: string; halo: string } {
+  const l = luminance(sectorColor);
+  const ratio = (ink: string) => {
+    const li = luminance(ink);
+    return (Math.max(l, li) + 0.05) / (Math.min(l, li) + 0.05);
+  };
+  return ratio(INK_DARK) > ratio(INK_LIGHT)
+    ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" }
+    : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
+}
+
 /** 把 #rrggbb 按 percent 混色：正值向白提亮、负值向黑压暗，用于拉开环层与同级扇区的对比 */
 function shadeColor(hex: string, percent: number): string {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
@@ -53,12 +83,12 @@ interface WeightDragState {
   startAngle: number;
   parentStart: number;
   parentEnd: number;
-  svg: SVGSVGElement;
+  /** 上一次已应用的权重：指针沿半径方向移动时角度不变，避免每次 move 都全量落盘 */
+  lastImportance: number | null;
 }
 
 interface ReparentDragState {
   nodeId: string;
-  svg: SVGSVGElement;
   startX: number;
   startY: number;
   active: boolean;
@@ -237,8 +267,10 @@ export class RadialGoalMapView extends ItemView {
       const a1 = endAngle - pad;
 
       const path = document.createElementNS(SVG_NS, "path");
+      const sectorColor = this.colorFor(node, depth, siblingIndex);
+      const ink = labelInk(sectorColor);
       path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
-      path.setAttribute("fill", this.colorFor(node, depth, siblingIndex));
+      path.setAttribute("fill", sectorColor);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
@@ -258,7 +290,7 @@ export class RadialGoalMapView extends ItemView {
       });
       path.addEventListener("pointerdown", (e) => {
         if (depth === 0) return;
-        this.startReparentDrag(e as PointerEvent, svg, node.id);
+        this.startReparentDrag(e as PointerEvent, node.id);
       });
       svg.appendChild(path);
 
@@ -271,6 +303,7 @@ export class RadialGoalMapView extends ItemView {
         title.setAttribute("text-anchor", "middle");
         title.setAttribute("dominant-baseline", "middle");
         title.addClass("goalscape-label", "goalscape-label-root");
+        this.applyInk(title, ink);
         title.textContent = node.title;
         svg.appendChild(title);
         const pct = document.createElementNS(SVG_NS, "text");
@@ -279,6 +312,7 @@ export class RadialGoalMapView extends ItemView {
         pct.setAttribute("text-anchor", "middle");
         pct.setAttribute("dominant-baseline", "middle");
         pct.addClass("goalscape-label", "goalscape-label-root-pct");
+        this.applyInk(pct, ink);
         pct.textContent = `${node.progress ?? 0}%`;
         svg.appendChild(pct);
       } else if (span > 0.14 && rOuter - rInner > 24) {
@@ -291,6 +325,7 @@ export class RadialGoalMapView extends ItemView {
         label.setAttribute("text-anchor", "middle");
         label.setAttribute("dominant-baseline", "middle");
         label.addClass("goalscape-label");
+        this.applyInk(label, ink);
         const deg = (midAngle * 180) / Math.PI;
         const flip = deg > 90 && deg < 270;
         label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
@@ -306,7 +341,7 @@ export class RadialGoalMapView extends ItemView {
         handle.addClass("goalscape-weight-handle");
         handle.addEventListener("pointerdown", (e) => {
           e.stopPropagation();
-          this.startWeightDrag(e as PointerEvent, svg, node.id, startAngle, parentStart, parentEnd);
+          this.startWeightDrag(e as PointerEvent, node.id, startAngle, parentStart, parentEnd);
         });
         svg.appendChild(handle);
       }
@@ -363,16 +398,22 @@ export class RadialGoalMapView extends ItemView {
     return shadeColor(base, Math.min(depth, 4) * 9 + (siblingIndex % 3) * 6);
   }
 
+  /** 用内联样式上色：类选择器优先级高于同名 CSS 属性，setAttribute("fill") 会被 .goalscape-label 的规则盖掉 */
+  private applyInk(el: SVGTextElement, ink: { fill: string; halo: string }): void {
+    el.style.setProperty("fill", ink.fill);
+    el.style.setProperty("stroke", ink.halo);
+  }
+
   // ──────────────────────────── 权重拖拽 ────────────────────────────
 
   private startWeightDrag(
-    e: PointerEvent, svg: SVGSVGElement, nodeId: string,
+    e: PointerEvent, nodeId: string,
     startAngle: number, parentStart: number, parentEnd: number
   ): void {
     e.preventDefault();
     e.stopPropagation();
     this.select(nodeId);
-    this.dragState = { nodeId, startAngle, parentStart, parentEnd, svg };
+    this.dragState = { nodeId, startAngle, parentStart, parentEnd, lastImportance: null };
     const move = (ev: PointerEvent) => this.onWeightDragMove(ev);
     const up = () => {
       window.removeEventListener("pointermove", move);
@@ -386,7 +427,11 @@ export class RadialGoalMapView extends ItemView {
   private onWeightDragMove(e: PointerEvent): void {
     const drag = this.dragState;
     if (!drag) return;
-    const point = this.toLogicalPoint(drag.svg, e.clientX, e.clientY);
+    // 必须每次重新取：mutate 会触发 render()，render() 用 rootEl.empty() 换掉整个 svg，
+    // 拖拽开始时捕获的引用会立刻变成游离节点，getScreenCTM() 返回 null 使换算全部失效
+    const svg = this.liveSvg();
+    if (!svg) return;
+    const point = this.toLogicalPoint(svg, e.clientX, e.clientY);
     let angle = Math.atan2(point.y - CY, point.x - CX);
     while (angle < drag.parentStart) angle += Math.PI * 2;
     while (angle >= drag.parentStart + Math.PI * 2) angle -= Math.PI * 2;
@@ -396,14 +441,16 @@ export class RadialGoalMapView extends ItemView {
     const span = Math.max(0, Math.min(parentSpan, rawSpan));
     const fraction = span / parentSpan;
     const target = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+    if (target === drag.lastImportance) return;
+    drag.lastImportance = target;
     this.plugin.store.mutate((s) => adjustImportance(s, drag.nodeId, target));
   }
 
   // ──────────────────────────── 拖拽重挂载 ────────────────────────────
 
-  private startReparentDrag(e: PointerEvent, svg: SVGSVGElement, nodeId: string): void {
+  private startReparentDrag(e: PointerEvent, nodeId: string): void {
     if (e.button !== 0) return;
-    this.reparentDrag = { nodeId, svg, startX: e.clientX, startY: e.clientY, active: false, ghostEl: null };
+    this.reparentDrag = { nodeId, startX: e.clientX, startY: e.clientY, active: false, ghostEl: null };
 
     const move = (ev: PointerEvent) => {
       const drag = this.reparentDrag;
@@ -422,7 +469,7 @@ export class RadialGoalMapView extends ItemView {
       if (drag.active && drag.ghostEl) {
         drag.ghostEl.style.left = `${ev.clientX + 12}px`;
         drag.ghostEl.style.top = `${ev.clientY + 12}px`;
-        const targetId = this.hitTestNode(drag.svg, ev.clientX, ev.clientY);
+        const targetId = this.hitTestNode(this.liveSvg(), ev.clientX, ev.clientY);
         this.highlightDropTarget(targetId);
       }
     };
@@ -439,7 +486,7 @@ export class RadialGoalMapView extends ItemView {
         this.select(drag.nodeId);
         return;
       }
-      const targetId = this.hitTestNode(drag.svg, ev.clientX, ev.clientY);
+      const targetId = this.hitTestNode(this.liveSvg(), ev.clientX, ev.clientY);
       if (targetId && targetId !== drag.nodeId) {
         let ok = false;
         this.plugin.store.mutate((s) => { ok = moveGoal(s, drag.nodeId, targetId); });
@@ -452,7 +499,8 @@ export class RadialGoalMapView extends ItemView {
     window.addEventListener("pointerup", up);
   }
 
-  private hitTestNode(svg: SVGSVGElement, clientX: number, clientY: number): string | null {
+  private hitTestNode(svg: SVGSVGElement | null, clientX: number, clientY: number): string | null {
+    if (!svg) return null;
     const point = this.toLogicalPoint(svg, clientX, clientY);
     const dx = point.x - CX;
     const dy = point.y - CY;
@@ -498,6 +546,11 @@ export class RadialGoalMapView extends ItemView {
     if (!scape) return "";
     const all = flattenTree(scape.mainGoal);
     return all.find((n) => n.id === id)?.title ?? "";
+  }
+
+  /** 始终返回文档里当前那个 svg：render() 会 empty+重建 rootEl，任何早先捕获的引用都可能已游离 */
+  private liveSvg(): SVGSVGElement | null {
+    return this.rootEl.querySelector("svg");
   }
 
   private toLogicalPoint(svg: SVGSVGElement, clientX: number, clientY: number): { x: number; y: number } {

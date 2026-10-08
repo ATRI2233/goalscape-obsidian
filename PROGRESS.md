@@ -127,12 +127,54 @@
   且 `Debugger.pause` 也拿不到栈。自动化验证前必须先把窗口带到前台（`D:/tmp/front.ps1`），
   且全程不要让 Obsidian 失去焦点。
 
+### 真实 bug：拖拽完全不跟手（已修，实测）
+- `render()` 用 `rootEl.empty()` 重建整个 svg，拖拽开始时捕获的 `drag.svg` 立刻变成**游离节点**，
+  `getScreenCTM()` 返回 null，而 `toLogicalPoint` 的兜底 `return {x:CX,y:CY}` 把角度恒定成 0。
+  权重拖拽"看起来能改值"纯属巧合：Health 的 startAngle 是 −π/2，恒定 0 角正好算出 25。
+- 修法：新增 `liveSvg()`，每次 move 重新 `rootEl.querySelector("svg")`；重挂载拖拽同理
+  （它的 move 里也调了 `render()`）。再加 `lastImportance` 去重，避免指针每动一次就全量落盘。
+- 实测（`D:/tmp/drag.mjs`）：指针绕圆心 0 / 1.57 / 3.14 弧度 → importance 25 / 50 / 75；
+  悬停 Career、Relationships 时 drop-target 分别解析为对应节点，不再恒等于根节点。
+
+### 真实缺陷：导出的 SVG/PNG 丢样式、底色写死（已修，实测）
+- `exportSvg` 原先直接序列化：扇区描边用的 `var(--background-primary)` 脱离文档后失效，
+  `.goalscape-label` 的字号/字色/光晕全在文档 CSS 里 → 独立 SVG 里标签退回黑色 16px 默认值；
+  `exportPng` 还把画布底色硬编码成 `#1e1e2e`。
+- 修法：`inlineComputedStyles()` 按 `INLINED_PROPS` 把计算值内联成属性；
+  `themeBackground(svgEl)` 从 svg 往上找第一个真正被绘制的背景（Obsidian 的主题变量挂在 body 上，
+  读 `documentElement` 拿到空串）；`withBackground()` 给导出文件插入整幅底色矩形，
+  否则白底查看器里白字标签直接消失。
+- 实测（捕获 `URL.createObjectURL` 的 Blob，不触发保存框）：序列化结果 `var(` 计数 0、
+  `<style>` 0 个、5/5 个 `<text>` 带具体 fill 与 font-size、4/4 个 path 带 stroke、
+  首元素为 `rect fill=rgb(30, 30, 30)`；PNG 2000×2000、魔数正确、角像素 [30,30,30]（不再是硬编码的 30,30,46）。
+
+### 真实缺陷：标签固定白字，外环对比度最低 1.3:1（已修，实测）
+- 视觉重做把外环逐层提亮，与固定白字直接冲突：按 4 个进度色 × 5 层 × 3 个同级序号穷举，
+  **60 种组合里 54 种对白字低于 3:1**，最差 `#fdde8d` 只有 1.31:1。且 `--text-on-accent` 在
+  亮/暗主题下都是白色，所以两种主题都读不出。
+- 修法：`labelInk(sectorColor)` 用 WCAG 相对亮度在 `#ffffff` / `#0f172a` 中取对比度更高者，
+  光晕取反色；用**内联 style** 上色（类选择器优先级高于同名 CSS 属性，`setAttribute("fill")` 会被
+  `.goalscape-label` 的规则盖掉），因此同步删掉 CSS 里的 `fill`/`stroke`。
+- 实测：穷举后最差 4.37:1、低于 3:1 的 0 个；应用内 `isPointInFill` 配对实测
+  根标签 4.37、`Health/Career` 7.07/7.47，暗色与亮色主题 min 都是 4.37、below3=0。
+  截图 `D:/tmp/ink2_dark.png`、`D:/tmp/ink2_light.png`、`D:/tmp/ink_light_chart.png`（3 环模板）。
+
+### 真实缺陷：CSV 无 BOM、Markdown 大纲按 collapsed 静默丢子树（已修，实测）
+- CSV 无 BOM 时 Excel 按本地代码页解 UTF-8，中文标题全乱码；
+  `exportMarkdownOutline` 原先 `if (!node.collapsed)` 才递归 —— 折叠只是放射图的视图状态，
+  导出时据此跳过会**静默丢掉整棵子树**，用户不会察觉文件少了内容。
+- 实测（17 节点 Life Balance 模板，折叠前两条分支、图上只剩 12 个 path）：
+  CSV `bom:true`、18 行（表头+17）；Markdown 折叠前后都是 17 行。
+- 注意：Edit 工具会把字符串字面量里的真实 BOM 字符吃掉（写成 `""` 变空串），
+  必须用 `String.fromCharCode(0xfeff)`；esbuild 会把它压成 `fromCharCode(65279)`。
+
 ## 剩余未实测
 
-- PNG/SVG/CSV/Markdown 导出走浏览器下载（`<a download>`），Electron 里会弹系统保存框，为避免卡住 Obsidian 未自动触发；
-  CSV/Markdown 文本生成逻辑可用 Node 单测覆盖，端到端下载动作留待人工点一次确认。
+- PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
+  `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
 - 没有自动化测试基建（无 vitest/jest），目前"单测"是临时 esbuild 转译 + 手写断言，没留在仓库里。
-- 放射图视觉重做只在暗色主题下截过图；亮色主题下 hub 的 `-22%` 压暗与标签黑色描边效果未复核。
+- ~~放射图视觉重做只在暗色主题下截过图~~ 已补：亮色主题下标签、环间隙、导出底色均已复核（见上两节）。
+- 亮色主题下 List / Gantt 视图与右侧信息面板未截图复核（本轮只改了放射图与导出）。
 
 ## 后续计划（按优先级）
 
@@ -140,7 +182,8 @@
 2. ~~用户反馈的 5 个 UX 问题~~ 已完成（见上），并顺带修掉启动失败与 0 字节截断两个真实 bug。
 3. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
 4. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
-5. 建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后，让数据加载失败只降级为 Notice
-   （当前靠 `ensureFolder` 的 try/catch 堵住了已知的那条抛错路径，但顺序本身仍是单点故障）。
+5. ~~建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后~~ 已做：读档放在
+   视图/命令注册之后，数据出问题只影响图的内容，不再连带让标签页退化成"插件不再活动"占位页。
 6. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
    Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
+7. 可选：亮色主题下复核 List / Gantt 视图与信息面板配色（本轮只覆盖了放射图与导出）。

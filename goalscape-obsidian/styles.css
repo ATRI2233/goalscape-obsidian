@@ -197,14 +197,13 @@
   fill: var(--interactive-accent-hover);
 }
 
-/* 标签文字 */
+/* 标签文字：fill / stroke 由 radialView 按所在扇区的明度逐元素内联，
+   固定白字在提亮后的外环上对比度只有 1.3:1 */
 .goalscape-label {
   font-size: 14px;
   font-weight: 600;
-  fill: var(--text-on-accent);
   pointer-events: none;
   paint-order: stroke;
-  stroke: rgba(0, 0, 0, 0.5);
   stroke-width: 3px;
   stroke-linejoin: round;
 }
@@ -212,13 +211,11 @@
 .goalscape-label-root {
   font-size: 20px;
   font-weight: 700;
-  stroke: none;
 }
 
 .goalscape-label-root-pct {
   font-size: 14px;
   font-weight: 600;
-  stroke: none;
   opacity: 0.9;
 }
 
