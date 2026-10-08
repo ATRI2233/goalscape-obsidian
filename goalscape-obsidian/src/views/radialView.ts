@@ -29,6 +29,22 @@ const MAX_R = VIEW_SIZE / 2 - 20;
 
 const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 
+/** 把 #rrggbb 按 percent 混色：正值向白提亮、负值向黑压暗，用于拉开环层与同级扇区的对比 */
+function shadeColor(hex: string, percent: number): string {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m) return hex;
+  const n = parseInt(m[1], 16);
+  const t = Math.max(-100, Math.min(100, percent)) / 100;
+  const target = t >= 0 ? 255 : 0;
+  const k = Math.abs(t);
+  const mix = (shift: number) => {
+    const c = (n >> shift) & 255;
+    return Math.round(c + (target - c) * k);
+  };
+  const r = mix(16), g = mix(8), b = mix(0);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
 let clipboardSubtree: GoalNode | null = null;
 let clipboardMode: "copy" | "cut" | null = null;
 
@@ -73,7 +89,9 @@ export class RadialGoalMapView extends ItemView {
     this.contentEl.addClass("goalscape-container");
 
     const toolbar = this.contentEl.createDiv({ cls: "goalscape-toolbar" });
-    this.filterBar = new FocusFilter(toolbar, this.plugin, (criteria) => {
+    this.buildActions(toolbar);
+    const filterWrap = toolbar.createDiv({ cls: "goalscape-filter-wrap" });
+    this.filterBar = new FocusFilter(filterWrap, this.plugin, (criteria) => {
       this.filterCriteria = criteria;
       this.render();
     });
@@ -89,6 +107,77 @@ export class RadialGoalMapView extends ItemView {
       this.infoPanel.refresh();
     });
     this.render();
+  }
+
+  private mapSelect!: HTMLSelectElement;
+
+  private buildActions(toolbar: HTMLElement): void {
+    const actions = toolbar.createDiv({ cls: "goalscape-actions" });
+
+    this.mapSelect = actions.createEl("select", { cls: "goalscape-map-select" });
+    this.mapSelect.addEventListener("change", () => {
+      void this.plugin.switchGoalscape(this.mapSelect.value);
+    });
+
+    const mk = (text: string, cls: string, onClick: () => void) => {
+      const b = actions.createEl("button", { cls: `goalscape-btn ${cls}`.trim(), text });
+      b.addEventListener("click", onClick);
+      return b;
+    };
+
+    mk("New map", "", () => void this.newMap());
+    mk("+ Subgoal", "", () => void this.addViaToolbar("child"));
+    mk("+ Sibling", "", () => void this.addViaToolbar("sibling"));
+    mk("Delete", "goalscape-btn-danger", () => this.deleteSelected());
+
+    this.refreshMapList();
+  }
+
+  refreshMapList(): void {
+    if (!this.mapSelect) return;
+    const current = this.plugin.store.path;
+    const maps = this.plugin.listGoalscapes();
+    this.mapSelect.empty();
+    for (const p of maps) {
+      const name = p.split("/").pop()!.replace(/\.goalscape\.json$/, "");
+      const opt = this.mapSelect.createEl("option", { value: p, text: name });
+      if (p === current) opt.selected = true;
+    }
+    if (!maps.includes(current)) {
+      const opt = this.mapSelect.createEl("option", { value: current, text: current.split("/").pop()!.replace(/\.goalscape\.json$/, "") });
+      opt.selected = true;
+    }
+  }
+
+  private async newMap(): Promise<void> {
+    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
+    if (!name || !name.trim()) return;
+    await this.plugin.createGoalscape(name.trim());
+    this.select(null);
+    this.refreshMapList();
+  }
+
+  private async addViaToolbar(position: "child" | "sibling"): Promise<void> {
+    const scape = this.plugin.store.scape;
+    if (!scape) return;
+    if (position === "sibling" && !this.selectedId) {
+      new Notice("Select a goal first");
+      return;
+    }
+    const refId = this.selectedId ?? scape.mainGoal.id;
+    const title = await promptInput(this.app, position === "child" ? "New subgoal" : "New sibling goal", "New Goal");
+    if (title === null) return;
+    this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
+  }
+
+  private deleteSelected(): void {
+    if (!this.selectedId) {
+      new Notice("Select a goal first");
+      return;
+    }
+    const id = this.selectedId;
+    this.plugin.store.mutate((s) => deleteGoal(s, id));
+    this.select(null);
   }
 
   async onClose(): Promise<void> {
@@ -119,6 +208,9 @@ export class RadialGoalMapView extends ItemView {
     // 环数 = 最深 depth 索引 + 1（depth 从 0 起）；写成 maxDepth 会让最外环画到 MAX_R 之外被裁切
     const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
+    const RING_GAP = Math.min(5, ringW * 0.045);
+    // 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝
+    const SECTOR_GAP_ARC = 7;
 
     const matchingIds = this.computeMatchingIds(scape);
 
@@ -128,20 +220,27 @@ export class RadialGoalMapView extends ItemView {
       startAngle: number,
       endAngle: number,
       parentStart: number,
-      parentEnd: number
+      parentEnd: number,
+      siblingIndex = 0
     ) => {
       const span = endAngle - startAngle;
       if (span <= 0.0005) return;
-      const rInner = depth * ringW;
-      const rOuter = (depth + 1) * ringW;
+      const rInnerRaw = depth * ringW;
+      const rOuterRaw = (depth + 1) * ringW;
 
       this.nodePositions.set(node.id, { startAngle, endAngle, depth });
 
+      const rInner = depth === 0 ? 0 : rInnerRaw + RING_GAP;
+      const rOuter = rOuterRaw - RING_GAP;
+      const pad = depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
+      const a0 = startAngle + pad;
+      const a1 = endAngle - pad;
+
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, startAngle, endAngle));
-      path.setAttribute("fill", this.colorFor(node));
+      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
+      path.setAttribute("fill", this.colorFor(node, depth, siblingIndex));
       path.setAttribute("stroke", "var(--background-primary)");
-      path.setAttribute("stroke-width", "2");
+      path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
       if (node.id === this.selectedId) path.addClass("goalscape-selected");
       if (node.collapsed && node.children.length) path.addClass("goalscape-collapsed");
@@ -163,29 +262,43 @@ export class RadialGoalMapView extends ItemView {
       });
       svg.appendChild(path);
 
-      if (span > 0.08 && ringW > 30) {
-        const midAngle = (startAngle + endAngle) / 2;
+      const midAngle = (startAngle + endAngle) / 2;
+      if (depth === 0) {
+        // 根节点：标题水平居中于 hub，下方显示整体进度
+        const title = document.createElementNS(SVG_NS, "text");
+        title.setAttribute("x", String(CX));
+        title.setAttribute("y", String(CY - 8));
+        title.setAttribute("text-anchor", "middle");
+        title.setAttribute("dominant-baseline", "middle");
+        title.addClass("goalscape-label", "goalscape-label-root");
+        title.textContent = node.title;
+        svg.appendChild(title);
+        const pct = document.createElementNS(SVG_NS, "text");
+        pct.setAttribute("x", String(CX));
+        pct.setAttribute("y", String(CY + 16));
+        pct.setAttribute("text-anchor", "middle");
+        pct.setAttribute("dominant-baseline", "middle");
+        pct.addClass("goalscape-label", "goalscape-label-root-pct");
+        pct.textContent = `${node.progress ?? 0}%`;
+        svg.appendChild(pct);
+      } else if (span > 0.14 && rOuter - rInner > 24) {
         const rMid = (rInner + rOuter) / 2;
+        const lx = CX + Math.cos(midAngle) * rMid;
+        const ly = CY + Math.sin(midAngle) * rMid;
         const label = document.createElementNS(SVG_NS, "text");
-        label.setAttribute("x", String(CX + Math.cos(midAngle) * rMid));
-        label.setAttribute("y", String(CY + Math.sin(midAngle) * rMid));
+        label.setAttribute("x", String(lx));
+        label.setAttribute("y", String(ly));
         label.setAttribute("text-anchor", "middle");
         label.setAttribute("dominant-baseline", "middle");
         label.addClass("goalscape-label");
         const deg = (midAngle * 180) / Math.PI;
-        if (depth > 0 && deg > 90 && deg < 270) {
-          label.setAttribute("transform",
-            `rotate(${deg + 180} ${CX + Math.cos(midAngle) * rMid} ${CY + Math.sin(midAngle) * rMid})`);
-        } else if (depth > 0) {
-          label.setAttribute("transform",
-            `rotate(${deg} ${CX + Math.cos(midAngle) * rMid} ${CY + Math.sin(midAngle) * rMid})`);
-        }
-        label.textContent = `${node.title} ${node.progress ?? 0}%`;
+        const flip = deg > 90 && deg < 270;
+        label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
+        label.textContent = span > 0.28 ? `${node.title} ${node.progress ?? 0}%` : node.title;
         svg.appendChild(label);
       }
 
       if (node.id === this.selectedId && depth > 0) {
-        const midAngle = (startAngle + endAngle) / 2;
         const handle = document.createElementNS(SVG_NS, "circle");
         handle.setAttribute("cx", String(CX + Math.cos(midAngle) * rOuter));
         handle.setAttribute("cy", String(CY + Math.sin(midAngle) * rOuter));
@@ -202,11 +315,11 @@ export class RadialGoalMapView extends ItemView {
       const total = node.children.reduce((s, c) => s + c.importance, 0);
       if (total <= 0) return;
       let cursor = startAngle;
-      for (const c of node.children) {
+      node.children.forEach((c, i) => {
         const cSpan = (c.importance / total) * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle);
+        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle, i);
         cursor += cSpan;
-      }
+      });
     };
 
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, -Math.PI / 2, Math.PI * 1.5);
@@ -242,11 +355,12 @@ export class RadialGoalMapView extends ItemView {
     return Math.max(...node.children.map((c) => this.visibleDepth(c, depth + 1)));
   }
 
-  private colorFor(node: GoalNode): string {
-    if (node.color) return node.color;
-    const p = node.progress ?? 0;
-    const idx = Math.min(PROGRESS_STOPS.length - 1, Math.floor(p / 25));
-    return PROGRESS_STOPS[idx];
+  private colorFor(node: GoalNode, depth: number, siblingIndex = 0): string {
+    const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor((node.progress ?? 0) / 25))];
+    // 中心盘压暗、外环逐层提亮，再按同级序号微调明度：
+    // 进度全相同（如整树 0%）时也能分辨环层与相邻扇区
+    if (depth === 0) return shadeColor(base, -22);
+    return shadeColor(base, Math.min(depth, 4) * 9 + (siblingIndex % 3) * 6);
   }
 
   // ──────────────────────────── 权重拖拽 ────────────────────────────
@@ -527,11 +641,28 @@ export function arcPath(
   cx: number, cy: number, rInner: number, rOuter: number,
   startAngle: number, endAngle: number
 ): string {
+  const p = (r: number, a: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
+  // 整圆（根节点跨度恰为 2π）：用两段半圆弧闭合成圆/环，避免"中心→顶点→绕回→中心"
+  // 的两条半径描边在起点处叠成一条可见黑线（此前根扇区的接缝 bug）。
   if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
-    endAngle = startAngle + Math.PI * 2 - FULL_CIRCLE_EPSILON;
+    const a0 = startAngle;
+    const a1 = startAngle + Math.PI;
+    const outer = [
+      `M ${p(rOuter, a0)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a1)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a0)}`,
+      "Z",
+    ];
+    if (rInner <= 0) return outer.join(" ");
+    const inner = [
+      `M ${p(rInner, a0)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a1)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a0)}`,
+      "Z",
+    ];
+    return outer.join(" ") + " " + inner.join(" ");
   }
   const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
-  const p = (r: number, a: number) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
   if (rInner <= 0) {
     return [`M ${cx} ${cy}`, `L ${p(rOuter, startAngle)}`,
       `A ${rOuter} ${rOuter} 0 ${largeArc} 1 ${p(rOuter, endAngle)}`, "Z"].join(" ");

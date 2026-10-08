@@ -129,27 +129,34 @@ var GoalTreeStore = class {
     this.path = path;
     this.listeners = /* @__PURE__ */ new Set();
     this.file = null;
+    /** 外部修改监听只注册一次（切换文件时 load() 会再次调用） */
+    this.watching = false;
     /** 写入落盘时的静默标记，避免 vault modify 事件把自己写的文件又读回来造成抖动 */
     this.writing = false;
     /** 外部修改去抖计时器 */
     this.reloadTimer = null;
   }
+  /** 切换到另一个 goalscape 文件：改路径 → 重新 load（watch 只注册一次） */
+  async switchTo(newPath) {
+    if (newPath === this.path && this.scape)
+      return;
+    if (this.reloadTimer !== null) {
+      window.clearTimeout(this.reloadTimer);
+      this.reloadTimer = null;
+    }
+    this.path = newPath;
+    this.file = null;
+    await this.load();
+  }
   async load() {
     await this.ensureFolder();
-    const f = this.plugin.app.vault.getAbstractFileByPath(this.path);
-    if (f instanceof import_obsidian.TFile) {
-      await this.readFromFile(f);
+    const exists = await this.plugin.app.vault.adapter.exists(this.path);
+    if (exists) {
+      await this.readFromPath();
     } else {
       this.scape = createDefaultScape();
-      this.writing = true;
-      try {
-        this.file = await this.plugin.app.vault.create(
-          this.path,
-          JSON.stringify(this.scape, null, 2)
-        );
-      } finally {
-        window.setTimeout(() => this.writing = false, 500);
-      }
+      await this.writeScape();
+      this.file = this.plugin.app.vault.getAbstractFileByPath(this.path) instanceof import_obsidian.TFile ? this.plugin.app.vault.getAbstractFileByPath(this.path) : null;
       new import_obsidian.Notice(`Goalscape: created ${this.path}`);
     }
     this.registerExternalWatch();
@@ -157,20 +164,27 @@ var GoalTreeStore = class {
   }
   async ensureFolder() {
     const folder = this.path.split("/").slice(0, -1).join("/");
-    if (folder && !this.plugin.app.vault.getAbstractFileByPath(folder)) {
+    if (!folder || this.plugin.app.vault.getAbstractFileByPath(folder))
+      return;
+    try {
       await this.plugin.app.vault.createFolder(folder);
+    } catch (e) {
     }
   }
-  async readFromFile(f) {
+  /** 用 adapter 按路径读取，避免 getAbstractFileByPath 因索引异步而拿到 null 的竞态 */
+  async readFromPath() {
     try {
-      const raw = await this.plugin.app.vault.read(f);
+      const raw = await this.plugin.app.vault.adapter.read(this.path);
+      if (!raw || !raw.trim())
+        throw new Error("empty file");
       const parsed = JSON.parse(raw);
       if (!parsed || parsed.version !== 1 || !parsed.mainGoal) {
         throw new Error("invalid goalscape json");
       }
       this.normalize(parsed.mainGoal);
       this.scape = parsed;
-      this.file = f;
+      const f = this.plugin.app.vault.getAbstractFileByPath(this.path);
+      this.file = f instanceof import_obsidian.TFile ? f : null;
     } catch (err) {
       console.error("Goalscape: failed to parse", this.path, err);
       new import_obsidian.Notice(`Goalscape: failed to parse ${this.path}, keeping in-memory copy`);
@@ -189,6 +203,9 @@ var GoalTreeStore = class {
   }
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */
   registerExternalWatch() {
+    if (this.watching)
+      return;
+    this.watching = true;
     this.plugin.registerEvent(
       this.plugin.app.vault.on("modify", (f) => {
         if (!(f instanceof import_obsidian.TFile) || f.path !== this.path)
@@ -199,10 +216,8 @@ var GoalTreeStore = class {
           window.clearTimeout(this.reloadTimer);
         this.reloadTimer = window.setTimeout(async () => {
           this.reloadTimer = null;
-          if (this.file) {
-            await this.readFromFile(this.file);
-            this.notify();
-          }
+          await this.readFromPath();
+          this.notify();
         }, 300);
       })
     );
@@ -214,12 +229,18 @@ var GoalTreeStore = class {
     );
   }
   async save() {
+    await this.writeScape();
+  }
+  /** 统一落盘入口：绝不写空内容，避免把 goalscape 文件截断成 0 字节造成数据丢失 */
+  async writeScape() {
+    if (!this.scape)
+      return;
+    const content = JSON.stringify(this.scape, null, 2);
+    if (!content)
+      return;
     this.writing = true;
     try {
-      await this.plugin.app.vault.adapter.write(
-        this.path,
-        JSON.stringify(this.scape, null, 2)
-      );
+      await this.plugin.app.vault.adapter.write(this.path, content);
     } finally {
       window.setTimeout(() => this.writing = false, 500);
     }
@@ -699,6 +720,21 @@ var CX = VIEW_SIZE / 2;
 var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
+function shadeColor(hex, percent) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
+  if (!m)
+    return hex;
+  const n = parseInt(m[1], 16);
+  const t = Math.max(-100, Math.min(100, percent)) / 100;
+  const target = t >= 0 ? 255 : 0;
+  const k = Math.abs(t);
+  const mix = (shift) => {
+    const c = n >> shift & 255;
+    return Math.round(c + (target - c) * k);
+  };
+  const r = mix(16), g = mix(8), b = mix(0);
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
 var clipboardSubtree = null;
 var clipboardMode = null;
 var RadialGoalMapView = class extends import_obsidian4.ItemView {
@@ -724,7 +760,9 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     this.contentEl.empty();
     this.contentEl.addClass("goalscape-container");
     const toolbar = this.contentEl.createDiv({ cls: "goalscape-toolbar" });
-    this.filterBar = new FocusFilter(toolbar, this.plugin, (criteria) => {
+    this.buildActions(toolbar);
+    const filterWrap = toolbar.createDiv({ cls: "goalscape-filter-wrap" });
+    this.filterBar = new FocusFilter(filterWrap, this.plugin, (criteria) => {
       this.filterCriteria = criteria;
       this.render();
     });
@@ -738,6 +776,72 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       this.infoPanel.refresh();
     });
     this.render();
+  }
+  buildActions(toolbar) {
+    const actions = toolbar.createDiv({ cls: "goalscape-actions" });
+    this.mapSelect = actions.createEl("select", { cls: "goalscape-map-select" });
+    this.mapSelect.addEventListener("change", () => {
+      void this.plugin.switchGoalscape(this.mapSelect.value);
+    });
+    const mk = (text, cls, onClick) => {
+      const b = actions.createEl("button", { cls: `goalscape-btn ${cls}`.trim(), text });
+      b.addEventListener("click", onClick);
+      return b;
+    };
+    mk("New map", "", () => void this.newMap());
+    mk("+ Subgoal", "", () => void this.addViaToolbar("child"));
+    mk("+ Sibling", "", () => void this.addViaToolbar("sibling"));
+    mk("Delete", "goalscape-btn-danger", () => this.deleteSelected());
+    this.refreshMapList();
+  }
+  refreshMapList() {
+    if (!this.mapSelect)
+      return;
+    const current = this.plugin.store.path;
+    const maps = this.plugin.listGoalscapes();
+    this.mapSelect.empty();
+    for (const p of maps) {
+      const name = p.split("/").pop().replace(/\.goalscape\.json$/, "");
+      const opt = this.mapSelect.createEl("option", { value: p, text: name });
+      if (p === current)
+        opt.selected = true;
+    }
+    if (!maps.includes(current)) {
+      const opt = this.mapSelect.createEl("option", { value: current, text: current.split("/").pop().replace(/\.goalscape\.json$/, "") });
+      opt.selected = true;
+    }
+  }
+  async newMap() {
+    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
+    if (!name || !name.trim())
+      return;
+    await this.plugin.createGoalscape(name.trim());
+    this.select(null);
+    this.refreshMapList();
+  }
+  async addViaToolbar(position) {
+    var _a;
+    const scape = this.plugin.store.scape;
+    if (!scape)
+      return;
+    if (position === "sibling" && !this.selectedId) {
+      new import_obsidian4.Notice("Select a goal first");
+      return;
+    }
+    const refId = (_a = this.selectedId) != null ? _a : scape.mainGoal.id;
+    const title = await promptInput(this.app, position === "child" ? "New subgoal" : "New sibling goal", "New Goal");
+    if (title === null)
+      return;
+    this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
+  }
+  deleteSelected() {
+    if (!this.selectedId) {
+      new import_obsidian4.Notice("Select a goal first");
+      return;
+    }
+    const id = this.selectedId;
+    this.plugin.store.mutate((s) => deleteGoal(s, id));
+    this.select(null);
   }
   async onClose() {
     var _a;
@@ -763,20 +867,27 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
     const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
+    const RING_GAP = Math.min(5, ringW * 0.045);
+    const SECTOR_GAP_ARC = 7;
     const matchingIds = this.computeMatchingIds(scape);
-    const drawNode = (node, depth, startAngle, endAngle, parentStart, parentEnd) => {
-      var _a;
+    const drawNode = (node, depth, startAngle, endAngle, parentStart, parentEnd, siblingIndex = 0) => {
+      var _a, _b;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
-      const rInner = depth * ringW;
-      const rOuter = (depth + 1) * ringW;
+      const rInnerRaw = depth * ringW;
+      const rOuterRaw = (depth + 1) * ringW;
       this.nodePositions.set(node.id, { startAngle, endAngle, depth });
+      const rInner = depth === 0 ? 0 : rInnerRaw + RING_GAP;
+      const rOuter = rOuterRaw - RING_GAP;
+      const pad = depth === 0 ? 0 : Math.min(span * 0.1, SECTOR_GAP_ARC / rOuter);
+      const a0 = startAngle + pad;
+      const a1 = endAngle - pad;
       const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, startAngle, endAngle));
-      path.setAttribute("fill", this.colorFor(node));
+      path.setAttribute("d", arcPath(CX, CY, rInner, rOuter, a0, a1));
+      path.setAttribute("fill", this.colorFor(node, depth, siblingIndex));
       path.setAttribute("stroke", "var(--background-primary)");
-      path.setAttribute("stroke-width", "2");
+      path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
       if (node.id === this.selectedId)
         path.addClass("goalscape-selected");
@@ -800,32 +911,41 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
         this.startReparentDrag(e, svg, node.id);
       });
       svg.appendChild(path);
-      if (span > 0.08 && ringW > 30) {
-        const midAngle = (startAngle + endAngle) / 2;
+      const midAngle = (startAngle + endAngle) / 2;
+      if (depth === 0) {
+        const title = document.createElementNS(SVG_NS, "text");
+        title.setAttribute("x", String(CX));
+        title.setAttribute("y", String(CY - 8));
+        title.setAttribute("text-anchor", "middle");
+        title.setAttribute("dominant-baseline", "middle");
+        title.addClass("goalscape-label", "goalscape-label-root");
+        title.textContent = node.title;
+        svg.appendChild(title);
+        const pct = document.createElementNS(SVG_NS, "text");
+        pct.setAttribute("x", String(CX));
+        pct.setAttribute("y", String(CY + 16));
+        pct.setAttribute("text-anchor", "middle");
+        pct.setAttribute("dominant-baseline", "middle");
+        pct.addClass("goalscape-label", "goalscape-label-root-pct");
+        pct.textContent = `${(_a = node.progress) != null ? _a : 0}%`;
+        svg.appendChild(pct);
+      } else if (span > 0.14 && rOuter - rInner > 24) {
         const rMid = (rInner + rOuter) / 2;
+        const lx = CX + Math.cos(midAngle) * rMid;
+        const ly = CY + Math.sin(midAngle) * rMid;
         const label = document.createElementNS(SVG_NS, "text");
-        label.setAttribute("x", String(CX + Math.cos(midAngle) * rMid));
-        label.setAttribute("y", String(CY + Math.sin(midAngle) * rMid));
+        label.setAttribute("x", String(lx));
+        label.setAttribute("y", String(ly));
         label.setAttribute("text-anchor", "middle");
         label.setAttribute("dominant-baseline", "middle");
         label.addClass("goalscape-label");
         const deg = midAngle * 180 / Math.PI;
-        if (depth > 0 && deg > 90 && deg < 270) {
-          label.setAttribute(
-            "transform",
-            `rotate(${deg + 180} ${CX + Math.cos(midAngle) * rMid} ${CY + Math.sin(midAngle) * rMid})`
-          );
-        } else if (depth > 0) {
-          label.setAttribute(
-            "transform",
-            `rotate(${deg} ${CX + Math.cos(midAngle) * rMid} ${CY + Math.sin(midAngle) * rMid})`
-          );
-        }
-        label.textContent = `${node.title} ${(_a = node.progress) != null ? _a : 0}%`;
+        const flip = deg > 90 && deg < 270;
+        label.setAttribute("transform", `rotate(${flip ? deg + 180 : deg} ${lx} ${ly})`);
+        label.textContent = span > 0.28 ? `${node.title} ${(_b = node.progress) != null ? _b : 0}%` : node.title;
         svg.appendChild(label);
       }
       if (node.id === this.selectedId && depth > 0) {
-        const midAngle = (startAngle + endAngle) / 2;
         const handle = document.createElementNS(SVG_NS, "circle");
         handle.setAttribute("cx", String(CX + Math.cos(midAngle) * rOuter));
         handle.setAttribute("cy", String(CY + Math.sin(midAngle) * rOuter));
@@ -843,11 +963,11 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       if (total <= 0)
         return;
       let cursor = startAngle;
-      for (const c of node.children) {
+      node.children.forEach((c, i) => {
         const cSpan = c.importance / total * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle);
+        drawNode(c, depth + 1, cursor, cursor + cSpan, startAngle, endAngle, i);
         cursor += cSpan;
-      }
+      });
     };
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, -Math.PI / 2, Math.PI * 1.5);
     svg.addEventListener("click", () => {
@@ -889,13 +1009,12 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       return depth;
     return Math.max(...node.children.map((c) => this.visibleDepth(c, depth + 1)));
   }
-  colorFor(node) {
+  colorFor(node, depth, siblingIndex = 0) {
     var _a;
-    if (node.color)
-      return node.color;
-    const p = (_a = node.progress) != null ? _a : 0;
-    const idx = Math.min(PROGRESS_STOPS.length - 1, Math.floor(p / 25));
-    return PROGRESS_STOPS[idx];
+    const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor(((_a = node.progress) != null ? _a : 0) / 25))];
+    if (depth === 0)
+      return shadeColor(base, -22);
+    return shadeColor(base, Math.min(depth, 4) * 9 + siblingIndex % 3 * 6);
   }
   // ──────────────────────────── 权重拖拽 ────────────────────────────
   startWeightDrag(e, svg, nodeId, startAngle, parentStart, parentEnd) {
@@ -1166,11 +1285,27 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
 };
 var FULL_CIRCLE_EPSILON = 1e-4;
 function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
+  const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
   if (endAngle - startAngle >= Math.PI * 2 - FULL_CIRCLE_EPSILON) {
-    endAngle = startAngle + Math.PI * 2 - FULL_CIRCLE_EPSILON;
+    const a0 = startAngle;
+    const a1 = startAngle + Math.PI;
+    const outer = [
+      `M ${p(rOuter, a0)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a1)}`,
+      `A ${rOuter} ${rOuter} 0 1 1 ${p(rOuter, a0)}`,
+      "Z"
+    ];
+    if (rInner <= 0)
+      return outer.join(" ");
+    const inner = [
+      `M ${p(rInner, a0)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a1)}`,
+      `A ${rInner} ${rInner} 0 1 0 ${p(rInner, a0)}`,
+      "Z"
+    ];
+    return outer.join(" ") + " " + inner.join(" ");
   }
   const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
-  const p = (r, a) => `${cx + r * Math.cos(a)} ${cy + r * Math.sin(a)}`;
   if (rInner <= 0) {
     return [
       `M ${cx} ${cy}`,
@@ -1751,7 +1886,8 @@ function downloadText(text, filename, mime = "text/plain") {
 // src/main.ts
 var GoalscapePlugin = class extends import_obsidian7.Plugin {
   async onload() {
-    this.store = new GoalTreeStore(this, DEFAULT_GOALSCAPE_PATH);
+    const saved = await this.loadData();
+    this.store = new GoalTreeStore(this, (saved == null ? void 0 : saved.currentPath) || DEFAULT_GOALSCAPE_PATH);
     await this.store.load();
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
@@ -1759,6 +1895,7 @@ var GoalscapePlugin = class extends import_obsidian7.Plugin {
     this.addRibbonIcon("target", "Open Goalscape radial map", () => {
       this.openView(VIEW_RADIAL);
     });
+    this.addCommand({ id: "new-goalscape", name: "New goalscape", callback: () => void this.promptNewGoalscape() });
     this.addCommand({ id: "open-radial-goalscape", name: "Open radial goal map", callback: () => this.openView(VIEW_RADIAL) });
     this.addCommand({ id: "open-list-goalscape", name: "Open goal list view", callback: () => this.openView(VIEW_LIST) });
     this.addCommand({ id: "open-gantt-goalscape", name: "Open Gantt view", callback: () => this.openView(VIEW_GANTT) });
@@ -1798,6 +1935,39 @@ var GoalscapePlugin = class extends import_obsidian7.Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.openFile(file);
     this.app.workspace.revealLeaf(leaf);
+  }
+  // ──────────────────────────── 多 goalscape 管理 ────────────────────────────
+  listGoalscapes() {
+    return this.app.vault.getFiles().filter((f) => f.path.startsWith("Goalscapes/") && f.path.endsWith(".goalscape.json")).map((f) => f.path).sort();
+  }
+  async switchGoalscape(path) {
+    if (path === this.store.path)
+      return;
+    await this.store.switchTo(path);
+    await this.saveData({ currentPath: path });
+    this.refreshMapSelectors();
+  }
+  async createGoalscape(name) {
+    const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
+    const path = `Goalscapes/${safe}.goalscape.json`;
+    if (await this.app.vault.adapter.exists(path)) {
+      new import_obsidian7.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
+      await this.switchGoalscape(path);
+      return;
+    }
+    await this.switchGoalscape(path);
+    new import_obsidian7.Notice(`Created goalscape: ${safe}`);
+  }
+  async promptNewGoalscape() {
+    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
+    if (name && name.trim())
+      await this.createGoalscape(name.trim());
+  }
+  refreshMapSelectors() {
+    var _a, _b;
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
+      (_b = (_a = leaf.view).refreshMapList) == null ? void 0 : _b.call(_a);
+    }
   }
   // ──────────────────────────── 导出 ────────────────────────────
   async exportCanvas() {
@@ -1879,11 +2049,15 @@ var TemplateModal = class extends import_obsidian7.Modal {
     for (const t of TEMPLATES) {
       new import_obsidian7.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
         (btn) => btn.setButtonText("Apply").onClick(() => {
+          var _a, _b;
           this.plugin.store.mutate((s) => {
             const template = t.build();
             s.mainGoal = template.mainGoal;
             s.colorMeanings = template.colorMeanings;
           });
+          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
+            (_b = (_a = leaf.view).select) == null ? void 0 : _b.call(_a, null);
+          }
           this.close();
           new import_obsidian7.Notice(`Template "${t.name}" applied`);
         })

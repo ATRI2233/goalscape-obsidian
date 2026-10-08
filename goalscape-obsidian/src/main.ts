@@ -7,6 +7,7 @@ import { RadialGoalMapView, VIEW_RADIAL } from "./views/radialView";
 import { GoalListView, VIEW_LIST } from "./views/listView";
 import { GanttView, VIEW_GANTT } from "./views/ganttView";
 import { TEMPLATES } from "./data/templates";
+import { promptInput } from "./views/promptModal";
 import { toCanvas, canvasToJson } from "./export/canvasSync";
 import { exportSvg, exportPng, exportCsv, exportMarkdownOutline, downloadBlob, downloadText } from "./export/exporters";
 
@@ -14,7 +15,8 @@ export default class GoalscapePlugin extends Plugin {
   store!: GoalTreeStore;
 
   async onload(): Promise<void> {
-    this.store = new GoalTreeStore(this, DEFAULT_GOALSCAPE_PATH);
+    const saved = (await this.loadData()) as { currentPath?: string } | null;
+    this.store = new GoalTreeStore(this, saved?.currentPath || DEFAULT_GOALSCAPE_PATH);
     await this.store.load();
 
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
@@ -25,6 +27,7 @@ export default class GoalscapePlugin extends Plugin {
       this.openView(VIEW_RADIAL);
     });
 
+    this.addCommand({ id: "new-goalscape", name: "New goalscape", callback: () => void this.promptNewGoalscape() });
     this.addCommand({ id: "open-radial-goalscape", name: "Open radial goal map", callback: () => this.openView(VIEW_RADIAL) });
     this.addCommand({ id: "open-list-goalscape", name: "Open goal list view", callback: () => this.openView(VIEW_LIST) });
     this.addCommand({ id: "open-gantt-goalscape", name: "Open Gantt view", callback: () => this.openView(VIEW_GANTT) });
@@ -66,6 +69,47 @@ export default class GoalscapePlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.openFile(file);
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  // ──────────────────────────── 多 goalscape 管理 ────────────────────────────
+
+  listGoalscapes(): string[] {
+    return this.app.vault
+      .getFiles()
+      .filter((f) => f.path.startsWith("Goalscapes/") && f.path.endsWith(".goalscape.json"))
+      .map((f) => f.path)
+      .sort();
+  }
+
+  async switchGoalscape(path: string): Promise<void> {
+    if (path === this.store.path) return;
+    await this.store.switchTo(path);
+    await this.saveData({ currentPath: path });
+    this.refreshMapSelectors();
+  }
+
+  async createGoalscape(name: string): Promise<void> {
+    const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
+    const path = `Goalscapes/${safe}.goalscape.json`;
+    if (await this.app.vault.adapter.exists(path)) {
+      new Notice(`已存在同名 goalscape：${safe}`);
+      await this.switchGoalscape(path);
+      return;
+    }
+    // 新路径不存在时，store.load() 会自动用默认树建档（走 adapter，避免 vault.create 竞态）
+    await this.switchGoalscape(path);
+    new Notice(`Created goalscape: ${safe}`);
+  }
+
+  private async promptNewGoalscape(): Promise<void> {
+    const name = await promptInput(this.app, "New goalscape name", "My Goalscape");
+    if (name && name.trim()) await this.createGoalscape(name.trim());
+  }
+
+  private refreshMapSelectors(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
+      (leaf.view as any).refreshMapList?.();
+    }
   }
 
   // ──────────────────────────── 导出 ────────────────────────────
@@ -157,6 +201,10 @@ class TemplateModal extends Modal {
               s.mainGoal = template.mainGoal;
               s.colorMeanings = template.colorMeanings;
             });
+            // 模板替换后原选中节点 id 失效，清空各放射图视图的选中，避免信息面板显示 "Goal not found."
+            for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
+              (leaf.view as any).select?.(null);
+            }
             this.close();
             new Notice(`Template "${t.name}" applied`);
           })

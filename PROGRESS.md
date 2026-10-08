@@ -71,16 +71,76 @@
 - 唯一小瑕疵（非 bug，暂不返工）：应用模板后信息面板显示 "Goal not found."，因原选中节点 id 随模板替换消失。
   可在模板应用/外部重载时清空 `selectedId` 让面板回到占位，属可选打磨。
 
+### 用户实测反馈的 5 个 UX 问题（已全部修复并截图复核）
+1. **没有新建图的入口** → 工具栏加 `<select>` 地图切换器 + "New map" 按钮；命令面板加 `goalscape-obsidian:new-goalscape`。
+   `main.ts` 新增 `listGoalscapes/switchGoalscape/createGoalscape/promptNewGoalscape/refreshMapSelectors`，
+   当前路径持久化在 `data.json` 的 `currentPath`。
+2. **主目标扇区多出一根黑线** → 根因：整圆用单条 `A r r 0 1 1` 回到起点，SVG 在起止接缝处画出一条缝。
+   `arcPath` 改为整圆时用**两个半圆弧**拼外圈（有内径时再拼内圈反向两弧），接缝消失。
+3. **顶部没有增同级/增子级按钮** → 工具栏加 `+ Subgoal` / `+ Sibling` / `Delete`。`+ Sibling` 需先选中节点，否则 Notice 提示。
+4. **右侧栏排版混乱** → 面板内 Obsidian `Setting` 改为"标题在上、控件在下"纵向布局（`.goalscape-panel .setting-item{flex-direction:column}`），
+   320px 宽度里不再横向挤压换行；宽度 300→320。
+5. **整图丑、可视性差** → 见下节"放射图视觉重做"。
+
+### 放射图视觉重做（问题 5）
+- 环间隙与扇区裂缝大幅收窄：`RING_GAP` 由 `min(12, ringW*0.14)` 降到 `min(5, ringW*0.045)`；
+  扇区留白从**固定角度** `min(span*0.16, 0.028)` 改为按**弧长** `min(span*0.1, SECTOR_GAP_ARC/rOuter)`——
+  固定角度会让外环半径越大裂缝越宽，之前看起来像黑色裂纹。描边 1.5→1。
+- `shadeColor(hex, percent)` 支持负值（向黑混合）；`colorFor(node, depth, siblingIndex)`：
+  **中心盘压暗 -22%**、外环按 `depth*9 + (siblingIndex%3)*6` 逐层提亮，
+  使"整树进度相同（全 0%）"这种最坏情况下环层与相邻扇区仍可分辨。`drawNode` 递归用 `forEach((c,i))` 传同级序号。
+- 标签：13→14px，`paint-order: stroke` + `stroke: rgba(0,0,0,.5)` 3px 描边（原来的 text-shadow 在 SVG 里发糊）；
+  根节点标题水平居中于 hub（`.goalscape-label-root` 20px）+ 下方整体进度，子节点仍沿半径旋转、左半球 flip。
+- 已验证：2 环（用户真实 life 图）与 3 环（Life Balance 模板，17 path / 18 label）均无 viewBox 溢出，
+  `getBBox` 与 `getBoundingClientRect` 双重量过。
+
+### 真实 bug：插件启动即失败，界面显示"插件不再活动"（已修）
+- 症状：冷启动后放射图标签页显示"插件不再活动"，`store.scape` 为 undefined，但 `data.json` 里插件是启用状态、
+  `failedPlugins` 为空。手动 `enablePlugin` 则成功。
+- 根因链：`onload` 第 20 行 `await this.store.load()` 在 `registerView` **之前**；
+  `load()` → `ensureFolder()` → 启动早期 vault 索引尚未就绪，`getAbstractFileByPath("Goalscapes")` 误报 null →
+  `vault.createFolder("Goalscapes")` 抛 **"Folder already exists."**（已用 CDP 实证该报错）→
+  `onload` reject → 视图根本没注册 → 保存的 leaf 退化成占位页。
+- 修复：`ensureFolder()` 用 try/catch 容忍"已存在"。修后冷启动自启成功，标题栏正确显示 "Goalscape Radial"。
+- **教训**：`onload` 里任何在 `registerView` 之前的 await 都是单点故障。后续若再加启动逻辑，优先只注册视图/命令，
+  数据加载失败应降级为 Notice 而不是让整个插件挂掉。
+
+### 真实 bug：多图切换把 goalscape 文件截断成 0 字节（数据丢失，已修）
+- 症状：切换测试中发现 `Goalscapes/life.goalscape.json` 变成 0 字节。已从备份恢复。
+- 修复（`goalTree.ts`）：统一落盘入口 `writeScape()`，`if (!this.scape) return;` + `if (!content) return;`，
+  空内容永不落盘；`load()`/`readFromPath()` 全部改走 `vault.adapter`（`adapter.exists` 对文件确实返回 true，已实证），
+  并拒绝解析空文件；`switchTo()` 清理挂起的 reload 计时器；首次建档不再用 `vault.create`（对已存在文件会抛错）。
+- **注意：这条推翻了 Phase 1 记录的第 4 项修复**（"首次建档改用 vault.create()"）——`vault.create` 在文件已存在时抛错，
+  且启动早期索引不可靠，现在统一用 adapter 落盘 + 事后刷新 `file` 引用。
+- 回归验证（`D:/tmp/trunc.mjs`，全程监视文件字节数）：新建 → 切回 → mutate → 往返 → 6 次快速连切，
+  `life.goalscape.json` 全程 713B→732B（仅 rollup 补了根节点 `"progress": 0`，语义 diff 确认无字段丢失），
+  无一次 0 字节；测试文件已删除、`data.json` 已还原。
+
+### CDP 实测重要坑：窗口在后台时 renderer 会被冻结（不是死循环）
+- 曾误判为"renderer 卡死/代码死循环"：`Runtime.evaluate('1+1')` 超时、`Page.captureScreenshot` 超时、
+  连 `Debugger.pause` 都不回 `Debugger.paused`。
+- 实测定位方法（下次直接照做，别浪费时间猜）：
+  1. `Get-Process Obsidian` 取 4 秒 CPU 增量 → **全为 0** ⇒ 不是 JS 忙循环（忙循环会吃满一核）。
+  2. `user32!IsIconic/IsWindowVisible` + GDI `CopyFromScreen` 截屏 → 看到真实界面（本例正是它暴露了"插件不再活动"）。
+  3. 把 Obsidian 窗口**切到前台**后再连 CDP → `1+1` 立刻返回 2。
+- 结论：Chromium/Electron 会把不可见窗口的 renderer 主线程挂起，此时**任何** CDP 命令都不响应、
+  且 `Debugger.pause` 也拿不到栈。自动化验证前必须先把窗口带到前台（`D:/tmp/front.ps1`），
+  且全程不要让 Obsidian 失去焦点。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 导出走浏览器下载（`<a download>`），Electron 里会弹系统保存框，为避免卡住 Obsidian 未自动触发；
   CSV/Markdown 文本生成逻辑可用 Node 单测覆盖，端到端下载动作留待人工点一次确认。
 - 没有自动化测试基建（无 vitest/jest），目前"单测"是临时 esbuild 转译 + 手写断言，没留在仓库里。
+- 放射图视觉重做只在暗色主题下截过图；亮色主题下 hub 的 `-22%` 压暗与标签黑色描边效果未复核。
 
 ## 后续计划（按优先级）
 
 1. ~~端到端交互验证~~ 已完成（见上），放射图/三视图/CRUD/拖拽/导出/模板全部实测通过。
-2. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
-3. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
-4. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
+2. ~~用户反馈的 5 个 UX 问题~~ 已完成（见上），并顺带修掉启动失败与 0 字节截断两个真实 bug。
+3. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
+4. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
+5. 建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后，让数据加载失败只降级为 Notice
+   （当前靠 `ensureFolder` 的 try/catch 堵住了已知的那条抛错路径，但顺序本身仍是单点故障）。
+6. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
    Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。

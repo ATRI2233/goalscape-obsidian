@@ -19,12 +19,60 @@
 .goalscape-toolbar {
   flex: 0 0 auto;
   border-bottom: 1px solid var(--background-modifier-border);
-  padding: 6px 12px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 顶部操作区：图选择器 + 新建 + 增删按钮 */
+.goalscape-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.goalscape-map-select {
+  height: 28px;
+  max-width: 180px;
+  padding: 0 8px;
+  font-size: 13px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  margin-right: 4px;
+}
+
+.goalscape-btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 5px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.goalscape-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.goalscape-btn-danger:hover {
+  background: var(--background-modifier-error);
+  color: #fff;
+}
+
+.goalscape-filter-wrap {
+  display: flex;
 }
 
 .goalscape-filter-bar {
   display: flex;
   flex-direction: column;
+  width: 100%;
 }
 
 .goalscape-filter-row {
@@ -151,11 +199,27 @@
 
 /* 标签文字 */
 .goalscape-label {
-  font-size: 11px;
+  font-size: 14px;
   font-weight: 600;
   fill: var(--text-on-accent);
   pointer-events: none;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+  paint-order: stroke;
+  stroke: rgba(0, 0, 0, 0.5);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}
+
+.goalscape-label-root {
+  font-size: 20px;
+  font-weight: 700;
+  stroke: none;
+}
+
+.goalscape-label-root-pct {
+  font-size: 14px;
+  font-weight: 600;
+  stroke: none;
+  opacity: 0.9;
 }
 
 /* 拖拽幽灵 */
@@ -177,11 +241,53 @@
 /* ═══════════════ 右侧信息面板 ═══════════════ */
 
 .goalscape-panel {
-  flex: 0 0 300px;
-  max-width: 300px;
+  flex: 0 0 320px;
+  max-width: 320px;
   overflow-y: auto;
-  padding: 12px;
+  padding: 12px 14px;
   border-left: 1px solid var(--background-modifier-border);
+}
+
+/* 面板内 Obsidian Setting 改为"标题在上、控件在下"的纵向布局，避免 320px 宽度里横向挤压换行 */
+.goalscape-panel .setting-item {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 7px 0;
+  border-top: none;
+}
+
+.goalscape-panel .setting-item-info {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.goalscape-panel .setting-item-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.goalscape-panel .setting-item-description {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.goalscape-panel .setting-item-control {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.goalscape-panel .setting-item-control input[type="text"],
+.goalscape-panel .setting-item-control input[type="date"],
+.goalscape-panel .setting-item-control .slider-input-container {
+  width: 100%;
+}
+
+.goalscape-panel .setting-item-control .slider-container {
+  width: 100%;
 }
 
 .goalscape-panel-empty {
