@@ -22,9 +22,6 @@ export const MAX_R = VIEW_SIZE / 2 - 20;
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
-/** 未手工设色相时的默认色相来源（插件原来的进度绿）；hexToHsl 解析失败也退回它 */
-const DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
-
 /** 环带厚度的四档（面板上从左到右：极薄/薄/标准/厚）；未设 bandScale 的节点用"标准"档。
  *  标准档刻意等于旧版"等宽环"的厚度，所以没调过的图看起来和以前一致；厚档只加 30%，
  *  再加就挤占可读面积、实际用不上 */
@@ -200,59 +197,6 @@ export function labelInk(sectorColor: string): { fill: string; halo: string } {
   return ratio(INK_DARK) > ratio(INK_LIGHT)
     ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" }
     : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
-}
-
-/** #rrggbb → HSL（h 0-360，s/l 0-100）；解析失败退回默认绿，保证永远有可读的底色 */
-function hexToHsl(hex: string): { h: number; s: number; l: number } {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m) return { h: DEFAULT_SECTOR.h, s: DEFAULT_SECTOR.s, l: DEFAULT_SECTOR.l };
-  const n = parseInt(m[1], 16);
-  const r = ((n >> 16) & 255) / 255;
-  const g = ((n >> 8) & 255) / 255;
-  const b = (n & 255) / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  const d = max - min;
-  if (d === 0) return { h: DEFAULT_SECTOR.h, s: 0, l: l * 100 };
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h: number;
-  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-  else if (max === g) h = (b - r) / d + 2;
-  else h = (r - g) / d + 4;
-  return { h: h * 60, s: s * 100, l: l * 100 };
-}
-
-/** HSL → #rrggbb：扇区底色仍以十六进制交给 fill / labelInk / 导出，不引入 hsl() 字符串 */
-function hslToHex(h: number, s: number, l: number): string {
-  const sn = Math.max(0, Math.min(100, s)) / 100;
-  const ln = Math.max(0, Math.min(100, l)) / 100;
-  const k = (n: number) => (n + h / 30) % 12;
-  const a = sn * Math.min(ln, 1 - ln);
-  const f = (n: number) => ln - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  const to = (v: number) => Math.round(255 * v).toString(16).padStart(2, "0");
-  return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
-}
-
-/**
- * 扇区底色：色相与饱和度都来自所属分支选的那个颜色（调用方传 branchColors 解析出来的），
- * 明度承担环层区分 + 节点自己的 brightness 偏移。
- *
- * 进度**不再参与底色** —— 早先它占用饱和度通道（0% → 50%、100% → 100%），
- * 于是面板上精心挑的低饱和配色一律被强行提纯成同一档，五个分支饱和度和明度全持平、
- * 只剩色相区别，整图糊成一片。进度现在画在扇区外缘的细进度条上（见 progressRim）。
- */
-export function nodeColor(
-  node: GoalNode,
-  depth: number,
-  branchColor: string,
-  siblingIndex = 0
-): string {
-  const base = hexToHsl(branchColor);
-  const offset = (node.brightness ?? 0) + (depth === 0
-    ? -12
-    : Math.min(depth, 4) * 3 + (siblingIndex % 3) * 2);
-  return hslToHex(base.h, base.s, Math.max(20, Math.min(82, base.l + offset)));
 }
 
 const FULL_CIRCLE_EPSILON = 1e-4;

@@ -6,12 +6,13 @@
 
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, DEFAULT_BRANCH_COLOR, branchColors, flattenTree } from "../data/types";
+import { GoalNode, flattenTree } from "../data/types";
+import { branchFills } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
-  SVG_NS, VIEW_SIZE, CX, CY, MAX_R,
-  arcPath, bandScaleOf, childShares, fitLabel, labelInk, nodeColor, progressRim, radialUnit, sectorEdges,
+  SVG_NS, VIEW_SIZE, CX, CY,
+  arcPath, bandScaleOf, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
   SectorShape,
 } from "./radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
@@ -174,8 +175,8 @@ export class RadialGoalMapView extends ItemView {
     // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
-    // 色相只有一个来源：沿父链解析一次，整条分支天然同色，父节点改色子节点不需要跟着改
-    const hues = branchColors(scape.mainGoal);
+    // 底色只有一个来源：色相沿父链继承、浓淡由层级锁定，整条分支天然同色，父节点改色子节点不需要跟着改
+    const fills = branchFills(scape.mainGoal);
 
     const drawNode = (
       node: GoalNode,
@@ -183,8 +184,7 @@ export class RadialGoalMapView extends ItemView {
       startAngle: number,
       endAngle: number,
       rInner: number,
-      parentAngles: { startAngle: number; endAngle: number } | null,
-      siblingIndex = 0
+      parentAngles: { startAngle: number; endAngle: number } | null
     ) => {
       const span = endAngle - startAngle;
       if (span <= 0.0005) return;
@@ -193,7 +193,7 @@ export class RadialGoalMapView extends ItemView {
       this.nodePositions.set(node.id, shape);
 
       const edge = sectorEdges(shape);
-      const color = nodeColor(node, depth, hues.get(node.id) ?? DEFAULT_BRANCH_COLOR, siblingIndex);
+      const color = fills.get(node.id)!;
       const ink = labelInk(color);
       const dim = !!matchingIds && !matchingIds.has(node.id);
       const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
@@ -283,7 +283,7 @@ export class RadialGoalMapView extends ItemView {
       node.children.forEach((c, i) => {
         // 子级只吃 shares[i] 这一份，父扇区剩下的角度就是留白
         const cSpan = shares[i] * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle }, i);
+        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle });
         cursor += cSpan;
       });
     };
@@ -332,17 +332,17 @@ export class RadialGoalMapView extends ItemView {
   }
 
   /**
-   * 整图共用的一束"光"：userSpaceOnUse 让渐变按全图坐标算，所以每个扇区取的是
-   * 自己那一段，拼起来是一个中心偏上的光源 + 外圈压暗，而不是每格各打一盏灯。
-   * 两端都极淡，浅色主题下白那一半基本看不见、只剩外圈的暗角。
+   * 每个块自己的一束光：objectBoundingBox 让渐变按**各自**的外接框算，
+   * 所以一块扇区从上半到下半有极淡的明暗过渡，而不是全图共用一个光源
+   * （全图那个做过一版，压在一圈同浓淡的扇区上根本看不出来）。
+   * 两端都极淡，亮色主题下白的那半基本看不见、只剩边缘一点暗角。
    */
   private sheenGradient(): SVGRadialGradientElement {
     const grad = document.createElementNS(SVG_NS, "radialGradient") as SVGRadialGradientElement;
     grad.id = this.sheenId;
-    grad.setAttribute("gradientUnits", "userSpaceOnUse");
-    grad.setAttribute("cx", String(CX));
-    grad.setAttribute("cy", String(CY * 0.86));
-    grad.setAttribute("r", String(MAX_R * 1.15));
+    grad.setAttribute("cx", "0.5");
+    grad.setAttribute("cy", "0.32");
+    grad.setAttribute("r", "0.85");
     const stop = (offset: string, color: string, opacity: string): void => {
       const s = document.createElementNS(SVG_NS, "stop");
       s.setAttribute("offset", offset);
@@ -350,9 +350,9 @@ export class RadialGoalMapView extends ItemView {
       s.setAttribute("stop-opacity", opacity);
       grad.appendChild(s);
     };
-    stop("0", "#ffffff", "0.07");
-    stop("45%", "#ffffff", "0");
-    stop("100%", "#000000", "0.1");
+    stop("0", "#ffffff", "0.1");
+    stop("55%", "#ffffff", "0");
+    stop("100%", "#000000", "0.12");
     return grad;
   }
 

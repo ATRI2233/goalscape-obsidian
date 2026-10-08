@@ -292,6 +292,118 @@ var GoalTreeStore = class {
 // src/views/radialView.ts
 var import_obsidian8 = require("obsidian");
 
+// src/data/palette.ts
+var HUB_L = 0.62;
+var L_STEP = 0.035;
+var MAX_L = 0.82;
+var HUE_LIFT = 0.055;
+var HUE_LIFT_PEAK = 95;
+var C_RATIO = 0.92;
+var MIN_C = 0.03;
+var BRIGHT_STEP = 4e-3;
+var MIN_CHROMA = 0.02;
+var MIN_HUE_GAP = 14;
+function toLinear(v) {
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+function toSrgb(v) {
+  return v <= 31308e-7 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+}
+function hexToHueC(hex) {
+  const n = /^#[0-9a-f]{6}$/i.test(hex) ? parseInt(hex.slice(1), 16) : -1;
+  if (n < 0)
+    return { h: 0, c: 0 };
+  const [r, g, b] = [16, 8, 0].map((s2) => toLinear((n >> s2 & 255) / 255));
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const a = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const k = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  let h = Math.atan2(k, a) * 180 / Math.PI;
+  if (h < 0)
+    h += 360;
+  return { h, c: Math.hypot(a, k) };
+}
+function okToLinear(L, C, h) {
+  const a = C * Math.cos(h * Math.PI / 180);
+  const b = C * Math.sin(h * Math.PI / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  return [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s
+  ];
+}
+function okToHex(L, C, h) {
+  const rgb = okToLinear(L, C, h).map((v) => Math.round(255 * Math.max(0, Math.min(1, toSrgb(v)))));
+  return "#" + rgb.map((v) => v.toString(16).padStart(2, "0")).join("");
+}
+function maxChroma(L, h) {
+  let lo = 0;
+  let hi = 0.4;
+  for (let i = 0; i < 14; i++) {
+    const mid = (lo + hi) / 2;
+    const [r, g, b] = okToLinear(L, mid, h);
+    if (Math.min(r, g, b) > -15e-4 && Math.max(r, g, b) < 1.0015)
+      lo = mid;
+    else
+      hi = mid;
+  }
+  return lo;
+}
+var hueGap = (a, b) => {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+};
+function fillFor(depth, h, gray, brightness) {
+  const base = HUB_L + L_STEP * depth + brightness * BRIGHT_STEP;
+  if (gray)
+    return okToHex(Math.min(MAX_L, base), 0, 0);
+  const L = Math.min(MAX_L, base + HUE_LIFT * Math.cos((h - HUE_LIFT_PEAK) * Math.PI / 180));
+  return okToHex(L, Math.max(MIN_C, maxChroma(L, h) * C_RATIO), h);
+}
+function branchFills(root) {
+  const tones = /* @__PURE__ */ new Map();
+  const taken = [];
+  const claim = (node) => {
+    const { h, c } = hexToHueC(node.color || DEFAULT_BRANCH_COLOR);
+    if (c < MIN_CHROMA) {
+      tones.set(node.id, { h: 0, gray: true });
+      return;
+    }
+    let hue = h;
+    while (taken.some((t) => hueGap(t, hue) < MIN_HUE_GAP))
+      hue = (hue + MIN_HUE_GAP) % 360;
+    taken.push(hue);
+    tones.set(node.id, { h: hue, gray: false });
+  };
+  claim(root);
+  for (const b of root.children)
+    claim(b);
+  const out = /* @__PURE__ */ new Map();
+  const rec = (n, depth, owner) => {
+    var _a, _b;
+    const tone = (_a = tones.get(depth <= 1 ? n.id : owner)) != null ? _a : tones.get(root.id);
+    out.set(n.id, fillFor(depth, tone.h, tone.gray, (_b = n.brightness) != null ? _b : 0));
+    n.children.forEach((c) => rec(c, depth + 1, depth === 0 ? c.id : owner));
+  };
+  rec(root, 0, root.id);
+  return out;
+}
+var PALETTE_SWATCHES = [
+  25,
+  55,
+  92,
+  145,
+  190,
+  230,
+  268,
+  313,
+  345
+].map((h) => fillFor(1, h, false, 0)).concat(fillFor(1, 0, true, 0));
+
 // src/views/infoPanel.ts
 var import_obsidian3 = require("obsidian");
 
@@ -398,7 +510,6 @@ var CX = VIEW_SIZE / 2;
 var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var SECTOR_GAP_ARC = 7;
-var DEFAULT_SECTOR = { h: 142, s: 69, l: 58 };
 var BAND_STEPS = [0.3, 0.6, 1, 1.3];
 var BAND_DEFAULT_INDEX = 2;
 var INK_LIGHT = "#ffffff";
@@ -515,45 +626,6 @@ function labelInk(sectorColor) {
     return (Math.max(l, li) + 0.05) / (Math.min(l, li) + 0.05);
   };
   return ratio(INK_DARK) > ratio(INK_LIGHT) ? { fill: INK_DARK, halo: "rgba(255, 255, 255, 0.8)" } : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
-}
-function hexToHsl(hex) {
-  const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m)
-    return { h: DEFAULT_SECTOR.h, s: DEFAULT_SECTOR.s, l: DEFAULT_SECTOR.l };
-  const n = parseInt(m[1], 16);
-  const r = (n >> 16 & 255) / 255;
-  const g = (n >> 8 & 255) / 255;
-  const b = (n & 255) / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  const d = max - min;
-  if (d === 0)
-    return { h: DEFAULT_SECTOR.h, s: 0, l: l * 100 };
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h;
-  if (max === r)
-    h = (g - b) / d + (g < b ? 6 : 0);
-  else if (max === g)
-    h = (b - r) / d + 2;
-  else
-    h = (r - g) / d + 4;
-  return { h: h * 60, s: s * 100, l: l * 100 };
-}
-function hslToHex(h, s, l) {
-  const sn = Math.max(0, Math.min(100, s)) / 100;
-  const ln = Math.max(0, Math.min(100, l)) / 100;
-  const k = (n) => (n + h / 30) % 12;
-  const a = sn * Math.min(ln, 1 - ln);
-  const f = (n) => ln - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  const to = (v) => Math.round(255 * v).toString(16).padStart(2, "0");
-  return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
-}
-function nodeColor(node, depth, branchColor, siblingIndex = 0) {
-  var _a;
-  const base = hexToHsl(branchColor);
-  const offset = ((_a = node.brightness) != null ? _a : 0) + (depth === 0 ? -12 : Math.min(depth, 4) * 3 + siblingIndex % 3 * 2);
-  return hslToHex(base.h, base.s, Math.max(20, Math.min(82, base.l + offset)));
 }
 var FULL_CIRCLE_EPSILON = 1e-4;
 function arcPath(cx, cy, rInner, rOuter, startAngle, endAngle) {
@@ -715,18 +787,6 @@ var PromptModal = class extends import_obsidian2.Modal {
 
 // src/views/infoPanel.ts
 var BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
-var COLOR_PALETTE = [
-  "#f87171",
-  "#fb923c",
-  "#fbbf24",
-  "#4ade80",
-  "#2dd4bf",
-  "#38bdf8",
-  "#818cf8",
-  "#c084fc",
-  "#f472b6",
-  "#a3a3a3"
-];
 function splitCsv(raw) {
   return raw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
@@ -970,7 +1030,7 @@ var InfoPanel = class {
     if (!node.color)
       auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, void 0));
-    for (const hex of COLOR_PALETTE) {
+    for (const hex of PALETTE_SWATCHES) {
       const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
       swatch.style.backgroundColor = hex;
       swatch.title = hex;
@@ -1571,9 +1631,9 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     svg.appendChild(defs);
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
-    const hues = branchColors(scape.mainGoal);
-    const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles, siblingIndex = 0) => {
-      var _a, _b, _c, _d, _e;
+    const fills = branchFills(scape.mainGoal);
+    const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles) => {
+      var _a, _b, _c, _d;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
@@ -1581,7 +1641,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       const shape = { rInner, rOuter, startAngle, endAngle, depth };
       this.nodePositions.set(node.id, shape);
       const edge = sectorEdges(shape);
-      const color = nodeColor(node, depth, (_a = hues.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR, siblingIndex);
+      const color = fills.get(node.id);
       const ink = labelInk(color);
       const dim = !!matchingIds && !matchingIds.has(node.id);
       const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
@@ -1614,11 +1674,11 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         this.reparentDrag.start(e, node.id);
       });
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = `${node.title} \xB7 ${(_b = node.progress) != null ? _b : 0}%`;
+      tip.textContent = `${node.title} \xB7 ${(_a = node.progress) != null ? _a : 0}%`;
       path.appendChild(tip);
       map.appendChild(path);
       this.addOverlay(map, d, dim, ["goalscape-sheen"], { fill: `url(#${this.sheenId})` });
-      const rim = progressRim(edge, (_c = node.progress) != null ? _c : 0);
+      const rim = progressRim(edge, (_b = node.progress) != null ? _b : 0);
       if (rim) {
         this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
           stroke: ink.fill,
@@ -1630,10 +1690,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_d = node.progress) != null ? _d : 0}%`;
+        pct.textContent = `${(_c = node.progress) != null ? _c : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_e = node.progress) != null ? _e : 0}%`);
+        const text = fitLabel(node.title, span * rMid, edge.rOuter - edge.rInner, `${(_d = node.progress) != null ? _d : 0}%`);
         if (text) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
@@ -1662,7 +1722,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       let cursor = startAngle;
       node.children.forEach((c, i) => {
         const cSpan = shares[i] * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle }, i);
+        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle });
         cursor += cSpan;
       });
     };
@@ -1704,17 +1764,17 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     map.appendChild(el);
   }
   /**
-   * 整图共用的一束"光"：userSpaceOnUse 让渐变按全图坐标算，所以每个扇区取的是
-   * 自己那一段，拼起来是一个中心偏上的光源 + 外圈压暗，而不是每格各打一盏灯。
-   * 两端都极淡，浅色主题下白那一半基本看不见、只剩外圈的暗角。
+   * 每个块自己的一束光：objectBoundingBox 让渐变按**各自**的外接框算，
+   * 所以一块扇区从上半到下半有极淡的明暗过渡，而不是全图共用一个光源
+   * （全图那个做过一版，压在一圈同浓淡的扇区上根本看不出来）。
+   * 两端都极淡，亮色主题下白的那半基本看不见、只剩边缘一点暗角。
    */
   sheenGradient() {
     const grad = document.createElementNS(SVG_NS, "radialGradient");
     grad.id = this.sheenId;
-    grad.setAttribute("gradientUnits", "userSpaceOnUse");
-    grad.setAttribute("cx", String(CX));
-    grad.setAttribute("cy", String(CY * 0.86));
-    grad.setAttribute("r", String(MAX_R * 1.15));
+    grad.setAttribute("cx", "0.5");
+    grad.setAttribute("cy", "0.32");
+    grad.setAttribute("r", "0.85");
     const stop = (offset, color, opacity) => {
       const s = document.createElementNS(SVG_NS, "stop");
       s.setAttribute("offset", offset);
@@ -1722,9 +1782,9 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       s.setAttribute("stop-opacity", opacity);
       grad.appendChild(s);
     };
-    stop("0", "#ffffff", "0.07");
-    stop("45%", "#ffffff", "0");
-    stop("100%", "#000000", "0.1");
+    stop("0", "#ffffff", "0.1");
+    stop("55%", "#ffffff", "0");
+    stop("100%", "#000000", "0.12");
     return grad;
   }
   select(id) {
@@ -1971,7 +2031,7 @@ var GanttView = class extends import_obsidian10.ItemView {
     const container = this.rootEl.createDiv({ cls: "goalscape-gantt-container" });
     const width = container.clientWidth || 800;
     const chartWidth = width - LABEL_WIDTH;
-    const hues = branchColors(scape.mainGoal);
+    const fills = branchFills(scape.mainGoal);
     const header = container.createDiv({ cls: "goalscape-gantt-header" });
     header.style.paddingLeft = `${LABEL_WIDTH}px`;
     const months = this.getMonthTicks(minTime, maxTime);
@@ -1999,7 +2059,7 @@ var GanttView = class extends import_obsidian10.ItemView {
       bar.style.left = `${left}px`;
       bar.style.width = `${barWidth}px`;
       bar.style.height = `${BAR_HEIGHT}px`;
-      bar.style.backgroundColor = (_a = hues.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR;
+      bar.style.backgroundColor = (_a = fills.get(node.id)) != null ? _a : DEFAULT_BRANCH_COLOR;
       const fill = bar.createDiv({ cls: "goalscape-gantt-fill" });
       fill.style.width = `${(_b = node.progress) != null ? _b : 0}%`;
       const handle = bar.createDiv({ cls: "goalscape-gantt-handle" });
@@ -2324,7 +2384,7 @@ async function exportPng(svgEl, scale = 2) {
 }
 function exportCsv(scape) {
   const rows = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
-  const hues = branchColors(scape.mainGoal);
+  const fills = branchFills(scape.mainGoal);
   const walk = (node, depth, parentTitle) => {
     var _a, _b, _c, _d;
     rows.push([
@@ -2334,7 +2394,7 @@ function exportCsv(scape) {
       (_b = node.due) != null ? _b : "",
       (_c = node.start) != null ? _c : "",
       node.tags.join("; "),
-      (_d = hues.get(node.id)) != null ? _d : "",
+      (_d = fills.get(node.id)) != null ? _d : "",
       String(depth),
       parentTitle
     ]);

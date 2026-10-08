@@ -6,18 +6,13 @@
 import { Setting, Notice, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode } from "../data/types";
+import { PALETTE_SWATCHES } from "../data/palette";
 import { renameGoal, adjustImportance } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
 import { promptInput } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
 const BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
-
-/** 面板色盘预设：全部 6 位小写，与 normalizeHex 的归一化结果同形 */
-const COLOR_PALETTE = [
-  "#f87171", "#fb923c", "#fbbf24", "#4ade80", "#2dd4bf",
-  "#38bdf8", "#818cf8", "#c084fc", "#f472b6", "#a3a3a3",
-];
 
 function splitCsv(raw: string): string[] {
   return raw
@@ -296,7 +291,7 @@ export class InfoPanel {
     if (!node.color) auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, undefined));
 
-    for (const hex of COLOR_PALETTE) {
+    for (const hex of PALETTE_SWATCHES) {
       const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
       swatch.style.backgroundColor = hex;
       swatch.title = hex;

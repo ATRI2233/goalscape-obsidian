@@ -56,10 +56,38 @@ const step = (name, fn) => steps.push({ name, fn });
 
 const conn = { sock: null, id: 0, pend: new Map() };
 
+/** 这个窗口是不是装着我们插件的那个 vault（只看 Goalscapes 目录在不在，不依赖插件当前是启用还是禁用） */
+async function isGoalscapeVault(url) {
+  const ws = new WebSocket(url);
+  try {
+    await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
+    const r = await new Promise((res) => {
+      ws.send(JSON.stringify({
+        id: 1, method: "Runtime.evaluate",
+        params: { expression: "!!(window.app&&window.app.vault&&window.app.vault.getAbstractFileByPath('Goalscapes'))", returnByValue: true },
+      }));
+      ws.onmessage = (e) => { const m = JSON.parse(e.data); if (m.id === 1) res(m); };
+      setTimeout(() => res(null), 4000);
+    });
+    return !!r?.result?.result?.value;
+  } catch {
+    return false;
+  } finally {
+    try { ws.close(); } catch { /* 已关就不管 */ }
+  }
+}
+
 async function connect() {
-  const targets = await (await fetch(`${CDP}/json/list`)).json();
-  const page = targets.find((x) => x.type === "page");
-  if (!page) throw new Error(`${CDP} 上没有页面：Obsidian 是否以 --remote-debugging-port=9333 启动？`);
+  const pages = (await (await fetch(`${CDP}/json/list`)).json()).filter((x) => x.type === "page");
+  if (!pages.length) throw new Error(`${CDP} 上没有页面：Obsidian 是否以 --remote-debugging-port=9333 启动？`);
+  // 多 vault / 多窗口时 CDP 会把别的窗口排在第一个，选错页面只会得到"插件不存在"的假崩溃
+  let page = pages[0];
+  if (pages.length > 1) {
+    const hits = [];
+    for (const t of pages) if (await isGoalscapeVault(t.webSocketDebuggerUrl)) hits.push(t);
+    if (!hits.length) throw new Error(`${pages.length} 个窗口里没有一个开着 Goalscapes 目录：${pages.map((t) => t.title).join(" | ")}`);
+    page = hits[0];
+  }
   conn.sock = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((res, rej) => { conn.sock.onopen = res; conn.sock.onerror = rej; });
   conn.sock.addEventListener("message", (e) => {
@@ -569,7 +597,7 @@ const BRANCHES = {
   ],
 };
 
-/** #rrggbb → {h,s,l}，与 radialGeometry 的 hexToHsl 同式；断言只比色相/饱和度/明度 */
+/** #rrggbb → {h,s,l}（HSL）：只用来比较**两个渲染结果之间**的关系，不去对账"存进数据的那个 hex" */
 function hsl(hex) {
   const n = parseInt(hex.slice(1), 16);
   const [r, g, b] = [16, 8, 0].map((sh) => ((n >> sh) & 255) / 255);
@@ -582,21 +610,24 @@ function hsl(hex) {
   const h = 60 * (max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4);
   return { h, s, l };
 }
-/** 色相是个环：0 与 359 相差 1，不能直接相减比。容差 2 —— 扇区底色经过 hsl→hex→hsl 往返回来会漂 1° 上下 */
-const sameHue = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b)) < 2;
-/** 期望色相一律从"分支存的那个 hex"算出来，不写死数字：改 fixture 不会连带把断言写错 */
-const hueOf = (hex) => hsl(hex).h;
-const BLUE = hueOf(BRANCHES.children[0].color);
-const PINK = hueOf(BRANCHES.children[1].color);
-/** 面板色盘第一格（改色步骤点的就是它）与没配色分支的兜底色相 */
-const RED = hueOf("#f87171");
-const GREEN = hueOf("#4ade80");
+/**
+ * 色相是个环：0 与 359 相差 1，不能直接相减。容差 20 —— 底色由 OKLCH 生成，
+ * 同一个 OKLCH 色相在不同明度下折算回 HSL 会漂十几度（绿色漂得最狠），但绝不会漂到隔壁分支那边去。
+ */
+const sameHue = (a, b) => Math.min(Math.abs(a - b), 360 - Math.abs(a - b)) < 20;
+/** WCAG 相对亮度：层级阶梯只断言"谁比谁亮"，基调怎么调都不用改断言 */
+function lum(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = (s) => ((n >> s) & 255) / 255;
+  return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
+}
 
-/** 读当前画布上每个扇区的 fill（色相断言都从这份快照算）；调用方自己 return fills */
+/** 读当前画布上每个扇区的 fill；调用方自己 return fills */
 const FILLS = `const fills={};
     for(const p of document.querySelectorAll('svg.goalscape-radial-svg path[data-id]'))
       fills[p.getAttribute('data-id')]=p.getAttribute('fill');`;
 const hueMap = (f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, Math.round(hsl(v).h)]));
+const byLum = (f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, `${v}/${lum(v).toFixed(3)}`]));
 
 step("color 分支统一色：色系只在二级、其余层级调明度", async () => {
   await useTmpMap();
@@ -607,20 +638,21 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     ${FILLS}
     return fills;})()`);
   const H = (id) => hsl(painted[id]);
-  ok("分支里每一层都是二级存的那个色相",
-    ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"].every((id) => sameHue(H(id).h, BLUE)),
+  // 亮度只跟**同一条分支**的各层比：色相本身带明度校正（黄色天生比蓝色亮），
+  // 跨色相比亮度量的不是层级，会把"绿色中心盘比蓝色分支亮"误判成阶梯坏了
+  ok("同一条分支：同层的兄弟完全同色、逐层变亮",
+    painted["n-B-done"] === painted["n-B-zero"]
+      && lum(painted["n-Blue"]) < lum(painted["n-B-done"])
+      && lum(painted["n-B-mid"]) < lum(painted["n-B-mid-leaf"]),
+    JSON.stringify(byLum(painted)));
+  // 容差 20：底色由 OKLCH 生成，同一个 OKLCH 色相折算回 HSL 会随浓淡漂十几度（绿色漂得最狠）
+  ok("不同分支各自成色；没配色的分支与中心盘同属默认色系、但按自己的层级取浓淡",
+    !sameHue(H("n-Blue").h, H("n-Pink").h) && sameHue(H("n-Pink").h, H("n-P-leaf").h)
+      && sameHue(H("n-Plain").h, H("n-Root").h) && painted["n-Plain"] !== painted["n-Root"],
     JSON.stringify(hueMap(painted)));
-  ok("隔壁分支与没配色的分支各自成色，中心盘用默认色相",
-    sameHue(H("n-Pink").h, PINK) && sameHue(H("n-P-leaf").h, PINK)
-      && sameHue(H("n-Plain").h, GREEN) && sameHue(H("n-Root").h, GREEN),
-    JSON.stringify(hueMap(painted)));
-  // 饱和度是"选色"自己的属性，进度不许再碰它：同一条分支上 0% 和 100% 的底色只差明度
-  const picked = hsl(BRANCHES.children[0].color);
-  ok("底色饱和度来自选色，不再被进度覆盖（同分支 0% 与 100% 只差环层明度）",
-    Math.abs(H("n-B-zero").s - picked.s) <= 3 && Math.abs(H("n-B-done").s - picked.s) <= 3
-      && Math.abs(H("n-B-zero").s - H("n-B-done").s) <= 1 && sameHue(H("n-B-done").h, H("n-B-zero").h)
-      && H("n-B-done").l !== H("n-B-zero").l,
-    JSON.stringify({ picked: Math.round(picked.s), zero: painted["n-B-zero"], done: painted["n-B-done"] }));
+  ok("进度不参与底色（同层 0% 与 100% 是同一个 hex）",
+    painted["n-B-done"] === painted["n-B-zero"], `${painted["n-B-done"]} vs ${painted["n-B-zero"]}`);
+
 
   // 进度改画在外缘：map 里每个节点是"扇区 → 光源 → 进度条"三连，
   // 按 DOM 顺序把装饰层归给最近的 data-id 扇区，不用给它们再挂一个 id
@@ -643,6 +675,7 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
       grad:(()=>{const g=document.querySelector('svg.goalscape-radial-svg radialGradient');
         if(!g) return null;
         return {id:g.id, units:g.getAttribute('gradientUnits'),
+          cx:g.getAttribute('cx'), cy:g.getAttribute('cy'), r:g.getAttribute('r'),
           stops:[...g.children].map(s=>s.getAttribute('stop-opacity')),
           used:[...document.querySelectorAll('.goalscape-sheen')]
             .every(p=>p.getAttribute('fill')==='url(#'+g.id+')')};})()};})()`);
@@ -651,9 +684,11 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     Math.abs(ratio("n-B-zero")) < 0.01 && Math.abs(ratio("n-B-done") - 1) < 0.01
       && Math.abs(ratio("n-B-mid") - 0.5) < 0.02 && Math.abs(ratio("n-Blue") - 0.5) < 0.02,
     JSON.stringify({ zero: ratio("n-B-zero"), done: ratio("n-B-done"), mid: ratio("n-B-mid"), blue: ratio("n-Blue") }));
-  ok("每个扇区一层光源 + 一条进度条（没走到的地方不留轨道）",
-    rim.sectors === rim.sheens && rim.sectors === rim.rimCount && rim.grad && rim.grad.used && rim.grad.stops.length === 3
-      && rim.grad.units === "userSpaceOnUse" && /^goalscape-sheen-\d+$/.test(rim.grad.id),
+  // 光源是**每个块自己**的一束：gradientUnits 缺省即 objectBoundingBox，按各自外接框算
+  ok("每个扇区一层自己的光源（objectBoundingBox）+ 一条进度条，没走到的地方不留轨道",
+    rim.sectors === rim.sheens && rim.sectors === rim.rimCount && rim.grad && rim.grad.used
+      && rim.grad.units === null && rim.grad.cx === "0.5" && rim.grad.stops.length === 3
+      && /^goalscape-sheen-\d+$/.test(rim.grad.id),
     JSON.stringify({ sectors: rim.sectors, sheens: rim.sheens, rimCount: rim.rimCount, grad: rim.grad }));
   ok("整组一份柔和投影（投影打在组上，不是逐扇区）",
     /drop-shadow/.test(rim.mapFilter), rim.mapFilter);
@@ -685,15 +720,21 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
   const recolored = await json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select('n-Blue');
     await new Promise(r=>setTimeout(r,350));
-    document.querySelector('.goalscape-panel .goalscape-swatch[title="#f87171"]')
-      .dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    // 点色盘第一格（取色器和 Auto 的 title 不是 hex），不写死 hex：色盘由 palette.ts 生成，会跟着基调变
+    const sw=[...document.querySelectorAll('.goalscape-panel .goalscape-swatch')].find(s=>(s.title||'').startsWith('#'));
+    const pickedHex=sw.title;
+    sw.dispatchEvent(new MouseEvent('click',{bubbles:true}));
     await new Promise(r=>setTimeout(r,600));
     ${FILLS}
-    return fills;})()`);
-  ok("改二级节点一次，整条分支（含叶子）同一次渲染里一起变、别的分支不动",
-    ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"].every((id) => sameHue(hsl(recolored[id]).h, RED))
-      && sameHue(hsl(recolored["n-P-leaf"]).h, PINK),
-    JSON.stringify(hueMap(recolored)));
+    return {fills, pickedHex};})()`);
+  const BLUE_IDS = ["n-Blue", "n-B-done", "n-B-zero", "n-B-mid", "n-B-mid-leaf"];
+  ok("改二级节点一次：整条分支同一次渲染里一起变、别的分支一格像素都不动",
+    BLUE_IDS.every((id) => recolored.fills[id] !== painted[id])
+      && BLUE_IDS.every((id) => sameHue(hsl(recolored.fills[id]).h, hsl(recolored.fills["n-Blue"]).h))
+      && recolored.fills["n-Pink"] === painted["n-Pink"] && recolored.fills["n-P-leaf"] === painted["n-P-leaf"],
+    JSON.stringify({ before: hueMap(painted), after: hueMap(recolored.fills) }));
+  ok("色盘上看到的颜色就是图上那一支的颜色（预设幂等，不会面板一个色、图上一个色）",
+    recolored.fills["n-Blue"] === recolored.pickedHex, `${recolored.pickedHex} vs ${recolored.fills["n-Blue"]}`);
 
   await json(`(async()=>{
     const v=${PL}.radialViews()[0]; v.select('n-B-mid');
@@ -714,13 +755,14 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
       .find(r=>r.querySelector('.setting-item-name')?.textContent.trim()==='Brightness');
     let n=null; (function w(x){ if(x.id==='n-B-mid') n=x; x.children.forEach(w); })(${PL}.store.scape.mainGoal);
     return {fills, slider:row.querySelector('input[type=range]').value, brightness:n.brightness};})()`);
-  ok("明度滑杆只压暗本节点：色相不变、明度降 15、子节点不受牵连",
+  ok("明度滑杆只压暗本节点：色相不变、子节点一格像素不受牵连",
     dimmed.slider === "-15" && dimmed.brightness === -15
-      && Math.abs(hsl(dimmed.fills["n-B-mid"]).l - (hsl(recolored["n-B-mid"]).l - 15)) < 1.5
-      && Math.abs(hsl(dimmed.fills["n-B-mid-leaf"]).l - hsl(recolored["n-B-mid-leaf"]).l) < 1.5
-      && sameHue(hsl(dimmed.fills["n-B-mid"]).h, RED),
+      && lum(dimmed.fills["n-B-mid"]) < lum(recolored.fills["n-B-mid"])
+      && dimmed.fills["n-B-mid-leaf"] === recolored.fills["n-B-mid-leaf"]
+      && sameHue(hsl(dimmed.fills["n-B-mid"]).h, hsl(recolored.fills["n-B-mid"]).h),
     JSON.stringify({ slider: dimmed.slider, brightness: dimmed.brightness,
-      mid: Math.round(hsl(dimmed.fills["n-B-mid"]).l), leaf: Math.round(hsl(dimmed.fills["n-B-mid-leaf"]).l) }));
+      mid: `${dimmed.fills["n-B-mid"]}/${lum(dimmed.fills["n-B-mid"]).toFixed(3)}`,
+      leaf: dimmed.fills["n-B-mid-leaf"] }));
 
   const rehomed = await json(`(async()=>{
     ${PL}.store.mutate(s=>{
@@ -732,8 +774,10 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     ${FILLS}
     return fills;})()`);
   ok("挪到别的分支下自动跟新分支的色相（旧色值根本不存在，无需同步）",
-    sameHue(hsl(rehomed["n-B-mid"]).h, PINK) && sameHue(hsl(rehomed["n-B-mid-leaf"]).h, PINK),
-    JSON.stringify(hueMap(rehomed)));
+    sameHue(hsl(rehomed["n-B-mid"]).h, hsl(rehomed["n-Pink"]).h)
+      && sameHue(hsl(rehomed["n-B-mid-leaf"]).h, hsl(rehomed["n-Pink"]).h)
+      && !sameHue(hsl(rehomed["n-B-mid"]).h, hsl(recolored.fills["n-B-mid"]).h),
+    JSON.stringify({ after: hueMap(rehomed), before: hueMap(recolored.fills) }));
 
   const onDisk = await json(`app.vault.adapter.read(${JSON.stringify(TMP_PATH)}).then(t=>JSON.parse(t))`);
   const withColor = [];
