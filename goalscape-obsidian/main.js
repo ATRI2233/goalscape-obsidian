@@ -390,8 +390,8 @@ var CY = VIEW_SIZE / 2;
 var MAX_R = VIEW_SIZE / 2 - 20;
 var PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
 var SECTOR_GAP_ARC = 7;
-var BAND_STEPS = [0.6, 1, 1.3];
-var BAND_DEFAULT_INDEX = 1;
+var BAND_STEPS = [0.3, 0.6, 1, 1.3];
+var BAND_DEFAULT_INDEX = 2;
 var INK_LIGHT = "#ffffff";
 var INK_DARK = "#0f172a";
 var LABEL_FONT = 14;
@@ -660,7 +660,7 @@ var PromptModal = class extends import_obsidian2.Modal {
 };
 
 // src/views/infoPanel.ts
-var BAND_LABELS = ["Thin ring", "Standard ring", "Thick ring"];
+var BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
 var COLOR_PALETTE = [
   "#f87171",
   "#fb923c",
@@ -887,7 +887,7 @@ var InfoPanel = class {
     );
   }
   /**
-   * 环带厚度三档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
+   * 环带厚度四档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
    * 档位是**每个节点自己的**，所以不同分支可以长到不同半径、层与层互不对齐；
    * "标准"档不落字段（bandScale 未设即默认），免得整份 JSON 被一堆 1 淹没。
    */
@@ -904,7 +904,7 @@ var InfoPanel = class {
       }
       btn.setAttr("aria-label", BAND_LABELS[i]);
       (0, import_obsidian3.setTooltip)(btn, BAND_LABELS[i], { placement: "top" });
-      btn.createEl("i").style.height = `${Math.max(3, Math.round(7 * step))}px`;
+      btn.createEl("i").style.height = `${Math.max(3, Math.round(8 * step))}px`;
       btn.addEventListener("click", () => {
         this.mutate((s) => {
           const found = findNode(s.mainGoal, node.id);

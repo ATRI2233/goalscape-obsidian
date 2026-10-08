@@ -10,7 +10,7 @@ import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
 import { promptInput } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
-const BAND_LABELS = ["Thin ring", "Standard ring", "Thick ring"];
+const BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
 
 /** 面板色盘预设：全部 6 位小写，与 normalizeHex 的归一化结果同形 */
 const COLOR_PALETTE = [
@@ -267,7 +267,7 @@ export class InfoPanel {
   }
 
   /**
-   * 环带厚度三档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
+   * 环带厚度四档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
    * 档位是**每个节点自己的**，所以不同分支可以长到不同半径、层与层互不对齐；
    * "标准"档不落字段（bandScale 未设即默认），免得整份 JSON 被一堆 1 淹没。
    */
@@ -288,7 +288,7 @@ export class InfoPanel {
       btn.setAttr("aria-label", BAND_LABELS[i]);
       setTooltip(btn, BAND_LABELS[i], { placement: "top" });
       // 小横条的高度按档位比例算，免得改了 BAND_STEPS 忘了改这里
-      btn.createEl("i").style.height = `${Math.max(3, Math.round(7 * step))}px`;
+      btn.createEl("i").style.height = `${Math.max(3, Math.round(8 * step))}px`;
       btn.addEventListener("click", () => {
         this.mutate((s) => {
           const found = findNode(s.mainGoal, node.id);

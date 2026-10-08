@@ -383,7 +383,7 @@
   width: 100%;
 }
 
-/* 环带厚度三档挤在 Importance 滑杆右边时，滑杆要让位而不是把按钮顶出面板 */
+/* 环带厚度四档挤在 Importance 滑杆右边时，滑杆要让位而不是把按钮顶出面板 */
 .goalscape-panel .setting-item-control:has(.goalscape-band) .slider-container {
   width: auto;
   flex: 1 1 auto;

@@ -416,7 +416,7 @@ step("canvas 段复用已有白板、不重导出", async () => {
 /** 刻意不对称的合成树：分支深度不同、环厚不同、兄弟和既有 <100（留白）也有 >100（溢出） */
 const FOREST = {
   title: "Root", importance: 100, children: [
-    { title: "Thick", importance: 40, bandScale: 1.6, children: [
+    { title: "Thick", importance: 40, bandScale: 1.3, children: [
       { title: "A1", importance: 30, children: [{ title: "A1a", importance: 50 }, { title: "A1b", importance: 50 }] },
       { title: "A2", importance: 20 },
     ] },
@@ -528,17 +528,18 @@ step("forest 递归几何：留白 / 每节点环厚 / 不溢出 / 标签截断"
     // 父块与别的分支必须原样（早先按"累计最厚链"归一 unit，改一处全图跟着变宽窄）
     const snap=()=>{const o={};for(const [id,s] of v.nodePositions)o[id]=[Math.round(s.rInner),Math.round(s.rOuter)];return o;};
     const shapesBefore=snap();
-    btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    btns(3).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
     out.thick=byTitle('Over').bandScale;
     const shapesThick=snap();
     out.moved=Object.keys(shapesThick).filter((k)=>shapesThick[k].join()!==(shapesBefore[k]||[]).join()).sort();
-    btns(1).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
+    btns(2).dispatchEvent(new MouseEvent('click',{bubbles:true})); await new Promise(r=>setTimeout(r,400));
     out.back=byTitle('Over').bandScale;
     out.backToSame=snap()[ 'n-Root'].join()===shapesBefore['n-Root'].join() && byTitle('Over').bandScale===undefined;
     out.activeAfter=[...row().querySelectorAll('.goalscape-band-btn')].filter(b=>b.classList.contains('is-active')).length;
+    out.count=row().querySelectorAll('.goalscape-band-btn').length;
     return out;})()`);
-  ok("面板三档按钮：默认高亮标准档，厚档写最大值、回标准档删掉字段",
-    band.title === "Over" && band.before === undefined && band.activeAtStart === 1 &&
+  ok("面板四档按钮：默认高亮标准档（第 3 个），最厚档写 >1 的值、回标准档删掉字段",
+    band.title === "Over" && band.count === 4 && band.before === undefined && band.activeAtStart === 2 &&
     band.thick > 1 && band.back === undefined && band.activeAfter === 1 && band.backToSame, JSON.stringify(band));
   ok("调一个块的环厚只影响它自己和它的后代，父块与别的分支不变",
     band.moved.join(",") === "n-B1,n-B2,n-Over", JSON.stringify(band.moved));

@@ -19,16 +19,14 @@ export const CX = VIEW_SIZE / 2;
 export const CY = VIEW_SIZE / 2;
 export const MAX_R = VIEW_SIZE / 2 - 20;
 
-const PROGRESS_STOPS = ["#f87171", "#fb923c", "#fbbf24", "#4ade80"];
-
 /** 扇区之间的留白按"弧长"而非固定角度：外环半径大，同样角度会裂出很宽的缝 */
 const SECTOR_GAP_ARC = 7;
 
-/** 环带厚度的三档（面板上的 薄/标准/厚）；未设 bandScale 的节点用第 2 档。
+/** 环带厚度的四档（面板上从左到右：极薄/薄/标准/厚）；未设 bandScale 的节点用"标准"档。
  *  标准档刻意等于旧版"等宽环"的厚度，所以没调过的图看起来和以前一致；厚档只加 30%，
  *  再加就挤占可读面积、实际用不上 */
-export const BAND_STEPS = [0.6, 1, 1.3];
-export const BAND_DEFAULT_INDEX = 1;
+export const BAND_STEPS = [0.3, 0.6, 1, 1.3];
+export const BAND_DEFAULT_INDEX = 2;
 
 const INK_LIGHT = "#ffffff";
 const INK_DARK = "#0f172a";
@@ -201,30 +199,64 @@ export function labelInk(sectorColor: string): { fill: string; halo: string } {
     : { fill: INK_LIGHT, halo: "rgba(15, 23, 42, 0.55)" };
 }
 
-/** 把 #rrggbb 按 percent 混色：正值向白提亮、负值向黑压暗，用于拉开环层与同级扇区的对比 */
-function shadeColor(hex: string, percent: number): string {
+/** #rrggbb → HSL（h 0-360，s/l 0-100）；解析失败退回默认绿，保证永远有可读的底色 */
+function hexToHsl(hex: string): { h: number; s: number; l: number } {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
-  if (!m) return hex;
+  if (!m) return { h: DEFAULT_SECTOR.h, s: DEFAULT_SECTOR.s, l: DEFAULT_SECTOR.l };
   const n = parseInt(m[1], 16);
-  const t = Math.max(-100, Math.min(100, percent)) / 100;
-  const target = t >= 0 ? 255 : 0;
-  const k = Math.abs(t);
-  const mix = (shift: number) => {
-    const c = (n >> shift) & 255;
-    return Math.round(c + (target - c) * k);
-  };
-  const r = mix(16), g = mix(8), b = mix(0);
-  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+  const r = ((n >> 16) & 255) / 255;
+  const g = ((n >> 8) & 255) / 255;
+  const b = (n & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d === 0) return { h: DEFAULT_SECTOR.h, s: 0, l: l * 100 };
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h: number;
+  if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  return { h: h * 60, s: s * 100, l: l * 100 };
+}
+
+/** HSL → #rrggbb：扇区底色仍以十六进制交给 fill / labelInk / 导出，不引入 hsl() 字符串 */
+function hslToHex(h: number, s: number, l: number): string {
+  const sn = Math.max(0, Math.min(100, s)) / 100;
+  const ln = Math.max(0, Math.min(100, l)) / 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = sn * Math.min(ln, 1 - ln);
+  const f = (n: number) => ln - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const to = (v: number) => Math.round(255 * v).toString(16).padStart(2, "0");
+  return `#${to(f(0))}${to(f(8))}${to(f(4))}`;
 }
 
 /**
- * 中心盘压暗、外环逐层提亮，再按同级序号微调明度：
- * 进度全相同（如整树 0%）时也能分辨环层与相邻扇区
+ * 进度 → 饱和度：0% 进度 50%（发灰、看着就"没做成"），100% 进度 100%（纯色）。
+ * 这是**所有**扇区统一的表达，不再区分"设过色"和"没设色"。
+ */
+export function progressSaturation(progress: number): number {
+  const p = Math.max(0, Math.min(100, progress || 0));
+  return SATURATION_MIN + SATURATION_SPAN * (p / 100);
+}
+
+/**
+ * 扇区底色：色相取节点自己颜色的色相（没设色就用默认绿），**饱和度即进度**。
+ *
+ * 旧实现是"没设色 → 按进度在红/橙/黄/绿四档里挑一档；设了色 → 进度完全不影响"，
+ * 所以进度和颜色的关系只对默认那一条色带成立，手工配的颜色一律不随进度变。
+ * 环层与相邻扇区的区分因此只能挪到**明度**上：shadeColor 那种往白/黑混的做法
+ * 会连带把饱和度冲掉，等于自己盖住进度信号。
+ *
+ * 纯灰（色相无意义）时借用默认绿色相，否则灰底的进度就没地方显示了。
  */
 export function nodeColor(node: GoalNode, depth: number, siblingIndex = 0): string {
-  const base = node.color || PROGRESS_STOPS[Math.min(PROGRESS_STOPS.length - 1, Math.floor((node.progress ?? 0) / 25))];
-  if (depth === 0) return shadeColor(base, -22);
-  return shadeColor(base, Math.min(depth, 4) * 9 + (siblingIndex % 3) * 6);
+  const base = hexToHsl(node.color || DEFAULT_SECTOR_HEX);
+  const hue = base.s < 5 ? DEFAULT_SECTOR.h : base.h;
+  const light = Math.max(24, Math.min(76,
+    base.l + (depth === 0 ? -12 : Math.min(depth, 4) * 3 + (siblingIndex % 3) * 2)
+  ));
+  return hslToHex(hue, progressSaturation(node.progress ?? 0), light);
 }
 
 const FULL_CIRCLE_EPSILON = 1e-4;
