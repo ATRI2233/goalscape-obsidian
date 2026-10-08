@@ -3,7 +3,7 @@
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode } from "../data/types";
+import { GoalNode, findNode } from "../data/types";
 import { renameGoal } from "../data/crud";
 import { VIEW_LIST } from "./viewTypes";
 import { createViewSwitcher } from "./viewSwitcher";
@@ -51,7 +51,7 @@ export class GoalListView extends ItemView {
       toggle.textContent = node.collapsed ? "▶" : "▼";
       toggle.addEventListener("click", () => {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          const found = findNode(s.mainGoal, node.id)?.node;
           if (found) found.collapsed = !found.collapsed;
         });
       });
@@ -66,7 +66,7 @@ export class GoalListView extends ItemView {
     checkbox.addEventListener("change", () => {
       if (!node.children.length) {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          const found = findNode(s.mainGoal, node.id)?.node;
           if (found) found.progress = checkbox.checked ? 100 : 0;
         });
       }
@@ -110,7 +110,7 @@ export class GoalListView extends ItemView {
       });
       slider.addEventListener("change", () => {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          const found = findNode(s.mainGoal, node.id)?.node;
           if (found) found.progress = Number(slider.value);
         });
       });
@@ -120,15 +120,5 @@ export class GoalListView extends ItemView {
     for (const child of node.children) {
       this.renderNode(child, depth + 1);
     }
-  }
-
-  private findInScape(root: GoalNode, id: string): GoalNode | null {
-    const stack: GoalNode[] = [root];
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (n.id === id) return n;
-      stack.push(...n.children);
-    }
-    return null;
   }
 }

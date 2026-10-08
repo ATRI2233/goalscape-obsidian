@@ -14,7 +14,7 @@ import {
   SVG_NS, VIEW_SIZE, CX, CY,
   arcPath, bandScaleOf, bevelArc, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
   SectorShape,
-} from "./radialGeometry";
+} from "../geometry/radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
 import { buildGoalMenu } from "./radialMenu";
 import { VIEW_RADIAL } from "./viewTypes";

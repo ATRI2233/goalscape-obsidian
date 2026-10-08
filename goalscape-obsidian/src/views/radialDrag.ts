@@ -13,7 +13,7 @@ import {
   hitTestSector,
   normalizeAngleInto,
   toLogicalPoint,
-} from "./radialGeometry";
+} from "../geometry/radialGeometry";
 
 /** 拖拽控制器向视图借用的现场，每次 move/up 都重新查询 */
 export interface DragSurface {

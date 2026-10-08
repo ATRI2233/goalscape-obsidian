@@ -3,7 +3,7 @@
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, DEFAULT_BRANCH_COLOR, flattenTree } from "../data/types";
+import { GoalNode, DEFAULT_BRANCH_COLOR, findNode, flattenTree } from "../data/types";
 import { branchFills } from "../data/palette";
 import { VIEW_GANTT } from "./viewTypes";
 import { createViewSwitcher } from "./viewSwitcher";
@@ -141,7 +141,7 @@ export class GanttView extends ItemView {
         const pct = Math.round((x / rect.width) * 100);
         if (!node.children.length) {
           this.plugin.store.mutate((s) => {
-            const found = this.findInScape(s.mainGoal, node.id);
+            const found = findNode(s.mainGoal, node.id)?.node;
             if (found) found.progress = pct;
           });
         } else {
@@ -167,15 +167,5 @@ export class GanttView extends ItemView {
       d.setMonth(d.getMonth() + 1);
     }
     return ticks;
-  }
-
-  private findInScape(root: GoalNode, id: string): GoalNode | null {
-    const stack: GoalNode[] = [root];
-    while (stack.length) {
-      const n = stack.pop()!;
-      if (n.id === id) return n;
-      stack.push(...n.children);
-    }
-    return null;
   }
 }

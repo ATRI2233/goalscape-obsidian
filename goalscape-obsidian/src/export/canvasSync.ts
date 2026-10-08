@@ -2,7 +2,7 @@
 // 把 GoalScape 导出为 JSON Canvas (.canvas) 格式，可在 Obsidian 原生 Canvas 里打开编辑。
 
 import { GoalNode, GoalScape } from "../data/types";
-import { bandScaleOf, childShares } from "../views/radialGeometry";
+import { bandScaleOf, childShares } from "../geometry/radialGeometry";
 
 interface CanvasNode {
   id: string;

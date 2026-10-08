@@ -504,7 +504,7 @@ function extractSubtree(scape, id) {
   return found ? cloneSubtree(found.node) : null;
 }
 
-// src/views/radialGeometry.ts
+// src/geometry/radialGeometry.ts
 var SVG_NS = "http://www.w3.org/2000/svg";
 var VIEW_SIZE = 1e3;
 var CX = VIEW_SIZE / 2;
@@ -1940,7 +1940,8 @@ var GoalListView = class extends import_obsidian9.ItemView {
       toggle.textContent = node.collapsed ? "\u25B6" : "\u25BC";
       toggle.addEventListener("click", () => {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          var _a2;
+          const found = (_a2 = findNode(s.mainGoal, node.id)) == null ? void 0 : _a2.node;
           if (found)
             found.collapsed = !found.collapsed;
         });
@@ -1955,7 +1956,8 @@ var GoalListView = class extends import_obsidian9.ItemView {
     checkbox.addEventListener("change", () => {
       if (!node.children.length) {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          var _a2;
+          const found = (_a2 = findNode(s.mainGoal, node.id)) == null ? void 0 : _a2.node;
           if (found)
             found.progress = checkbox.checked ? 100 : 0;
         });
@@ -2004,7 +2006,8 @@ var GoalListView = class extends import_obsidian9.ItemView {
       });
       slider.addEventListener("change", () => {
         this.plugin.store.mutate((s) => {
-          const found = this.findInScape(s.mainGoal, node.id);
+          var _a2;
+          const found = (_a2 = findNode(s.mainGoal, node.id)) == null ? void 0 : _a2.node;
           if (found)
             found.progress = Number(slider.value);
         });
@@ -2015,16 +2018,6 @@ var GoalListView = class extends import_obsidian9.ItemView {
     for (const child of node.children) {
       this.renderNode(child, depth + 1);
     }
-  }
-  findInScape(root, id) {
-    const stack = [root];
-    while (stack.length) {
-      const n = stack.pop();
-      if (n.id === id)
-        return n;
-      stack.push(...n.children);
-    }
-    return null;
   }
 };
 
@@ -2151,7 +2144,8 @@ var GanttView = class extends import_obsidian10.ItemView {
         const pct = Math.round(x / rect.width * 100);
         if (!node.children.length) {
           this.plugin.store.mutate((s) => {
-            const found = this.findInScape(s.mainGoal, node.id);
+            var _a;
+            const found = (_a = findNode(s.mainGoal, node.id)) == null ? void 0 : _a.node;
             if (found)
               found.progress = pct;
           });
@@ -2175,16 +2169,6 @@ var GanttView = class extends import_obsidian10.ItemView {
       d.setMonth(d.getMonth() + 1);
     }
     return ticks;
-  }
-  findInScape(root, id) {
-    const stack = [root];
-    while (stack.length) {
-      const n = stack.pop();
-      if (n.id === id)
-        return n;
-      stack.push(...n.children);
-    }
-    return null;
   }
 };
 

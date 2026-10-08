@@ -8,7 +8,7 @@ import type GoalscapePlugin from "../main";
 import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode } from "../data/types";
 import { paletteSwatches } from "../data/palette";
 import { renameGoal, adjustImportance } from "../data/crud";
-import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
+import { BAND_DEFAULT_INDEX, BAND_STEPS } from "../geometry/radialGeometry";
 import { promptInput } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */

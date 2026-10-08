@@ -6,8 +6,8 @@
 
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
-import type { LabelFit } from "../radialGeometry";
-import { fitLabel } from "../radialGeometry";
+import type { LabelFit } from "../../geometry/radialGeometry";
+import { fitLabel } from "../../geometry/radialGeometry";
 
 const CJK = /[\u2e80-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/;
 const widthOf = (t: string, f: number) =>

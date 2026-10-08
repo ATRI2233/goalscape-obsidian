@@ -1,4 +1,4 @@
-// src/views/radialGeometry.ts
+// src/geometry/radialGeometry.ts
 // 放射图的纯几何与配色：每节点的环带厚度、子级在父扇区里切走多少角度、扇区路径、
 // 标签对比度与截断、极坐标命中测试。render() 与拖拽命中测试共用这一套换算，
 // 避免"角度/半径"公式在两处各写一遍而漂移。
