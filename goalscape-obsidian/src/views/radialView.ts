@@ -116,7 +116,8 @@ export class RadialGoalMapView extends ItemView {
     this.rootEl.appendChild(svg);
 
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
-    const ringCount = Math.max(1, maxDepth);
+    // 环数 = 最深 depth 索引 + 1（depth 从 0 起）；写成 maxDepth 会让最外环画到 MAX_R 之外被裁切
+    const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
 
     const matchingIds = this.computeMatchingIds(scape);
@@ -348,7 +349,8 @@ export class RadialGoalMapView extends ItemView {
     const scape = this.plugin.store.scape;
     if (!scape) return null;
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
-    const ringCount = Math.max(1, maxDepth);
+    // 环数 = 最深 depth 索引 + 1（depth 从 0 起）；写成 maxDepth 会让最外环画到 MAX_R 之外被裁切
+    const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
     const depth = Math.floor(r / ringW);
 

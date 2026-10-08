@@ -761,7 +761,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
-    const ringCount = Math.max(1, maxDepth);
+    const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
     const matchingIds = this.computeMatchingIds(scape);
     const drawNode = (node, depth, startAngle, endAngle, parentStart, parentEnd) => {
@@ -1000,7 +1000,7 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     if (!scape)
       return null;
     const maxDepth = this.visibleDepth(scape.mainGoal, 0);
-    const ringCount = Math.max(1, maxDepth);
+    const ringCount = maxDepth + 1;
     const ringW = MAX_R / ringCount;
     const depth = Math.floor(r / ringW);
     for (const [id, pos] of this.nodePositions) {
