@@ -384,6 +384,32 @@ vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它�
   活动标签切回 `Untitled.md`。`life.goalscape.json` 在 12:31 被**用户本人**改动（三段 importance 归一成
   45.34/39.66/15、Relationships 下新增 "New Goal"、根 color `#57cb82`）——不是测试残留，**未回滚**。
 
+### UI 回归脚本收编：`test/ui-regression.mjs`（`npm run test:ui`，28 项 / 约 10s）
+- 把散在 `D:/tmp` 的 `tb_a|tb_b|tb_c.mjs` 合并成仓库里的一份常驻脚本，`npm test` 仍只管数据层
+  （UI 回归需要活着的 Obsidian + CDP，不能混进去当单测跑）。零新依赖，只用 Node 内置 `WebSocket`。
+  用法：`npm run test:ui`，或 `node test/ui-regression.mjs toolbar map` 按步骤名筛。
+- 三条改造要点（就是上一轮"哪一步最耗时"的答案落成的代码）：
+  - **断言按结构写、不按界面文案写**：类名后缀、`svg > *` 元素个数、`input[type]` 计数、
+    `/checked/.test(className)`。上一版 4 个"FAIL"全是期望写错（打勾类名是 `mod-checked`、
+    lucide 图标是 circle/line/rect 不是 path、控件是 4 个不是 3 个、刚建的文件 `TFile.size` 还没就绪）。
+  - **等待统一走 `waitFor` 轮询**（150ms 一次），替掉满地的 `setTimeout(…, 1400)`；整轮从"三个脚本手跑"
+    压到 10s 级。`ev()` 把页面异常和 CDP 超时都**抛出去**，避免静默拿到 `undefined` 再断言成假绿。
+  - **现场还原进 `finally`**：起始 `store.path`/主题/活动标签/`Goalscapes` 目录清单先快照，
+    无论中途怎么失败都删临时图（`ZZ_GS_UI_REGRESSION` + 它的 `.canvas` + 它开出的白板标签页）、
+    切回原图（顺带把 `data.json` 写回）、还原活动标签与主题，最后比对目录清单。
+    用户自己的图只读：mtime 变了只报 INFO 不回滚（多半是本人正在应用里改）。
+- **实测中澄清的一件事**：白板文件点开后的**字节数一定会变**（1231→953），但不是重导出——
+  `canvasToJson()` 用 `JSON.stringify(x, null, 2)` 带缩进，而 Obsidian 的白板视图打开后会用
+  自己的紧凑序列化器回写一次。所以"有没有被重算布局"必须按**节点数据**判：脚本改成
+  "手工把 node[0] 挪到 x=9999/y=-8888/改名 `ZZ-MARKER` → 再点 Canvas → 断言这三个值与节点数仍在"，
+  通过。之前按字节相等断言是错的断言，不是产品缺陷。
+- 覆盖：工具栏单行与旧类名无残留、分段按钮图标/单击切换/同标签页不堆标签、图名按钮 + 原生菜单打勾 +
+  切图 + 换图清选中、漏斗浮层开合/降饱和/圆点/Clear/点外面与 Esc 关闭、目录栏右键新建全链路、
+  Canvas 段原样打开、暗亮两主题截图（落在 `node_modules/.goalscape-ui/`）。
+- 前提写进文件头：Obsidian 带 `--remote-debugging-port=9333` 启动、**窗口在最前台**、
+  且脚本会 disable→enable 插件一次（别在手编辑正忙时跑）。
+
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
