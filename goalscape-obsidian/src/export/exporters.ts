@@ -94,7 +94,7 @@ export async function exportPng(svgEl: SVGSVGElement, scale = 2): Promise<Blob> 
 }
 
 export function exportCsv(scape: GoalScape): string {
-  const rows: string[][] = [["Title", "Importance", "Progress", "Due", "Start", "Responsible", "Tags", "Color", "Depth", "ParentTitle"]];
+  const rows: string[][] = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
   const walk = (node: GoalNode, depth: number, parentTitle: string) => {
     rows.push([
       node.title,
@@ -102,7 +102,6 @@ export function exportCsv(scape: GoalScape): string {
       String(node.progress ?? 0),
       node.due ?? "",
       node.start ?? "",
-      node.responsible.join("; "),
       node.tags.join("; "),
       node.color ?? "",
       String(depth),

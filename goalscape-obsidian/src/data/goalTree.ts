@@ -8,6 +8,9 @@ import { recalcTree } from "./rollup";
 
 export const DEFAULT_GOALSCAPE_PATH = "Goalscapes/life.goalscape.json";
 
+/** 已废弃字段：旧 JSON 里仍带着它，读档时清掉，落盘后自然消失 */
+type LegacyNode = GoalNode & { responsible?: unknown };
+
 /** Phase 1 默认结构：中心 Main Goal + 三段 L1 子目标 */
 export function createDefaultScape(): GoalScape {
   return {
@@ -107,7 +110,7 @@ export class GoalTreeStore {
     node.id ??= createGoalNode({ title: node.title ?? "Untitled" }).id;
     node.title ??= "Untitled";
     node.importance ??= 50;
-    node.responsible ??= [];
+    delete (node as LegacyNode).responsible;
     node.tags ??= [];
     node.children ??= [];
     node.children.forEach((c) => this.normalize(c));

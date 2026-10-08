@@ -225,11 +225,9 @@
     `life.goalscape.json` 前后都是 732 字节。
     注意坑：Obsidian Notice 默认存活约 4 秒，连续断言时必须先 `document.querySelectorAll('.notice').forEach(n=>n.remove())`，
     否则上一条的残留会被读成"合法值也报错"。
-- **待办（重要）**：应用内那次实测跑的是**归一化之前**的 main.js。`normalizeHex` 目前只有离线真值表 +
-  `tsc -noEmit` 干净，尚未在真实面板里跑过。仓库里的 `main.js` 也未重新构建 —— 因为另一个 agent 正在把
-  `radialView.ts` 拆成 `radialGeometry.ts`/`radialMenu.ts`/`radialDrag.ts` 并改 `focusFilter.ts`，
-  现在构建会把他们未验收的 WIP 一起打进产物。等拆分落地验收后：重建 → 部署 → 重跑 `color2.mjs`
-  确认 `#f0a` 存成 `#ff00aa` 且扇区仍按环层提亮。
+- ~~**待办（重要）**：应用内那次实测跑的是**归一化之前**的 main.js~~ 已结（2026-10-08 收口）：radialView 拆分
+  已验收，`npm run build` → 部署 → 重载 → 真实面板重跑，`#f0a` 落盘 `#ff00aa` 且扇区仍按环层提亮。
+  见"收口实测"一节。
 
 ### 数据层复核：`goalTree.ts` 无需改动
 - 逐条读过：`writeScape()` 的双空值拦截、`readFromPath()` 拒空文件、`adapter` 按路径读写绕开索引竞态、
@@ -238,25 +236,105 @@
   这是**故意保守**的：`scape` 保持旧值/undefined 时 `mutate()` 会直接 no-op，不会用空数据覆盖磁盘，
   所以只属于措辞不够精确，不改行为。
 
+### 测试基建（`src/data/__tests__/`，已入库）
+- 零新依赖：`npm test` → `test/run-tests.mjs` 用仓库里已有的 esbuild 把 `src/data/__tests__/*.test.ts`
+  打包成 ESM，交给 Node 内置的 `node:test` 跑（`--test-reporter=spec`，inline sourcemap 指回 .ts 行）。
+  产物在 `node_modules/.goalscape-tests/`，不入库。`npm test crud` 只跑单个文件。
+- `test/mocks/obsidian.ts`：obsidian 包只有 .d.ts 没有运行时，esbuild `alias` 把 `"obsidian"` 换成它
+  （TFile/TFolder/Notice + `window.setTimeout` polyfill）；`Notice.messages` 用来断言用户提示。
+- `test/helpers/fake-vault.ts`：内存版 vault/adapter，刻意复刻真实坑而不是绕开它——`createFolder`
+  撞已存在目录会抛 `Folder already exists.`、`adapter.write` 会派生 modify、`staleIndex` 能模拟
+  启动早期索引未就绪导致 `getAbstractFileByPath` 误报 null 的竞态。
+- 76 条断言锁住的都是本文档上面付过代价的回归点：深拷贝剪贴板、跨父级移动两端权重归一化、
+  rollup 加权（含权重和为 0 的退化分支）、mutate 先汇总再落盘、空文件/坏 version 拒绝解析、
+  写盘永不写空、自我写盘不重载、watch 只注册一次、switchTo 清挂起 reload。
+- 抽查过断言不是摆设：临时把 `extractSubtree` 改回返回活引用（1 条失败）、rollup 丢掉权重（7 条失败）、
+  去掉 mutate 的 `recalcTree`/`save`（1/3 条失败）、去掉 `renormalizeSiblings(target...)`（2 条失败）、
+  去掉写盘 self-silencing（1 条失败），改完即还原。两个等价变异体没被抓到，因为它们本身被更外层的护栏
+  挡住了（`writeScape` 的 `!content` 与 `!scape` 双保险；空文件即使不显式拒绝也会在 `JSON.parse` 抛错）。
+- 只覆盖数据层。视图/导出层（radialView/listView/ganttView/exporters/canvasSync/focusFilter）仍然只有
+  CDP 手工实测，没进这套基建 —— 它们依赖 Obsidian 运行时，Node 里跑不了。
+- 注：这套测试是照着 `responsible` 字段被废弃**之后**的模型写的（normalize 会把旧 JSON 里的
+  `responsible` 直接删掉，已有一条断言锁住）。`src/data/crud.ts` 注释里"测试脚本未入库"的措辞已过期。
+
+### 用户反馈：删掉 Responsible、右侧 Color 加色盘（已实现并在真实 Obsidian 实测）
+1. **Responsible 全链路删除**（用户不用这个字段）：`types.ts` 去掉字段与 `createGoalNode` 默认值；
+   `goalTree.normalize()` 改为**读档时 `delete` 掉旧键**（用交叉类型 `LegacyNode` 表达"历史字段"，不污染 `GoalNode`），
+   这样 vault 里历史 JSON 的 `"responsible": [...]` 会在下一次落盘时自然消失，而不是永远残留在文件里；
+   `crud.cloneSubtree` 不再拷、`exportCsv` 少一列、信息面板去掉 Responsible 设置项、
+   Focus Filter 去掉 Responsible 输入框与 `FilterCriteria.responsible`。
+2. **顶部那一排的语义（用户问"颜色栏和 Clear 是什么"）**：它是 Focus Filter，不是编辑工具。色块是
+   `input[type="color"]`，作用是**按颜色筛选**，而且 `matchesCriteria` 用 `node.color !== c.color` 严格比较 ——
+   只有手动设过颜色的节点才可能命中，按进度着色的节点永远筛不出来；控件一挂载就自带 `#4ade80` 默认值、
+   没有"未启用"的视觉态，只能靠 Clear 退出，所以极易被读成"给图上色"。Clear = 清空全部筛选条件。
+   **未改**：加 `Color` 文字标签/tooltip，或改成下拉列出"本图已用颜色"（顺带消掉严格相等的坑）——等用户点头。
+3. **右侧 Color 有盘了**（`infoPanel.ts`）：hex 文本框 + "Apply to subgoals" 那行下面加一排
+   `.goalscape-color-swatches`：原生取色器（**只监听 `change`**，取色面板里的 `input` 会随拖动连发，
+   每帧都落盘 + 重建整个面板）、10 个预设色块（`COLOR_PALETTE` 全取 6 位小写，好和 `normalizeHex`
+   的归一化结果对上）、"Auto" 块把 `color` 置回 undefined 即按进度着色。当前色对应块加
+   `.goalscape-swatch-active`。样式写在 `styles.css` "右侧信息面板"段末（Obsidian 自动加载插件目录的
+   styles.css，`install-plugin.bat` 已 copy 它，无需 `loadCss`）。
+- 验证状态（2026-10-08 收口）：`npm run build` 干净、`npm test` 76 项全过，已部署到 vault 并在真实 Obsidian
+  里用 CDP 实测，详见下一节"收口实测"。
+
+### 收口实测（2026-10-08，构建 + 部署 + 真实 Obsidian CDP 全量回归）
+产物：`npm run build`（tsc -noEmit + esbuild production）→ 复制 main.js/manifest.json/styles.css 到
+vault 插件目录（与 `install-plugin.bat` 同样的三个文件，绕开它的 `pause`）→ CDP `disablePlugin`/`enablePlugin` 重载。
+临时图 ZZ_UI / ZZ_W3 / ZZ_SHOT / ZZ_W4 / ZZ_P / ZZ_DRAG 全部删除，`Goalscapes/` 只剩 life，
+列表/甘特标签已 detach，主题与选中态还原，`data.json` 的 currentPath 回到 life。
+- **色盘**：点色块 → store `#38bdf8`、扇区 fill `#4ac3f9`（环层提亮仍生效）、当前块 accent 描边高亮；
+  连点同一块不重复落盘；Auto → `color` 变 undefined、扇区回进度色 `#f97e7e`；原生取色器 change 落 `#f87171`；
+  hex 框输 `#f0a` → 落盘 `#ff00aa` 且无 Notice（**补上了本文档欠了很久的"normalizeHex 未在真实面板跑过"**）。
+  亮/暗两主题截图正常：`D:/tmp/wrap_dark_panel.png`、`D:/tmp/L_panel_full.png`。
+- **新色盘对比度穷举**：10 色 × 5 环层 × 3 同级序号 = 150 组合，用真实 `radialGeometry.nodeColor/labelInk`
+  离线跑（`D:/tmp/palette_contrast.mjs`）：最低 4.24:1，低于 3:1 的 0 个。
+- **responsible**：筛选栏实测为 `Filter: [Tag][Min%][Max%][色块][Clear]`，面板字段里也没有 Responsible；
+  CSV 表头 `Title,Importance,Progress,Due,Start,Tags,Color,Depth,ParentTitle`（18 行 = 17 节点 + 表头）。
+- **radialView 拆分回归**：单击外环扇区能选中（pointerdown+pointerup，非 click）并弹权重手柄；手柄拖拽
+  importance 21→30→43 随指针角度单调跟随、同级仍归一化 100；重挂载 hover Career/Relationships 命中各自父级；
+  右键菜单 8 项齐全；工具栏 4 按钮 + 地图下拉；Life Balance 模板 → 17 扇区 / 18 标签，`getBBox` 25..975
+  不溢出 viewBox(1000)；筛选无匹配 17/17 降饱和、Clear 归零、按颜色筛选只命中手动设色的那 1 个；
+  面板滑杆 40→70 落盘、window `pointerup` 监听基线 0 / 重建 15 次后 0 / 拖完 0（`D:/tmp/panel.mjs`）；
+  SVG 无 `var(`、无 `<style>`、首元素是主题底色 rect、18 个 text 全带 font-size、17 个 path 全带 stroke；
+  PNG 478KB 魔数正确；Canvas 导出 `My_Life.canvas`（测后已删）。
+- **顺带修掉**：新建地图弹两条通知（`store.load()` 的 "Goalscape: created <path>" + `createGoalscape()` 的
+  "Created goalscape: X"）→ 删掉后者，实测只剩 1 条。
+- **用户真实数据**：`Goalscapes/life.goalscape.json` 的 4 个历史 `responsible` 键已按"读档即清 + 落盘"去掉，
+  732B → 628B；逐字段比对确认**除 responsible 外与备份完全等价**（备份 `D:/tmp/bk20261008/`，含旧 main.js）。
+- **CDP 自动化新坑（照做别重探）**：
+  1. `Page.captureScreenshot` **带 clip 会拿到旧帧**——切主题后 clip 截图仍是暗色，整页截图才对。
+  2. 切主题用 `app.changeTheme('moonstone'|'obsidian')`；`app.setTheme()` 在此版本是空操作，`app.vault.setTheme` 不存在。
+  3. `app.plugins.failedPlugins` 在此版本是 undefined（`.size`/`.length` 都会抛）。
+  4. 外环扇区的选中来自 pointerdown+pointerup，只发 `click` 选不中，会误判成"权重手柄没出现"。
+  5. 脚本读盘要重试：`adapter.write` 先截断再写，`fs.statSync` 可能正好撞上 0 字节（实测随后就是完整 656B，
+     不是数据丢失；但也说明**落盘不是原子的**，进程在写中途被杀有留空文件的风险，读侧已有"拒空文件 + 保留内存副本"兜底）。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
-- 没有自动化测试基建（无 vitest/jest），目前"单测"是临时 esbuild 转译 + 手写断言，没留在仓库里。
+- ~~没有自动化测试基建（无 vitest/jest），目前"单测"是临时 esbuild 转译 + 手写断言，没留在仓库里。~~
+  已补，见上节"测试基建"。没有覆盖率统计，也没有 watch 模式（刻意不引第三方框架）。
+- 模板应用后信息面板显示 "Goal not found." 那一类**跨层**问题（选中态与数据替换的耦合），
+  单靠数据层单测抓不到，仍需在真实 Obsidian 里点。
 - ~~放射图视觉重做只在暗色主题下截过图~~ 已补：亮色主题下标签、环间隙、导出底色均已复核（见上两节）。
 - ~~亮色主题下 List 视图已截图复核（正常）；Gantt 只看到空态（life 图没有日期），有排期的甘特条在亮色下的配色未验证；右侧信息面板亮色也未截图复核。~~
   已补验，见"亮色主题复核"一节。
-- `normalizeHex`（3 位缩写归一化）**未在真实面板里跑过**：只过了离线真值表和 `tsc -noEmit`。
-  仓库 `main.js` 也还没重建（另一 agent 正在拆 radialView，见 Color 那节的"待办"）。
+- ~~`normalizeHex`（3 位缩写归一化）未在真实面板里跑过~~ 已补：真实面板输 `#f0a` 落盘 `#ff00aa`、扇区仍按环层
+  提亮，见"收口实测"一节。
+- Focus Filter 色块的**可读性改造**没做（加 `Color` 文字标签，或换成"本图已用颜色"下拉以避开严格相等的坑）——
+  已把语义讲清楚给用户，等点头再做。
 
 ## 后续计划（按优先级）
 
 1. ~~端到端交互验证~~ 已完成（见上），放射图/三视图/CRUD/拖拽/导出/模板全部实测通过。
 2. ~~用户反馈的 5 个 UX 问题~~ 已完成（见上），并顺带修掉启动失败与 0 字节截断两个真实 bug。
-3. **等 radialView 拆分验收后**：`npm run build` → `install-plugin.bat` → 重跑 `D:/tmp/color2.mjs`
-   与 `D:/tmp/panel.mjs`，确认 `#f0a` 落盘为 `#ff00aa` 且扇区仍按环层提亮、window 监听仍为 0。
+3. ~~**等 radialView 拆分验收后**：`npm run build` → 部署 → 重跑 `color2.mjs` 与 `panel.mjs`~~ 已完成
+   （见"收口实测"）：`#f0a` 落盘 `#ff00aa`、扇区仍按环层提亮、window `pointerup` 监听仍为 0，
+   并顺带把拖拽/筛选/模板/导出/亮色全量回归了一遍。
 4. 可选：人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
-5. 补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。
+5. ~~补正式测试文件基建（`src/data/__tests__/`），把已有的临时断言脚本固化。~~ 已完成：`npm test`
+   （esbuild + Node 内置 `node:test`，零新依赖），76 条断言入库，见上节"测试基建"。
 6. ~~建议：把 `onload` 里 `await this.store.load()` 移到视图/命令注册之后~~ 已做：读档放在
    视图/命令注册之后，数据出问题只影响图的内容，不再连带让标签页退化成"插件不再活动"占位页。
 7. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、

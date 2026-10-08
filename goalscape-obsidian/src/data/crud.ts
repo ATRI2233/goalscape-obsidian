@@ -49,7 +49,6 @@ export function adjustImportance(
   if (!found?.parent) return;
   const siblings = found.parent.children;
   const others = siblings.filter((c) => c.id !== id);
-  const oldSelf = found.node.importance;
   const othersTotal = others.reduce((s, c) => s + c.importance, 0);
   const target = Math.max(0, Math.min(100, newImportance));
   found.node.importance = target;
@@ -57,15 +56,13 @@ export function adjustImportance(
     const scale = (100 - target) / othersTotal;
     for (const c of others) c.importance = Math.round(c.importance * scale * 100) / 100;
   }
-  // 主目标是根，无 siblings，无需处理
-  if (oldSelf === target) return;
 }
 
 /**
  * 把一组 siblings 的 importance 等比缩放到总和为 100。
  * adjustImportance 假设"同级权重总和恒为 100"，moveGoal 改变了两端父级的
  * 子节点集合，必须在这里重新归一化，否则该假设在跨父级移动后失真
- * （已通过单测复现：移动后剩余 siblings 总和会漂移到 100 以外）。
+ * （已用临时单测复现：移动后剩余 siblings 总和会漂移到 100 以外；测试脚本未入库，见 PROGRESS.md）。
  */
 function renormalizeSiblings(children: GoalNode[]): void {
   if (!children.length) return;
@@ -108,7 +105,6 @@ function cloneSubtree(node: GoalNode): GoalNode {
     progress: node.progress,
     due: node.due,
     start: node.start,
-    responsible: [...node.responsible],
     tags: [...node.tags],
     color: node.color,
     notes: node.notes,
@@ -139,7 +135,7 @@ export function pasteSubtree(
 
 /**
  * 复制/剪切都从这里取数据：必须返回深拷贝的快照，而不是树里的活引用。
- * 否则 Copy 之后再编辑原节点，剪贴板内容会跟着变（已通过单测复现过）。
+ * 否则 Copy 之后再编辑原节点，剪贴板内容会跟着变（临时单测复现过）。
  */
 export function extractSubtree(scape: GoalScape, id: string): GoalNode | null {
   const found = findNode(scape.mainGoal, id);

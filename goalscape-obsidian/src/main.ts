@@ -1,18 +1,21 @@
 // src/main.ts
 // Goalscape Obsidian 插件入口。负责初始化数据层、注册视图与命令。
 
-import { Plugin, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
+import { Plugin, TFile, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
 import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH } from "./data/goalTree";
 import { RadialGoalMapView, VIEW_RADIAL } from "./views/radialView";
 import { GoalListView, VIEW_LIST } from "./views/listView";
 import { GanttView, VIEW_GANTT } from "./views/ganttView";
 import { TEMPLATES } from "./data/templates";
 import { promptInput } from "./views/promptModal";
+import { SubtreeClipboard } from "./views/radialMenu";
 import { toCanvas, canvasToJson } from "./export/canvasSync";
 import { exportSvg, exportPng, exportCsv, exportMarkdownOutline, downloadBlob, downloadText } from "./export/exporters";
 
 export default class GoalscapePlugin extends Plugin {
   store!: GoalTreeStore;
+  /** 子树剪贴板随插件存活，放射图标签页之间共享 */
+  readonly clipboard = new SubtreeClipboard();
 
   async onload(): Promise<void> {
     const saved = (await this.loadData()) as { currentPath?: string } | null;
@@ -99,9 +102,9 @@ export default class GoalscapePlugin extends Plugin {
       await this.switchGoalscape(path);
       return;
     }
-    // 新路径不存在时，store.load() 会自动用默认树建档（走 adapter，避免 vault.create 竞态）
+    // 新路径不存在时，store.load() 会自动用默认树建档（走 adapter，避免 vault.create 竞态），
+    // 并由它提示"Goalscape: created <path>"；这里不能再提示一次，否则一次新建弹两条通知。
     await this.switchGoalscape(path);
-    new Notice(`Created goalscape: ${safe}`);
   }
 
   private async promptNewGoalscape(): Promise<void> {
@@ -110,9 +113,17 @@ export default class GoalscapePlugin extends Plugin {
   }
 
   private refreshMapSelectors(): void {
-    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
-      (leaf.view as any).refreshMapList?.();
+    for (const view of this.radialViews()) {
+      view.refreshMapList();
     }
+  }
+
+  /** 已注册的放射图视图；用 instanceof 收窄而不是 any，避免伸手进视图私有成员 */
+  radialViews(): RadialGoalMapView[] {
+    return this.app.workspace
+      .getLeavesOfType(VIEW_RADIAL)
+      .map((leaf) => leaf.view)
+      .filter((v): v is RadialGoalMapView => v instanceof RadialGoalMapView);
   }
 
   // ──────────────────────────── 导出 ────────────────────────────
@@ -125,22 +136,24 @@ export default class GoalscapePlugin extends Plugin {
     const folder = this.store.path.split("/").slice(0, -1).join("/");
     const canvasPath = `${folder}/${scape.mainGoal.title.replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, "_")}.canvas`;
     const existing = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (existing) {
-      await this.app.vault.modify(existing as any, json);
+    if (existing instanceof TFile) {
+      await this.app.vault.modify(existing, json);
     } else {
       await this.app.vault.create(canvasPath, json);
     }
     new Notice(`Canvas exported: ${canvasPath}`);
     const leaf = this.app.workspace.getLeaf("tab");
     const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (file) await leaf.openFile(file as any);
+    if (file instanceof TFile) await leaf.openFile(file);
   }
 
   private getRadialSvg(): SVGSVGElement | null {
-    const leaves = this.app.workspace.getLeavesOfType(VIEW_RADIAL);
-    if (!leaves.length) { new Notice("Open the radial view first"); return null; }
-    const containerEl = (leaves[0].view as any).contentEl as HTMLElement;
-    return containerEl.querySelector("svg.goalscape-radial-svg");
+    const view = this.radialViews()[0];
+    if (!view) {
+      new Notice("Open the radial view first");
+      return null;
+    }
+    return view.getSvg();
   }
 
   private async exportPng(): Promise<void> {
@@ -205,8 +218,8 @@ class TemplateModal extends Modal {
               s.colorMeanings = template.colorMeanings;
             });
             // 模板替换后原选中节点 id 失效，清空各放射图视图的选中，避免信息面板显示 "Goal not found."
-            for (const leaf of this.app.workspace.getLeavesOfType(VIEW_RADIAL)) {
-              (leaf.view as any).select?.(null);
+            for (const view of this.plugin.radialViews()) {
+              view.clearSelection();
             }
             this.close();
             new Notice(`Template "${t.name}" applied`);

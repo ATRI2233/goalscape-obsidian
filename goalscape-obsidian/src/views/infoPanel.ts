@@ -1,5 +1,5 @@
 // src/views/infoPanel.ts
-// 右侧信息面板：编辑 Title / Importance / Progress / Due / Start / Responsible /
+// 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
 // Tags / Color / Notes / 自定义字段。所有改动统一走 store.mutate。
 
 import { Setting, Notice } from "obsidian";
@@ -7,6 +7,12 @@ import type GoalscapePlugin from "../main";
 import { GoalNode, GoalScape, findNode } from "../data/types";
 import { renameGoal, adjustImportance, applyColorToSubtree } from "../data/crud";
 import { promptInput } from "./promptModal";
+
+/** 面板色盘预设：全部 6 位小写，与 normalizeHex 的归一化结果同形 */
+const COLOR_PALETTE = [
+  "#f87171", "#fb923c", "#fbbf24", "#4ade80", "#2dd4bf",
+  "#38bdf8", "#818cf8", "#c084fc", "#f472b6", "#a3a3a3",
+];
 
 function splitCsv(raw: string): string[] {
   return raw
@@ -132,17 +138,6 @@ export class InfoPanel {
     });
 
     new Setting(this.container)
-      .setName("Responsible")
-      .setDesc("Comma separated")
-      .addText((text) => {
-        text.setValue(node.responsible.join(", "));
-        text.inputEl.addEventListener("blur", () => {
-          const list = splitCsv(text.getValue());
-          this.mutate((s) => this.patch(s, node.id, (n) => (n.responsible = list)));
-        });
-      });
-
-    new Setting(this.container)
       .setName("Tags")
       .setDesc("Comma separated, e.g. Now, Next")
       .addText((text) => {
@@ -167,8 +162,7 @@ export class InfoPanel {
             return;
           }
           const v = norm || undefined;
-          if (v === node.color) return;
-          this.mutate((s) => this.patch(s, node.id, (n) => (n.color = v)));
+          this.setColor(node, v);
         });
       })
       .addButton((btn) =>
@@ -179,6 +173,33 @@ export class InfoPanel {
             this.mutate((s) => applyColorToSubtree(s, node.id));
           })
       );
+
+    const swatches = this.container.createDiv({ cls: "goalscape-color-swatches" });
+
+    const picker = swatches.createEl("input", { cls: "goalscape-color-picker" });
+    picker.type = "color";
+    picker.title = "Custom color";
+    picker.value = node.color ?? "#4ade80";
+    // 只接 change：系统取色面板的 input 事件会随拖动连发，每帧都落盘并重建整个面板
+    picker.addEventListener("change", () => {
+      this.setColor(node, normalizeHex(picker.value) || undefined);
+    });
+
+    const auto = swatches.createEl("button", {
+      cls: "goalscape-swatch goalscape-swatch-auto",
+      text: "Auto",
+    });
+    auto.title = "Color by progress";
+    if (!node.color) auto.addClass("goalscape-swatch-active");
+    auto.addEventListener("click", () => this.setColor(node, undefined));
+
+    for (const hex of COLOR_PALETTE) {
+      const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
+      swatch.style.backgroundColor = hex;
+      swatch.title = hex;
+      if (node.color === hex) swatch.addClass("goalscape-swatch-active");
+      swatch.addEventListener("click", () => this.setColor(node, hex));
+    }
 
     this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
     const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
@@ -252,6 +273,11 @@ export class InfoPanel {
 
   private mutate(fn: (s: GoalScape) => void): void {
     this.plugin.store.mutate(fn);
+  }
+
+  private setColor(node: GoalNode, color: string | undefined): void {
+    if (color === node.color) return;
+    this.mutate((s) => this.patch(s, node.id, (n) => (n.color = color)));
   }
 
   private patch(scape: GoalScape, id: string, fn: (n: GoalNode) => void): void {

@@ -321,6 +321,60 @@
   padding: 4px 0;
 }
 
+/* Color 字段下方的色盘：原生取色器 + 预设色块 + Auto */
+.goalscape-color-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: -2px 0 12px;
+}
+
+.goalscape-swatch {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.goalscape-swatch:hover {
+  border-color: var(--text-normal);
+}
+
+.goalscape-swatch-active {
+  border: 2px solid var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--background-primary);
+}
+
+.goalscape-swatch-auto {
+  width: auto;
+  padding: 0 7px;
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+}
+
+.goalscape-color-picker {
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: none;
+  cursor: pointer;
+}
+
+.goalscape-color-picker::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.goalscape-color-picker::-webkit-color-swatch {
+  border: none;
+  border-radius: 2px;
+}
+
 /* ═══════════════ Goal List 视图 ═══════════════ */
 
 .goalscape-list-root {

@@ -8,7 +8,6 @@ export interface GoalNode {
   progress?: number; // 0-100，仅叶子节点手工填写；父级由引擎计算
   due?: string; // ISO date
   start?: string; // Gantt 用
-  responsible: string[];
   tags: string[]; // 含 "Now"/"Next" 等
   color?: string; // 用户手动色，未设则按进度渲染
   notes?: string; // Markdown
@@ -31,7 +30,6 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     progress: partial.progress,
     due: partial.due,
     start: partial.start,
-    responsible: partial.responsible ?? [],
     tags: partial.tags ?? [],
     color: partial.color,
     notes: partial.notes,
