@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
 import { createGoalNode, flattenTree } from "../types";
 import type { GoalNode } from "../types";
-import { PALETTE_SWATCHES, branchFills } from "../palette";
+import { DEFAULT_TONE, Tone, branchFills, paletteSwatches, shadeOf, toneFromSliders } from "../palette";
 
 /** WCAG 相对亮度：只用来判"外层比内层亮"这种大小关系，不比绝对值 */
 function brightnessOf(hex: string): number {
@@ -97,16 +97,18 @@ describe("branchFills", () => {
   });
 });
 
-describe("PALETTE_SWATCHES", () => {
+describe("paletteSwatches", () => {
+  const SW = paletteSwatches();
+
   it("色盘互不相同、都是 6 位小写，最后一格是中性灰", () => {
-    assert.equal(new Set(PALETTE_SWATCHES).size, PALETTE_SWATCHES.length);
-    for (const hex of PALETTE_SWATCHES) assert.match(hex, /^#[0-9a-f]{6}$/);
-    const [r, g, b] = channels(PALETTE_SWATCHES[PALETTE_SWATCHES.length - 1]);
+    assert.equal(new Set(SW).size, SW.length);
+    for (const hex of SW) assert.match(hex, /^#[0-9a-f]{6}$/);
+    const [r, g, b] = channels(SW[SW.length - 1]);
     assert.ok(r === g && g === b);
   });
 
   it("色盘上看到的 = 图上会有的：每个预设当分支色再过一遍 branchFills 是原样", () => {
-    for (const hex of PALETTE_SWATCHES) {
+    for (const hex of SW) {
       const t = createGoalNode({
         id: "root",
         title: "Root",
@@ -116,5 +118,75 @@ describe("PALETTE_SWATCHES", () => {
       });
       assert.ok(closeHex(branchFills(t).get("b")!, hex), `${hex} 不是不动点`);
     }
+  });
+
+  it("滑杆拖到哪一档，色盘就跟着变到哪一档（不会图上变了、色盘还是旧颜色）", () => {
+    assert.notEqual(paletteSwatches(toneFromSliders(0, 50))[0], SW[0]);
+    assert.notEqual(paletteSwatches(toneFromSliders(100, 50))[0], SW[0]);
+  });
+});
+
+describe("shadeOf", () => {
+  it("块内明暗的两端只改明度：色相与'哪个通道主导'都不能翻", () => {
+    const base = "#3b9743";
+    const dark = shadeOf(base, -0.05);
+    const light = shadeOf(base, 0.05);
+    assert.ok(brightnessOf(dark) < brightnessOf(base));
+    assert.ok(brightnessOf(base) < brightnessOf(light));
+    // 绿色系：g 必须始终是主导通道，否则"内深外浅"会变成"内蓝外黄"
+    for (const hex of [dark, base, light]) {
+      const [r, g, b] = channels(hex);
+      assert.ok(g > r && g > b, `${hex} 已经不在绿色系里`);
+    }
+  });
+
+  it("推到极端也不会溢出成非法值", () => {
+    for (const hex of [shadeOf("#000000", -0.5), shadeOf("#ffffff", 0.5), shadeOf("#3b9743", 9)]) {
+      assert.match(hex, /^#[0-9a-f]{6}$/);
+    }
+  });
+});
+
+describe("设置页那两根滑杆", () => {
+  /** 一支红到底的三层链：两根滑杆的效果都只在这条链上看 */
+  const chain = (tone: Tone) => branchFills(
+    createGoalNode({
+      id: "root", title: "R", color: "#8a8a8a",
+      children: [
+        createGoalNode({
+          id: "b", title: "B", color: "#f85755",
+          children: [
+            createGoalNode({
+              id: "c", title: "C",
+              children: [createGoalNode({ id: "d", title: "D" })],
+            }),
+          ],
+        }),
+      ],
+    }), tone);
+  const satSpread = (hex: string) => { const [r, g, b] = channels(hex); return Math.max(r, g, b) - Math.min(r, g, b); };
+
+  it("浓艳度：往右拖更艳、往左拖更灰，色相不变", () => {
+    const soft = chain(toneFromSliders(0, 50)).get("b")!;
+    const loud = chain(toneFromSliders(100, 50)).get("b")!;
+    assert.ok(satSpread(soft) < satSpread(loud), `${soft} 不该比 ${loud} 艳`);
+    // 同一支红，两端都必须还是"红主导"（g/b 谁高谁低不能翻）
+    for (const hex of [soft, loud]) {
+      const [r, g, b] = channels(hex);
+      assert.ok(r > g && r > b, `${hex} 已经不是红色系了`);
+    }
+  });
+
+  it("层次分明度：往右拖，内圈和外圈的亮度差被拉大", () => {
+    const flat = chain(toneFromSliders(84, 0));
+    const steep = chain(toneFromSliders(84, 100));
+    const gap = (m: Map<string, string>) => brightnessOf(m.get("d")!) - brightnessOf(m.get("b")!);
+    assert.ok(gap(flat) < gap(steep), `平缓档差 ${gap(flat)}，分明档差 ${gap(steep)}`);
+    assert.ok(gap(flat) >= 0 && gap(steep) > 0, "外层必须始终比内层亮，滑杆不许把它反过来");
+  });
+
+  it("出厂滑杆位置就是当前基调（谁动默认值都会被这条抓到）", () => {
+    assert.ok(Math.abs(DEFAULT_TONE.chroma - 0.92) < 0.001, `chroma=${DEFAULT_TONE.chroma}`);
+    assert.ok(Math.abs(DEFAULT_TONE.step - 0.035) < 0.0001, `step=${DEFAULT_TONE.step}`);
   });
 });

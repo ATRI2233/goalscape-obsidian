@@ -7,12 +7,12 @@
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode, flattenTree } from "../data/types";
-import { branchFills } from "../data/palette";
+import { SECTOR_RAMP, branchFills, shadeOf } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
   SVG_NS, VIEW_SIZE, CX, CY,
-  arcPath, bandScaleOf, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
+  arcPath, bandScaleOf, bevelArc, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
   SectorShape,
 } from "./radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
@@ -25,8 +25,8 @@ function scapeName(path: string): string {
   return path.split("/").pop()!.replace(/\.goalscape\.json$/, "");
 }
 
-/** 分屏会同时挂两个 svg：id 撞了以后 url(#id) 只认文档里第一个 defs，那个视图一销毁另一个的渐变就悬空，所以逐视图编号 */
-let sheenSeq = 0;
+/** 分屏会同时挂两个 svg，逐视图给 defs 里的 id 编号，避免后建的视图引用到先销毁的那个 */
+let viewSeq = 0;
 
 export class RadialGoalMapView extends ItemView {
   private unsubscribe?: () => void;
@@ -36,7 +36,9 @@ export class RadialGoalMapView extends ItemView {
   private filterBar!: FocusFilter;
   private filterCriteria: FilterCriteria = {};
   private nodePositions = new Map<string, SectorShape>();
-  private readonly sheenId = `goalscape-sheen-${++sheenSeq}`;
+  /** 分屏会同时挂两个 svg，id 撞了以后 url(#id) 只认文档里第一个 defs，所以逐视图编号 */
+  private readonly uid = `goalscape-${++viewSeq}`;
+  private gradSeq = 0;
   private weightDrag!: WeightDragController;
   private reparentDrag!: ReparentDragController;
 
@@ -149,6 +151,11 @@ export class RadialGoalMapView extends ItemView {
 
   // ──────────────────────────── 渲染 ────────────────────────────
 
+  /** 设置页改了颜色基调之后重画一次（不涉及数据，所以不走 store） */
+  repaint(): void {
+    this.render();
+  }
+
   private render(): void {
     const scape = this.plugin.store.scape;
     this.rootEl.empty();
@@ -163,20 +170,20 @@ export class RadialGoalMapView extends ItemView {
     // 扇区收进同一个组：投影只按整组的轮廓打一次，逐扇区打会变成一团糊死的灰。
     // 标签和手柄刻意留在组外 —— 它们要压在**所有**扇区之上（早先内圈标签会被后画的外圈扇区盖住），
     // 而且不该各自带上阴影。
+    const defs = document.createElementNS(SVG_NS, "defs");
+    svg.appendChild(defs);
+
     const map = document.createElementNS(SVG_NS, "g");
     map.addClass("goalscape-map");
     svg.appendChild(map);
-
-    const defs = document.createElementNS(SVG_NS, "defs");
-    defs.appendChild(this.sheenGradient());
-    svg.appendChild(defs);
 
     // 一档厚度对应多少半径：让"累计最厚的那条链"恰好铺到 MAX_R，
     // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
     // 底色只有一个来源：色相沿父链继承、浓淡由层级锁定，整条分支天然同色，父节点改色子节点不需要跟着改
-    const fills = branchFills(scape.mainGoal);
+    this.gradSeq = 0;
+    const fills = branchFills(scape.mainGoal, this.plugin.tone);
 
     const drawNode = (
       node: GoalNode,
@@ -200,7 +207,9 @@ export class RadialGoalMapView extends ItemView {
 
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("d", d);
-      path.setAttribute("fill", color);
+      path.setAttribute("fill", this.sectorFill(defs, color, edge));
+      // 扁平的那个中间色留在属性上：fill 是个 url(#…) 之后，调试和回归断言都得能一眼看出这块是谁家的色
+      path.setAttribute("data-color", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
@@ -231,8 +240,9 @@ export class RadialGoalMapView extends ItemView {
       path.appendChild(tip);
       map.appendChild(path);
 
-      // 光源叠层：跟底色同一条路径、只换填充，于是每格各自"接住"同一束光
-      this.addOverlay(map, d, dim, ["goalscape-sheen"], { fill: `url(#${this.sheenId})` });
+      // 外缘倒角：一道极细的亮边把轮廓勾出来（颜色在 CSS 里，暗底用亮边、亮底用暗边）
+      const bevel = bevelArc(edge);
+      if (bevel) this.addOverlay(map, bevel, dim, ["goalscape-bevel"]);
 
       // 进度画在外缘：只画"走完的那一段"，没走到的地方一律不留痕迹（画轨道会糊成一条黑边）
       const rim = progressRim(edge, node.progress ?? 0);
@@ -321,7 +331,7 @@ export class RadialGoalMapView extends ItemView {
    * 因为颜色逐扇区不同，而类规则会盖掉同名属性（见 addText）。
    */
   private addOverlay(
-    map: SVGGElement, d: string, dim: boolean, classes: string[], attrs: Record<string, string>
+    map: SVGGElement, d: string, dim: boolean, classes: string[], attrs: Record<string, string> = {}
   ): void {
     const el = document.createElementNS(SVG_NS, "path");
     el.setAttribute("d", d);
@@ -332,28 +342,32 @@ export class RadialGoalMapView extends ItemView {
   }
 
   /**
-   * 每个块自己的一束光：objectBoundingBox 让渐变按**各自**的外接框算，
-   * 所以一块扇区从上半到下半有极淡的明暗过渡，而不是全图共用一个光源
-   * （全图那个做过一版，压在一圈同浓淡的扇区上根本看不出来）。
-   * 两端都极淡，亮色主题下白的那半基本看不见、只剩边缘一点暗角。
+   * 每个块自己"从内边缘到外边缘由深到浅"：同一个色相、同一个饱和度，只把明度各偏一半跨度。
+   * 渐变按全图坐标算，但半径取**本块的外径**、深色那一端停在**本块的内径**上 ——
+   * 于是厚块薄块都是"整块走完这一档跨度"，而不是薄块只蹭到全图渐变的一小条（那正是之前看不出质感的原因）。
    */
-  private sheenGradient(): SVGRadialGradientElement {
+  private sectorFill(defs: SVGDefsElement, color: string, edge: { rInner: number; rOuter: number }): string {
+    const id = `${this.uid}-g${++this.gradSeq}`;
     const grad = document.createElementNS(SVG_NS, "radialGradient") as SVGRadialGradientElement;
-    grad.id = this.sheenId;
-    grad.setAttribute("cx", "0.5");
-    grad.setAttribute("cy", "0.32");
-    grad.setAttribute("r", "0.85");
-    const stop = (offset: string, color: string, opacity: string): void => {
+    grad.id = id;
+    grad.setAttribute("gradientUnits", "userSpaceOnUse");
+    grad.setAttribute("cx", String(CX));
+    grad.setAttribute("cy", String(CY));
+    grad.setAttribute("r", String(edge.rOuter));
+    const dark = shadeOf(color, -SECTOR_RAMP / 2);
+    const light = shadeOf(color, SECTOR_RAMP / 2);
+    const stop = (offset: string, c: string): void => {
       const s = document.createElementNS(SVG_NS, "stop");
       s.setAttribute("offset", offset);
-      s.setAttribute("stop-color", color);
-      s.setAttribute("stop-opacity", opacity);
+      s.setAttribute("stop-color", c);
       grad.appendChild(s);
     };
-    stop("0", "#ffffff", "0.1");
-    stop("55%", "#ffffff", "0");
-    stop("100%", "#000000", "0.12");
-    return grad;
+    // 0 到内径那一段用同一个深色垫着：中心盘之外没有像素会用到它，但缺了它内缘会被插值成中间色
+    stop("0", dark);
+    stop(String(Math.max(0, edge.rInner / edge.rOuter)), dark);
+    stop("1", light);
+    defs.appendChild(grad);
+    return `url(#${id})`;
   }
 
   private select(id: string | null): void {

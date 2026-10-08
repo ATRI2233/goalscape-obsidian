@@ -2,7 +2,7 @@
 // 导出功能：PNG（SVG→Canvas→Blob）、SVG（序列化）、CSV（扁平化节点数据）。
 
 import { GoalNode, GoalScape } from "../data/types";
-import { branchFills } from "../data/palette";
+import { DEFAULT_TONE, Tone, branchFills } from "../data/palette";
 
 /**
  * 序列化后的 SVG 脱离了文档：CSS 规则与 var() 变量都不再存在，
@@ -94,11 +94,11 @@ export async function exportPng(svgEl: SVGSVGElement, scale = 2): Promise<Blob> 
   });
 }
 
-export function exportCsv(scape: GoalScape): string {
+export function exportCsv(scape: GoalScape, tone: Tone = DEFAULT_TONE): string {
   const rows: string[][] = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
   // 导出的是节点在图上实际呈现的那个颜色，而不是"存了这个字段"——
   // 深层节点不存色、浓淡也不由存值决定，但图上确实有颜色
-  const fills = branchFills(scape.mainGoal);
+  const fills = branchFills(scape.mainGoal, tone);
   const walk = (node: GoalNode, depth: number, parentTitle: string) => {
     rows.push([
       node.title,

@@ -327,7 +327,7 @@ step("filter 漏斗浮层筛选", async () => {
     await new Promise(r=>setTimeout(r,400));
     return {dimmed:document.querySelectorAll('svg.goalscape-radial-svg path[data-id].goalscape-dimmed').length,
       all:document.querySelectorAll('svg.goalscape-radial-svg path[data-id]').length,
-      sheen:document.querySelectorAll('svg.goalscape-radial-svg .goalscape-sheen.goalscape-dimmed').length,
+      sheen:document.querySelectorAll('svg.goalscape-radial-svg .goalscape-bevel.goalscape-dimmed').length,
       dot:document.querySelector('.goalscape-filter-btn').classList.contains('is-active')};})()`);
   // 光源叠层也要一起变淡，否则未命中的格子上还留着一圈亮边把眼睛勾过去
   ok("无匹配标签 → 全图降饱和（含光源叠层）+ 漏斗亮圆点",
@@ -622,10 +622,10 @@ function lum(hex) {
   return 0.2126 * ch(16) + 0.7152 * ch(8) + 0.0722 * ch(0);
 }
 
-/** 读当前画布上每个扇区的 fill；调用方自己 return fills */
+/** 读当前画布上每个扇区的扁平底色（fill 现在是 url(#…) 的块内渐变，所以看 data-color）；调用方自己 return fills */
 const FILLS = `const fills={};
     for(const p of document.querySelectorAll('svg.goalscape-radial-svg path[data-id]'))
-      fills[p.getAttribute('data-id')]=p.getAttribute('fill');`;
+      fills[p.getAttribute('data-id')]=p.getAttribute('data-color');`;
 const hueMap = (f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, Math.round(hsl(v).h)]));
 const byLum = (f) => Object.fromEntries(Object.entries(f).map(([k, v]) => [k, `${v}/${lum(v).toFixed(3)}`]));
 
@@ -654,44 +654,56 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     painted["n-B-done"] === painted["n-B-zero"], `${painted["n-B-done"]} vs ${painted["n-B-zero"]}`);
 
 
-  // 进度改画在外缘：map 里每个节点是"扇区 → 光源 → 进度条"三连，
-  // 按 DOM 顺序把装饰层归给最近的 data-id 扇区，不用给它们再挂一个 id
+  // map 里每个节点是"扇区 → 倒角 → 进度条"，按 DOM 顺序把装饰层归给最近的 data-id 扇区，
+  // 不用给它们再挂一个 id
   const rim = await json(`(()=>{
+    const lumOf=(hex)=>{const n=parseInt((hex||'#000000').slice(1),16);const c=(s)=>((n>>s)&255)/255;
+      return 0.2126*c(16)+0.7152*c(8)+0.0722*c(0);};
     const out={}; let cur=null;
     for(const p of document.querySelectorAll('.goalscape-map > path')){
       if(p.hasAttribute('data-id')){ cur=p.getAttribute('data-id'); out[cur]={}; continue; }
       if(!cur) continue;
+      if(p.classList.contains('goalscape-bevel')) out[cur].bevel=true;
       if(p.classList.contains('goalscape-rim')){
         const done=parseFloat(p.getAttribute('stroke-dasharray'));
         out[cur].ratio=p.getTotalLength()?done/p.getTotalLength():-1;
       }
     }
+    // 块内明暗：每个扇区的 fill 必须指向本视图 defs 里的一个渐变，且两端一深一浅
+    const ramps=[];
+    for(const p of document.querySelectorAll('.goalscape-map > path[data-id]')){
+      const m=(p.getAttribute('fill')||'').match(/^url\\(#(.+)\\)$/);
+      if(!m){ ramps.push({id:p.getAttribute('data-id'),bad:p.getAttribute('fill')}); continue; }
+      const g=document.getElementById(m[1]);
+      if(!g||g.tagName!=='radialGradient'){ ramps.push({id:p.getAttribute('data-id'),missing:m[1]}); continue; }
+      const stops=[...g.children].map(s=>s.getAttribute('stop-color'));
+      ramps.push({id:p.getAttribute('data-id'),n:stops.length,
+        units:g.getAttribute('gradientUnits'),
+        dark:lumOf(stops[0]),light:lumOf(stops[stops.length-1]),
+        flat:p.getAttribute('data-color'),mid:lumOf(p.getAttribute('data-color'))});
+    }
     return {rims:out,
       rimCount:document.querySelectorAll('.goalscape-map > path.goalscape-rim').length,
+      bevelCount:document.querySelectorAll('.goalscape-map > path.goalscape-bevel').length,
       sectors:document.querySelectorAll('.goalscape-map > path[data-id]').length,
-      sheens:document.querySelectorAll('.goalscape-sheen').length,
       mapFilter:getComputedStyle(document.querySelector('.goalscape-map')).filter,
-      // 全页 radialGradient 不止我们这一个（Obsidian 自带图标里有），必须锁定本视图 svg 内的那一个
-      grad:(()=>{const g=document.querySelector('svg.goalscape-radial-svg radialGradient');
-        if(!g) return null;
-        return {id:g.id, units:g.getAttribute('gradientUnits'),
-          cx:g.getAttribute('cx'), cy:g.getAttribute('cy'), r:g.getAttribute('r'),
-          stops:[...g.children].map(s=>s.getAttribute('stop-opacity')),
-          used:[...document.querySelectorAll('.goalscape-sheen')]
-            .every(p=>p.getAttribute('fill')==='url(#'+g.id+')')};})()};})()`);
+      stage:getComputedStyle(document.querySelector('.goalscape-radial-root')).backgroundImage.slice(0,22),
+      ramps};})()`);
   const ratio = (id) => rim.rims[id] && rim.rims[id].ratio;
   ok("进度条画在扇区外缘：dash 占比即完成度（0/50/100 各归各）",
     Math.abs(ratio("n-B-zero")) < 0.01 && Math.abs(ratio("n-B-done") - 1) < 0.01
       && Math.abs(ratio("n-B-mid") - 0.5) < 0.02 && Math.abs(ratio("n-Blue") - 0.5) < 0.02,
     JSON.stringify({ zero: ratio("n-B-zero"), done: ratio("n-B-done"), mid: ratio("n-B-mid"), blue: ratio("n-Blue") }));
-  // 光源是**每个块自己**的一束：gradientUnits 缺省即 objectBoundingBox，按各自外接框算
-  ok("每个扇区一层自己的光源（objectBoundingBox）+ 一条进度条，没走到的地方不留轨道",
-    rim.sectors === rim.sheens && rim.sectors === rim.rimCount && rim.grad && rim.grad.used
-      && rim.grad.units === null && rim.grad.cx === "0.5" && rim.grad.stops.length === 3
-      && /^goalscape-sheen-\d+$/.test(rim.grad.id),
-    JSON.stringify({ sectors: rim.sectors, sheens: rim.sheens, rimCount: rim.rimCount, grad: rim.grad }));
-  ok("整组一份柔和投影（投影打在组上，不是逐扇区）",
-    /drop-shadow/.test(rim.mapFilter), rim.mapFilter);
+  ok("每个块自己有明暗：fill 指向本视图的 userSpaceOnUse 渐变，内缘深、外缘浅，中间值就是 data-color",
+    rim.ramps.every((r) => !r.bad && !r.missing) && rim.ramps.length === rim.sectors
+      && rim.ramps.every((r) => r.n === 3 && r.units === "userSpaceOnUse" && r.dark < r.mid && r.mid < r.light),
+    JSON.stringify(rim.ramps.slice(0, 3)));
+  ok("每个扇区一道外缘倒角 + 一条进度条（没走到的地方不留轨道）",
+    rim.sectors === rim.bevelCount && rim.sectors === rim.rimCount,
+    JSON.stringify({ sectors: rim.sectors, bevels: rim.bevelCount, rims: rim.rimCount }));
+  ok("整组一份柔和投影，且图后面垫了台面（否则黑投影落在近黑底色上没有落点）",
+    /drop-shadow/.test(rim.mapFilter) && /radial-gradient/.test(rim.stage),
+    JSON.stringify({ mapFilter: rim.mapFilter.slice(0, 40), stage: rim.stage }));
   // 截图前清掉选中：强调色描边和权重手柄会把进度条本身糊住
   await ev(`${PL}.radialViews()[0].clearSelection()`);
   await new Promise((r) => setTimeout(r, 350));
@@ -789,6 +801,59 @@ step("color 分支统一色：色系只在二级、其余层级调明度", async
     withColor.sort().join(",") === "n-Blue@1,n-Pink@1", withColor.join(","));
 });
 
+step("settings 颜色基调两根滑杆", async () => {
+  await useTmpMap();
+
+  const r = await json(`(async()=>{
+    const pl=${PL};
+    pl.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(BRANCHES))};});
+    await new Promise(x=>setTimeout(x,600));
+    app.setting.close(); app.setting.open(); app.setting.openTabById('goalscape-obsidian');
+    await new Promise(x=>setTimeout(x,500));
+    // 设置模态框会把之前看过的标签页留在 DOM 里（只是 display:none），
+    // 不按可见性筛就会捞到别人的 setting-item
+    const rows=[...document.querySelectorAll('.modal .setting-item')].filter(e=>e.offsetParent);
+    const names=rows.map(e=>e.querySelector('.setting-item-name')?.textContent.trim());
+    const snap=()=>{const f={};for(const p of document.querySelectorAll('.goalscape-map > path[data-id]'))
+      f[p.getAttribute('data-id')]=p.getAttribute('data-color');return f;};
+    const set=(i,v)=>{const el=rows[i]?.querySelector('input[type=range]');
+      if(!el) throw new Error('第 '+i+' 行没有滑杆：'+JSON.stringify(rows.map(e=>e.querySelector('.setting-item-name')?.textContent)));
+      el.value=String(v);el.dispatchEvent(new Event('input',{bubbles:true}));el.dispatchEvent(new Event('change',{bubbles:true}));};
+    const a=snap();
+    set(0,0); await new Promise(x=>setTimeout(x,450)); const soft=snap();
+    set(0,100); await new Promise(x=>setTimeout(x,450)); const loud=snap();
+    set(0,84); await new Promise(x=>setTimeout(x,450)); const back=snap();
+    const spread=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
+      const v=[c(16),c(8),c(0)];return Math.max(...v)-Math.min(...v);};
+    const lumOf=(hex)=>{const n=parseInt(hex.slice(1),16),c=(s)=>((n>>s)&255)/255;
+      return 0.2126*c(16)+0.7152*c(8)+0.0722*c(0);};
+    // 第二根：层次调平缓，外圈与二级分支的亮度差要被压小，但不能反过来
+    const gapBefore=lumOf(a['n-B-done'])-lumOf(a['n-Blue']);
+    set(1,0); await new Promise(x=>setTimeout(x,450)); const flat=snap();
+    const gapFlat=lumOf(flat['n-B-done'])-lumOf(flat['n-Blue']);
+    set(1,100); await new Promise(x=>setTimeout(x,450)); const steep=snap();
+    const gapSteep=lumOf(steep['n-B-done'])-lumOf(steep['n-Blue']);
+    set(1,50); await new Promise(x=>setTimeout(x,450));
+    app.setting.close();
+    return {names, count:rows.length,
+      saved:await app.vault.adapter.read('.obsidian/plugins/goalscape-obsidian/data.json').then((t)=>JSON.parse(t)).catch(()=>({})),
+      softer:spread(soft['n-Blue'])<spread(a['n-Blue']),
+      louder:spread(loud['n-Blue'])>spread(a['n-Blue']),
+      restored:Object.keys(a).filter((k)=>a[k]!==back[k]).length,
+      flatter:gapFlat<gapBefore, steeper:gapSteep>gapBefore, ordered:gapFlat<gapBefore&&gapBefore<gapSteep,
+      sample:[a['n-Blue'],soft['n-Blue'],loud['n-Blue']]};})()`);
+  ok("设置页两根滑杆：浓艳度左右两端分别变灰/变艳，拖回原位图也原样",
+    r.count === 2 && /intensity/i.test(r.names[0]) && /contrast/i.test(r.names[1])
+      && r.softer && r.louder && r.restored === 0,
+    JSON.stringify(r));
+  ok("层次分明度：往左压小内外圈的亮度差、往右拉大，且不会把顺序调反",
+    r.flatter && r.steeper && r.ordered, JSON.stringify(r));
+  ok("滑杆位置写进 data.json（重启插件还在），且不会把 currentPath 顶掉",
+    r.saved?.tone?.intensity === 84 && r.saved?.tone?.contrast === 50
+      && typeof r.saved?.currentPath === "string",
+    JSON.stringify(r.saved));
+});
+
 step("themes 暗/亮两主题截图", async () => {
   await json(`(async()=>{
     const pl=${PL};
@@ -820,6 +885,12 @@ try {
     console.log(`\n=== ${s.name} ===`);
     try { await s.fn(); }
     catch (e) { fail++; fails.push(`${s.name}（步骤抛错）`); console.log(`  ERROR ${e.message}`); }
+    // 步骤抛错时它自己开的模态框会留着，把后面几步（尤其是也要开模态框的）全带崩；
+    // 程序化拖滑杆留下的动态提示也会一直悬着、糊在后面的截图里。所以每步跑完无条件收一次场。
+    try {
+      await ev(`(()=>{app.setting?.close?.();
+        document.querySelectorAll('.notice,.menu,.tooltip').forEach(n=>n.remove()); return 1;})()`);
+    } catch { /* 收不掉就算了 */ }
   }
 } catch (e) {
   fail++; fails.push("连接/快照");

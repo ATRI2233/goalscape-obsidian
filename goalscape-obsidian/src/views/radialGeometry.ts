@@ -261,6 +261,17 @@ const RIM_INSET = 1.5;
 const RIM_MIN_BAND = 14;
 
 /**
+ * 外缘那道极细的亮边（倒角）：贴着扇区外缘走一条弧，把轮廓勾一下。
+ * 颜色由 CSS 给，主题不同用不同的边（暗底用亮边、亮底用暗边）。
+ */
+export function bevelArc(edge: { rInner: number; rOuter: number; a0: number; a1: number }): string | null {
+  if (edge.rOuter - edge.rInner < RIM_MIN_BAND) return null;
+  const r = edge.rOuter - 0.6;
+  if (r <= edge.rInner) return null;
+  return arcLinePath(CX, CY, r, edge.a0, edge.a1);
+}
+
+/**
  * 扇区外缘的细进度条：贴着 rOuter 内侧走一条弧，用 stroke-dasharray 表示完成了多少。
  * 只画走完的那一段 —— 没走到的地方留一条淡轨道，看着就是每个格子外缘一道黑线。
  * 返回 null 表示这一格不该出现进度条（环带太薄装不下，或弧长为零）。

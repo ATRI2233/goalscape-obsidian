@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => GoalscapePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian11 = require("obsidian");
+var import_obsidian12 = require("obsidian");
 
 // src/data/goalTree.ts
 var import_obsidian = require("obsidian");
@@ -293,26 +293,31 @@ var GoalTreeStore = class {
 var import_obsidian8 = require("obsidian");
 
 // src/data/palette.ts
+function toneFromSliders(intensity, contrast) {
+  const pct = (v) => Math.max(0, Math.min(100, v)) / 100;
+  return { chroma: 0.5 + pct(intensity) * 0.5, step: 0.01 + pct(contrast) * 0.05 };
+}
+var DEFAULT_SLIDERS = { intensity: 84, contrast: 50 };
+var DEFAULT_TONE = toneFromSliders(DEFAULT_SLIDERS.intensity, DEFAULT_SLIDERS.contrast);
 var HUB_L = 0.62;
-var L_STEP = 0.035;
 var MAX_L = 0.82;
 var HUE_LIFT = 0.055;
 var HUE_LIFT_PEAK = 95;
-var C_RATIO = 0.92;
 var MIN_C = 0.03;
 var BRIGHT_STEP = 4e-3;
 var MIN_CHROMA = 0.02;
 var MIN_HUE_GAP = 14;
+var SECTOR_RAMP = 0.1;
 function toLinear(v) {
   return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 }
 function toSrgb(v) {
   return v <= 31308e-7 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
 }
-function hexToHueC(hex) {
+function hexToOklch(hex) {
   const n = /^#[0-9a-f]{6}$/i.test(hex) ? parseInt(hex.slice(1), 16) : -1;
   if (n < 0)
-    return { h: 0, c: 0 };
+    return { L: 0, h: 0, c: 0 };
   const [r, g, b] = [16, 8, 0].map((s2) => toLinear((n >> s2 & 255) / 255));
   const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
   const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
@@ -322,7 +327,7 @@ function hexToHueC(hex) {
   let h = Math.atan2(k, a) * 180 / Math.PI;
   if (h < 0)
     h += 360;
-  return { h, c: Math.hypot(a, k) };
+  return { L: 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s, h, c: Math.hypot(a, k) };
 }
 function okToLinear(L, C, h) {
   const a = C * Math.cos(h * Math.PI / 180);
@@ -357,18 +362,22 @@ var hueGap = (a, b) => {
   const d = Math.abs(a - b) % 360;
   return d > 180 ? 360 - d : d;
 };
-function fillFor(depth, h, gray, brightness) {
-  const base = HUB_L + L_STEP * depth + brightness * BRIGHT_STEP;
+function fillFor(depth, h, gray, brightness, tone) {
+  const base = HUB_L + tone.step * depth + brightness * BRIGHT_STEP;
   if (gray)
     return okToHex(Math.min(MAX_L, base), 0, 0);
   const L = Math.min(MAX_L, base + HUE_LIFT * Math.cos((h - HUE_LIFT_PEAK) * Math.PI / 180));
-  return okToHex(L, Math.max(MIN_C, maxChroma(L, h) * C_RATIO), h);
+  return okToHex(L, Math.max(MIN_C, maxChroma(L, h) * tone.chroma), h);
 }
-function branchFills(root) {
+function shadeOf(hex, deltaL) {
+  const { L, h, c } = hexToOklch(hex);
+  return okToHex(Math.max(0.04, Math.min(0.97, L + deltaL)), c, h);
+}
+function branchFills(root, tone = DEFAULT_TONE) {
   const tones = /* @__PURE__ */ new Map();
   const taken = [];
   const claim = (node) => {
-    const { h, c } = hexToHueC(node.color || DEFAULT_BRANCH_COLOR);
+    const { h, c } = hexToOklch(node.color || DEFAULT_BRANCH_COLOR);
     if (c < MIN_CHROMA) {
       tones.set(node.id, { h: 0, gray: true });
       return;
@@ -385,24 +394,16 @@ function branchFills(root) {
   const out = /* @__PURE__ */ new Map();
   const rec = (n, depth, owner) => {
     var _a, _b;
-    const tone = (_a = tones.get(depth <= 1 ? n.id : owner)) != null ? _a : tones.get(root.id);
-    out.set(n.id, fillFor(depth, tone.h, tone.gray, (_b = n.brightness) != null ? _b : 0));
+    const own = (_a = tones.get(depth <= 1 ? n.id : owner)) != null ? _a : tones.get(root.id);
+    out.set(n.id, fillFor(depth, own.h, own.gray, (_b = n.brightness) != null ? _b : 0, tone));
     n.children.forEach((c) => rec(c, depth + 1, depth === 0 ? c.id : owner));
   };
   rec(root, 0, root.id);
   return out;
 }
-var PALETTE_SWATCHES = [
-  25,
-  55,
-  92,
-  145,
-  190,
-  230,
-  268,
-  313,
-  345
-].map((h) => fillFor(1, h, false, 0)).concat(fillFor(1, 0, true, 0));
+function paletteSwatches(tone = DEFAULT_TONE) {
+  return [25, 55, 92, 145, 190, 230, 268, 313, 345].map((h) => fillFor(1, h, false, 0, tone)).concat(fillFor(1, 0, true, 0, tone));
+}
 
 // src/views/infoPanel.ts
 var import_obsidian3 = require("obsidian");
@@ -678,6 +679,14 @@ function arcLinePath(cx, cy, r, startAngle, endAngle) {
 var RIM_WIDTH = 3.5;
 var RIM_INSET = 1.5;
 var RIM_MIN_BAND = 14;
+function bevelArc(edge) {
+  if (edge.rOuter - edge.rInner < RIM_MIN_BAND)
+    return null;
+  const r = edge.rOuter - 0.6;
+  if (r <= edge.rInner)
+    return null;
+  return arcLinePath(CX, CY, r, edge.a0, edge.a1);
+}
 function progressRim(edge, progress) {
   const band = edge.rOuter - edge.rInner;
   if (band < RIM_MIN_BAND)
@@ -1030,7 +1039,7 @@ var InfoPanel = class {
     if (!node.color)
       auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, void 0));
-    for (const hex of PALETTE_SWATCHES) {
+    for (const hex of paletteSwatches(this.plugin.tone)) {
       const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
       swatch.style.backgroundColor = hex;
       swatch.title = hex;
@@ -1517,7 +1526,7 @@ function createViewSwitcher(container, plugin, leaf, currentType) {
 function scapeName(path) {
   return path.split("/").pop().replace(/\.goalscape\.json$/, "");
 }
-var sheenSeq = 0;
+var viewSeq = 0;
 var RadialGoalMapView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -1525,7 +1534,9 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.selectedId = null;
     this.filterCriteria = {};
     this.nodePositions = /* @__PURE__ */ new Map();
-    this.sheenId = `goalscape-sheen-${++sheenSeq}`;
+    /** 分屏会同时挂两个 svg，id 撞了以后 url(#id) 只认文档里第一个 defs，所以逐视图编号 */
+    this.uid = `goalscape-${++viewSeq}`;
+    this.gradSeq = 0;
   }
   getViewType() {
     return VIEW_RADIAL;
@@ -1613,6 +1624,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     menu.showAtMouseEvent(event);
   }
   // ──────────────────────────── 渲染 ────────────────────────────
+  /** 设置页改了颜色基调之后重画一次（不涉及数据，所以不走 store） */
+  repaint() {
+    this.render();
+  }
   render() {
     const scape = this.plugin.store.scape;
     this.rootEl.empty();
@@ -1623,15 +1638,15 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     svg.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
+    const defs = document.createElementNS(SVG_NS, "defs");
+    svg.appendChild(defs);
     const map = document.createElementNS(SVG_NS, "g");
     map.addClass("goalscape-map");
     svg.appendChild(map);
-    const defs = document.createElementNS(SVG_NS, "defs");
-    defs.appendChild(this.sheenGradient());
-    svg.appendChild(defs);
     const unit = radialUnit(scape.mainGoal);
     const matchingIds = collectMatchingIds(scape, this.filterCriteria);
-    const fills = branchFills(scape.mainGoal);
+    this.gradSeq = 0;
+    const fills = branchFills(scape.mainGoal, this.plugin.tone);
     const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles) => {
       var _a, _b, _c, _d;
       const span = endAngle - startAngle;
@@ -1647,7 +1662,8 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("d", d);
-      path.setAttribute("fill", color);
+      path.setAttribute("fill", this.sectorFill(defs, color, edge));
+      path.setAttribute("data-color", color);
       path.setAttribute("stroke", "var(--background-primary)");
       path.setAttribute("stroke-width", "1");
       path.setAttribute("data-id", node.id);
@@ -1677,7 +1693,9 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       tip.textContent = `${node.title} \xB7 ${(_a = node.progress) != null ? _a : 0}%`;
       path.appendChild(tip);
       map.appendChild(path);
-      this.addOverlay(map, d, dim, ["goalscape-sheen"], { fill: `url(#${this.sheenId})` });
+      const bevel = bevelArc(edge);
+      if (bevel)
+        this.addOverlay(map, bevel, dim, ["goalscape-bevel"]);
       const rim = progressRim(edge, (_b = node.progress) != null ? _b : 0);
       if (rim) {
         this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
@@ -1753,7 +1771,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
    * 筛选未命中时跟着所属扇区一起变淡。stroke 走属性、不走类，
    * 因为颜色逐扇区不同，而类规则会盖掉同名属性（见 addText）。
    */
-  addOverlay(map, d, dim, classes, attrs) {
+  addOverlay(map, d, dim, classes, attrs = {}) {
     const el = document.createElementNS(SVG_NS, "path");
     el.setAttribute("d", d);
     for (const [k, v] of Object.entries(attrs))
@@ -1764,28 +1782,31 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     map.appendChild(el);
   }
   /**
-   * 每个块自己的一束光：objectBoundingBox 让渐变按**各自**的外接框算，
-   * 所以一块扇区从上半到下半有极淡的明暗过渡，而不是全图共用一个光源
-   * （全图那个做过一版，压在一圈同浓淡的扇区上根本看不出来）。
-   * 两端都极淡，亮色主题下白的那半基本看不见、只剩边缘一点暗角。
+   * 每个块自己"从内边缘到外边缘由深到浅"：同一个色相、同一个饱和度，只把明度各偏一半跨度。
+   * 渐变按全图坐标算，但半径取**本块的外径**、深色那一端停在**本块的内径**上 ——
+   * 于是厚块薄块都是"整块走完这一档跨度"，而不是薄块只蹭到全图渐变的一小条（那正是之前看不出质感的原因）。
    */
-  sheenGradient() {
+  sectorFill(defs, color, edge) {
+    const id = `${this.uid}-g${++this.gradSeq}`;
     const grad = document.createElementNS(SVG_NS, "radialGradient");
-    grad.id = this.sheenId;
-    grad.setAttribute("cx", "0.5");
-    grad.setAttribute("cy", "0.32");
-    grad.setAttribute("r", "0.85");
-    const stop = (offset, color, opacity) => {
+    grad.id = id;
+    grad.setAttribute("gradientUnits", "userSpaceOnUse");
+    grad.setAttribute("cx", String(CX));
+    grad.setAttribute("cy", String(CY));
+    grad.setAttribute("r", String(edge.rOuter));
+    const dark = shadeOf(color, -SECTOR_RAMP / 2);
+    const light = shadeOf(color, SECTOR_RAMP / 2);
+    const stop = (offset, c) => {
       const s = document.createElementNS(SVG_NS, "stop");
       s.setAttribute("offset", offset);
-      s.setAttribute("stop-color", color);
-      s.setAttribute("stop-opacity", opacity);
+      s.setAttribute("stop-color", c);
       grad.appendChild(s);
     };
-    stop("0", "#ffffff", "0.1");
-    stop("55%", "#ffffff", "0");
-    stop("100%", "#000000", "0.12");
-    return grad;
+    stop("0", dark);
+    stop(String(Math.max(0, edge.rInner / edge.rOuter)), dark);
+    stop("1", light);
+    defs.appendChild(grad);
+    return `url(#${id})`;
   }
   select(id) {
     this.selectedId = id;
@@ -2004,6 +2025,10 @@ var GanttView = class extends import_obsidian10.ItemView {
     (_a = this.unsubscribe) == null ? void 0 : _a.call(this);
     this.contentEl.empty();
   }
+  /** 设置页改了颜色基调之后重画一次（不涉及数据，所以不走 store） */
+  repaint() {
+    this.render();
+  }
   render() {
     var _a, _b, _c;
     this.rootEl.empty();
@@ -2031,7 +2056,7 @@ var GanttView = class extends import_obsidian10.ItemView {
     const container = this.rootEl.createDiv({ cls: "goalscape-gantt-container" });
     const width = container.clientWidth || 800;
     const chartWidth = width - LABEL_WIDTH;
-    const fills = branchFills(scape.mainGoal);
+    const fills = branchFills(scape.mainGoal, this.plugin.tone);
     const header = container.createDiv({ cls: "goalscape-gantt-header" });
     header.style.paddingLeft = `${LABEL_WIDTH}px`;
     const months = this.getMonthTicks(minTime, maxTime);
@@ -2243,6 +2268,31 @@ var TEMPLATES = [
   }
 ];
 
+// src/settingsTab.ts
+var import_obsidian11 = require("obsidian");
+var GoalscapeSettingTab = class extends import_obsidian11.PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "Goalscape \u989C\u8272\u57FA\u8C03" });
+    new import_obsidian11.Setting(containerEl).setName("Colour intensity").setDesc("\u67D4\u548C \u2190\u2192 \u6D53\u8273\u3002\u6574\u5F20\u56FE\u6240\u6709\u989C\u8272\u7684\u9971\u548C\u5EA6\u4E00\u8D77\u7F29\u653E\uFF0C\u9009\u7684\u989C\u8272\u672C\u8EAB\u4E0D\u53D8\u3002").addSlider(
+      (s) => s.setLimits(0, 100, 1).setValue(this.plugin.toneSettings.intensity).setDynamicTooltip().onChange((v) => this.apply({ intensity: v }))
+    );
+    new import_obsidian11.Setting(containerEl).setName("Level contrast").setDesc("\u5C42\u6B21\u5E73\u7F13 \u2190\u2192 \u5C42\u6B21\u5206\u660E\u3002\u63A7\u5236\u5F80\u5916\u4E00\u5708\u6BD4\u5185\u5708\u4EAE\u591A\u5C11\uFF0C\u8DDF\u989C\u8272\u672C\u8EAB\u65E0\u5173\u3002").addSlider(
+      (s) => s.setLimits(0, 100, 1).setValue(this.plugin.toneSettings.contrast).setDynamicTooltip().onChange((v) => this.apply({ contrast: v }))
+    );
+  }
+  apply(patch) {
+    this.plugin.toneSettings = { ...this.plugin.toneSettings, ...patch };
+    void this.plugin.persistData();
+    this.plugin.redrawViews();
+  }
+};
+
 // src/export/canvasSync.ts
 var PROGRESS_COLORS = {
   0: "1",
@@ -2382,9 +2432,9 @@ async function exportPng(svgEl, scale = 2) {
     canvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/png");
   });
 }
-function exportCsv(scape) {
+function exportCsv(scape, tone = DEFAULT_TONE) {
   const rows = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
-  const fills = branchFills(scape.mainGoal);
+  const fills = branchFills(scape.mainGoal, tone);
   const walk = (node, depth, parentTitle) => {
     var _a, _b, _c, _d;
     rows.push([
@@ -2438,18 +2488,27 @@ function downloadText(text, filename, mime = "text/plain") {
 }
 
 // src/main.ts
-var GoalscapePlugin = class extends import_obsidian11.Plugin {
+var GoalscapePlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
     /** 子树剪贴板随插件存活，放射图标签页之间共享 */
     this.clipboard = new SubtreeClipboard();
+    /** 设置页那两根滑杆的原始值（0..100），换算见 palette.toneFromSliders */
+    this.toneSettings = { ...DEFAULT_SLIDERS };
+  }
+  /** 视图与导出统一从这里取当前基调，别各自读 settings 再各自换算一遍 */
+  get tone() {
+    return toneFromSliders(this.toneSettings.intensity, this.toneSettings.contrast);
   }
   async onload() {
+    var _a;
     const saved = await this.loadData();
+    this.toneSettings = { ...this.toneSettings, ...(_a = saved == null ? void 0 : saved.tone) != null ? _a : {} };
     this.store = new GoalTreeStore(this, (saved == null ? void 0 : saved.currentPath) || DEFAULT_GOALSCAPE_PATH);
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
     this.registerView(VIEW_GANTT, (leaf) => new GanttView(leaf, this));
+    this.addSettingTab(new GoalscapeSettingTab(this.app, this));
     this.addRibbonIcon("target", "Open Goalscape radial map", () => {
       this.openView(VIEW_RADIAL);
     });
@@ -2466,7 +2525,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (!(file instanceof import_obsidian11.TFolder))
+        if (!(file instanceof import_obsidian12.TFolder))
           return;
         menu.addItem(
           (item) => item.setTitle("New goalscape").setIcon("target").onClick(() => void this.promptNewGoalscape())
@@ -2497,7 +2556,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
   async openSourceFile() {
     const file = this.store.file;
     if (!file) {
-      new import_obsidian11.Notice("Goalscape source file not found");
+      new import_obsidian12.Notice("Goalscape source file not found");
       return;
     }
     const leaf = this.app.workspace.getLeaf("tab");
@@ -2512,14 +2571,18 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
     if (path === this.store.path)
       return;
     await this.store.switchTo(path);
-    await this.saveData({ currentPath: path });
+    await this.persistData();
     this.refreshMapSelectors();
+  }
+  /** data.json 只有一个写入方：这里。任何要落盘的字段都得经这条路，否则互相覆盖 */
+  async persistData() {
+    await this.saveData({ currentPath: this.store.path, tone: this.toneSettings });
   }
   async createGoalscape(name) {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
     const path = `${GOALSCAPE_FOLDER}/${safe}${GOALSCAPE_SUFFIX}`;
     if (await this.app.vault.adapter.exists(path)) {
-      new import_obsidian11.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
+      new import_obsidian12.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
       await this.switchGoalscape(path);
       return;
     }
@@ -2542,6 +2605,15 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
   radialViews() {
     return this.app.workspace.getLeavesOfType(VIEW_RADIAL).map((leaf) => leaf.view).filter((v) => v instanceof RadialGoalMapView);
   }
+  /** 设置页改基调后重画。不走 store.mutate：那会把数据标记成"已修改"并落盘，而这里什么都没改 */
+  redrawViews() {
+    for (const v of this.radialViews())
+      v.repaint();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_GANTT)) {
+      if (leaf.view instanceof GanttView)
+        leaf.view.repaint();
+    }
+  }
   // ──────────────────────────── 导出 ────────────────────────────
   /**
    * 白板与图文件一一对应，用图文件名派生，不用根目标标题：
@@ -2560,12 +2632,12 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
     const json = canvasToJson(toCanvas(scape));
     const canvasPath = this.canvasPathFor();
     const existing = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (existing instanceof import_obsidian11.TFile) {
+    if (existing instanceof import_obsidian12.TFile) {
       await this.app.vault.modify(existing, json);
     } else {
       await this.app.vault.create(canvasPath, json);
     }
-    new import_obsidian11.Notice(`Canvas exported: ${canvasPath}`);
+    new import_obsidian12.Notice(`Canvas exported: ${canvasPath}`);
     await this.openCanvasFile(canvasPath);
   }
   /**
@@ -2579,16 +2651,16 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
     if (!scape)
       return;
     const canvasPath = this.canvasPathFor();
-    if (!(this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian11.TFile)) {
+    if (!(this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile)) {
       await this.app.vault.create(canvasPath, canvasToJson(toCanvas(scape)));
-      new import_obsidian11.Notice(`Created ${canvasPath}`);
+      new import_obsidian12.Notice(`Created ${canvasPath}`);
     }
     await this.openCanvasFile(canvasPath);
   }
   async openCanvasFile(canvasPath) {
     const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (!(file instanceof import_obsidian11.TFile)) {
-      new import_obsidian11.Notice(`Canvas file not found: ${canvasPath}`);
+    if (!(file instanceof import_obsidian12.TFile)) {
+      new import_obsidian12.Notice(`Canvas file not found: ${canvasPath}`);
       return;
     }
     const opened = this.app.workspace.getLeavesOfType("canvas").find((leaf2) => {
@@ -2606,7 +2678,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
   getRadialSvg() {
     const view = this.radialViews()[0];
     if (!view) {
-      new import_obsidian11.Notice("Open the radial view first");
+      new import_obsidian12.Notice("Open the radial view first");
       return null;
     }
     return view.getSvg();
@@ -2617,7 +2689,7 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
       return;
     const blob = await exportPng(svg);
     downloadBlob(blob, "goalscape.png");
-    new import_obsidian11.Notice("PNG exported");
+    new import_obsidian12.Notice("PNG exported");
   }
   exportSvg() {
     const svg = this.getRadialSvg();
@@ -2625,15 +2697,15 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
       return;
     const str = exportSvg(svg);
     downloadText(str, "goalscape.svg", "image/svg+xml");
-    new import_obsidian11.Notice("SVG exported");
+    new import_obsidian12.Notice("SVG exported");
   }
   exportCsv() {
     const scape = this.store.scape;
     if (!scape)
       return;
-    const csv = exportCsv(scape);
+    const csv = exportCsv(scape, this.tone);
     downloadText(csv, "goalscape.csv", "text/csv");
-    new import_obsidian11.Notice("CSV exported");
+    new import_obsidian12.Notice("CSV exported");
   }
   exportMarkdown() {
     const scape = this.store.scape;
@@ -2641,14 +2713,14 @@ var GoalscapePlugin = class extends import_obsidian11.Plugin {
       return;
     const md = exportMarkdownOutline(scape);
     downloadText(md, "goalscape-outline.md", "text/markdown");
-    new import_obsidian11.Notice("Markdown outline exported");
+    new import_obsidian12.Notice("Markdown outline exported");
   }
   // ──────────────────────────── 模板 ────────────────────────────
   showTemplateModal() {
     new TemplateModal(this.app, this).open();
   }
 };
-var TemplateModal = class extends import_obsidian11.Modal {
+var TemplateModal = class extends import_obsidian12.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -2659,7 +2731,7 @@ var TemplateModal = class extends import_obsidian11.Modal {
     contentEl.createEl("h3", { text: "Choose a template" });
     contentEl.createEl("p", { text: "This will replace your current goal tree. This cannot be undone.", cls: "goalscape-template-warning" });
     for (const t of TEMPLATES) {
-      new import_obsidian11.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
+      new import_obsidian12.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
         (btn) => btn.setButtonText("Apply").onClick(() => {
           this.plugin.store.mutate((s) => {
             const template = t.build();
@@ -2670,11 +2742,11 @@ var TemplateModal = class extends import_obsidian11.Modal {
             view.clearSelection();
           }
           this.close();
-          new import_obsidian11.Notice(`Template "${t.name}" applied`);
+          new import_obsidian12.Notice(`Template "${t.name}" applied`);
         })
       );
     }
-    new import_obsidian11.Setting(contentEl).addButton(
+    new import_obsidian12.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
     );
   }

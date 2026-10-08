@@ -6,7 +6,7 @@
 import { Setting, Notice, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode } from "../data/types";
-import { PALETTE_SWATCHES } from "../data/palette";
+import { paletteSwatches } from "../data/palette";
 import { renameGoal, adjustImportance } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "./radialGeometry";
 import { promptInput } from "./promptModal";
@@ -291,7 +291,8 @@ export class InfoPanel {
     if (!node.color) auto.addClass("goalscape-swatch-active");
     auto.addEventListener("click", () => this.setColor(node, undefined));
 
-    for (const hex of PALETTE_SWATCHES) {
+    // 色盘跟着设置页那根"浓艳度"滑杆一起变，所以色块上看到的就是图上会有的颜色
+    for (const hex of paletteSwatches(this.plugin.tone)) {
       const swatch = swatches.createEl("button", { cls: "goalscape-swatch" });
       swatch.style.backgroundColor = hex;
       swatch.title = hex;

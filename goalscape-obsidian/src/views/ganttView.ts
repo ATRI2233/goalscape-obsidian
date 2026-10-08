@@ -40,6 +40,11 @@ export class GanttView extends ItemView {
     this.contentEl.empty();
   }
 
+  /** 设置页改了颜色基调之后重画一次（不涉及数据，所以不走 store） */
+  repaint(): void {
+    this.render();
+  }
+
   private render(): void {
     this.rootEl.empty();
     const scape = this.plugin.store.scape;
@@ -66,8 +71,8 @@ export class GanttView extends ItemView {
     const container = this.rootEl.createDiv({ cls: "goalscape-gantt-container" });
     const width = container.clientWidth || 800;
     const chartWidth = width - LABEL_WIDTH;
-    // 甘特条用放射图同一份最终底色，两边看到的颜色必须是一个东西
-    const fills = branchFills(scape.mainGoal);
+    // 甘特条用放射图同一份最终底色（含设置页那两根滑杆），两边看到的颜色必须是一个东西
+    const fills = branchFills(scape.mainGoal, this.plugin.tone);
 
     const header = container.createDiv({ cls: "goalscape-gantt-header" });
     header.style.paddingLeft = `${LABEL_WIDTH}px`;

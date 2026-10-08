@@ -8,6 +8,8 @@ import { GoalListView } from "./views/listView";
 import { GanttView } from "./views/ganttView";
 import { VIEW_RADIAL, VIEW_LIST, VIEW_GANTT } from "./views/viewTypes";
 import { TEMPLATES } from "./data/templates";
+import { DEFAULT_SLIDERS, Tone, toneFromSliders } from "./data/palette";
+import { GoalscapeSettingTab } from "./settingsTab";
 import { promptInput } from "./views/promptModal";
 import { SubtreeClipboard } from "./views/radialMenu";
 import { toCanvas, canvasToJson } from "./export/canvasSync";
@@ -17,14 +19,24 @@ export default class GoalscapePlugin extends Plugin {
   store!: GoalTreeStore;
   /** 子树剪贴板随插件存活，放射图标签页之间共享 */
   readonly clipboard = new SubtreeClipboard();
+  /** 设置页那两根滑杆的原始值（0..100），换算见 palette.toneFromSliders */
+  toneSettings = { ...DEFAULT_SLIDERS };
+
+  /** 视图与导出统一从这里取当前基调，别各自读 settings 再各自换算一遍 */
+  get tone(): Tone {
+    return toneFromSliders(this.toneSettings.intensity, this.toneSettings.contrast);
+  }
 
   async onload(): Promise<void> {
-    const saved = (await this.loadData()) as { currentPath?: string } | null;
+    const saved = (await this.loadData()) as
+      { currentPath?: string; tone?: Partial<{ intensity: number; contrast: number }> } | null;
+    this.toneSettings = { ...this.toneSettings, ...(saved?.tone ?? {}) };
     this.store = new GoalTreeStore(this, saved?.currentPath || DEFAULT_GOALSCAPE_PATH);
 
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
     this.registerView(VIEW_GANTT, (leaf) => new GanttView(leaf, this));
+    this.addSettingTab(new GoalscapeSettingTab(this.app, this));
 
     this.addRibbonIcon("target", "Open Goalscape radial map", () => {
       this.openView(VIEW_RADIAL);
@@ -104,8 +116,13 @@ export default class GoalscapePlugin extends Plugin {
   async switchGoalscape(path: string): Promise<void> {
     if (path === this.store.path) return;
     await this.store.switchTo(path);
-    await this.saveData({ currentPath: path });
+    await this.persistData();
     this.refreshMapSelectors();
+  }
+
+  /** data.json 只有一个写入方：这里。任何要落盘的字段都得经这条路，否则互相覆盖 */
+  async persistData(): Promise<void> {
+    await this.saveData({ currentPath: this.store.path, tone: this.toneSettings });
   }
 
   async createGoalscape(name: string): Promise<void> {
@@ -143,6 +160,14 @@ export default class GoalscapePlugin extends Plugin {
       .getLeavesOfType(VIEW_RADIAL)
       .map((leaf) => leaf.view)
       .filter((v): v is RadialGoalMapView => v instanceof RadialGoalMapView);
+  }
+
+  /** 设置页改基调后重画。不走 store.mutate：那会把数据标记成"已修改"并落盘，而这里什么都没改 */
+  redrawViews(): void {
+    for (const v of this.radialViews()) v.repaint();
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_GANTT)) {
+      if (leaf.view instanceof GanttView) leaf.view.repaint();
+    }
   }
 
   // ──────────────────────────── 导出 ────────────────────────────
@@ -236,7 +261,7 @@ export default class GoalscapePlugin extends Plugin {
   private exportCsv(): void {
     const scape = this.store.scape;
     if (!scape) return;
-    const csv = exportCsv(scape);
+    const csv = exportCsv(scape, this.tone);
     downloadText(csv, "goalscape.csv", "text/csv");
     new Notice("CSV exported");
   }

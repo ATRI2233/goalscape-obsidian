@@ -260,15 +260,32 @@
   filter: brightness(1.08);
 }
 
-/* 整组一次投影：图"浮"在页面上。逐扇区投影会让留白处的每条内弧各自带一圈灰，糊成脏影 */
-.goalscape-map {
-  filter: drop-shadow(0 10px 26px rgba(0, 0, 0, 0.38));
+/* 图后面垫一块"台面"：比页面中心稍亮的一圈光。
+   没有它，黑色投影落在近黑的底色上根本没有落点 —— 之前整组投影等于白做 */
+.goalscape-radial-root {
+  background: radial-gradient(circle at 50% 47%, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0) 62%);
 }
 
-/* 光源叠层和外缘进度条只是贴在扇区上的画法，挡了命中测试就点不动扇区了 */
-.goalscape-sheen,
+/* 整组一次投影：图"浮"在页面上。逐扇区投影会让留白处的每条内弧各自带一圈灰，糊成脏影 */
+.goalscape-map {
+  filter: drop-shadow(0 14px 30px rgba(0, 0, 0, 0.5));
+}
+
+/* 倒角和外缘进度条只是贴在扇区上的画法，挡了命中测试就点不动扇区了 */
+.goalscape-bevel,
 .goalscape-rim {
   pointer-events: none;
+}
+
+/* 外缘一道极细亮边，勾轮廓。暗底用亮边；亮色主题下亮边等于没有，换成压一道暗边 */
+.goalscape-bevel {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: 1.2;
+}
+
+.theme-light .goalscape-bevel {
+  stroke: rgba(0, 0, 0, 0.12);
 }
 
 /* stroke-width 与 radialGeometry 的 RIM_WIDTH 成对，改一处要改两处。
