@@ -134,6 +134,9 @@ export class GanttView extends ItemView {
             const found = this.findInScape(s.mainGoal, node.id);
             if (found) found.progress = pct;
           });
+        } else {
+          // 父级进度是汇总值、不能手填：不重绘的话，拖拽时改过的条形会停在假位置上
+          this.render();
         }
       };
 

@@ -168,13 +168,43 @@
 - 注意：Edit 工具会把字符串字面量里的真实 BOM 字符吃掉（写成 `""` 变空串），
   必须用 `String.fromCharCode(0xfeff)`；esbuild 会把它压成 `fromCharCode(65279)`。
 
+### 数据安全隐患：删除整棵子树零确认（已修，实测）
+- 工具栏 Delete 与右键 Delete 都直接 `deleteGoal`，带后代的节点一点击就整支消失，且插件数据没有撤销。
+- 修法：`promptModal.ts` 加 `confirmAction()`；`radialView.confirmDelete()` 只在**有后代**时弹确认
+  （叶子节点删除很常见，不制造摩擦），文案带上子目标数量。
+- 踩过的坑：`Modal.close()` 会**同步**触发 `onClose()`。第一版按钮先 `close()` 再 `onAnswer(true)`，
+  于是 onClose 里的"取消"分支先把 Promise 定成 false，确认删除静默失效 —— 实测表现为
+  点 Delete 确认后节点数纹丝不动（17→17）。改成先 `onAnswer` 后 `close`。
+- 实测（临时图 ZZ_DEL + Life Balance 模板，17 节点）：选中 Health 点 Delete → 弹
+  `Delete "Health" together with its 3 sub-goals? This cannot be undone.`；Cancel → 仍 17 节点；
+  再次确认 → 13 节点（连带 3 个子目标）；选中叶子节点删除 → 不弹框、13→12。临时图已删，life 仍 732 字节。
+
+### 真实 bug：Gantt 里拖动父级条形会留下"假进度"（已修，实测）
+- `attachProgressDrag` 的 move 会即时改条形宽度与 fill，但 `up` 只在**叶子节点**上落盘；
+  父级进度是汇总值不能手填，于是既不落盘也不重绘 —— 条形就停在用户拖到的假位置上，
+  直到下一次别的操作触发 render 才突然弹回，数据与界面不一致。
+- 修法：父级分支在 `up` 里显式 `this.render()` 回弹。
+- 实测（临时图 ZZ_G，17 个带日期节点，亮色主题）：拖父级手柄到 80% → 松手后 DOM 读回 62%，
+  与 `store.scape.mainGoal.progress` 的 62 一致（`revertedToData:true`）。
+  第一版断言误报过"没修好"：拿的是 render 前那个已游离的 bar 元素，改成每次重新查 DOM 才对。
+
+### 亮色主题复核（已完成）
+- 放射图：见上文对比度一节，暗/亮两主题 min 4.37:1。
+- List 视图：正常（`D:/tmp/light_list.png`）。Gantt 有排期条形：正常
+  （`D:/tmp/light_gantt_bars.png`，17 行、月份刻度 2026-01..04、标签 rgb(34,34,34)）。
+  信息面板：正常（`D:/tmp/light_panel.png` + 实测 320×722、9 个字段、输入框深字白底）。
+- 踩过的坑：测试脚本反复 `getLeaf(false)` 会在用户工作区里堆出**空的重复标签**
+  （实测出现过 4 个 radial leaf，其中一个是 `view.select` 都不存在的未初始化 leaf），
+  于是"面板没刷新"其实是选中了那个空 leaf。收尾必须 detach 多余标签并清掉选中态。
+
 ## 剩余未实测
 
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测（见上）。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
 - 没有自动化测试基建（无 vitest/jest），目前"单测"是临时 esbuild 转译 + 手写断言，没留在仓库里。
 - ~~放射图视觉重做只在暗色主题下截过图~~ 已补：亮色主题下标签、环间隙、导出底色均已复核（见上两节）。
-- 亮色主题下 List / Gantt 视图与右侧信息面板未截图复核（本轮只改了放射图与导出）。
+- ~~亮色主题下 List 视图已截图复核（正常）；Gantt 只看到空态（life 图没有日期），有排期的甘特条在亮色下的配色未验证；右侧信息面板亮色也未截图复核。~~
+  已补验，见"亮色主题复核"一节。
 
 ## 后续计划（按优先级）
 
@@ -186,4 +216,4 @@
    视图/命令注册之后，数据出问题只影响图的内容，不再连带让标签页退化成"插件不再活动"占位页。
 6. 可选打磨：右键菜单加"应用颜色到子目标"入口、Focus Filter 加"高亮匹配项列表"侧栏、
    Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
-7. 可选：亮色主题下复核 List / Gantt 视图与信息面板配色（本轮只覆盖了放射图与导出）。
+7. ~~可选：亮色主题下补验 Gantt 条形与信息面板配色~~ 已完成（见"亮色主题复核"），顺带修掉 Gantt 父级条形的假进度。

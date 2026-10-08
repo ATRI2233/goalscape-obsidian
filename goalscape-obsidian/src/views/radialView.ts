@@ -5,7 +5,7 @@
 
 import { ItemView, WorkspaceLeaf, Menu, Notice } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, flattenTree } from "../data/types";
+import { GoalNode, flattenTree, findNode } from "../data/types";
 import {
   addGoal,
   deleteGoal,
@@ -15,7 +15,7 @@ import {
   pasteSubtree,
   moveGoal,
 } from "../data/crud";
-import { promptInput } from "./promptModal";
+import { promptInput, confirmAction } from "./promptModal";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria } from "./focusFilter";
 
@@ -200,14 +200,27 @@ export class RadialGoalMapView extends ItemView {
     this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
   }
 
-  private deleteSelected(): void {
+  private async deleteSelected(): Promise<void> {
     if (!this.selectedId) {
       new Notice("Select a goal first");
       return;
     }
     const id = this.selectedId;
+    const scape = this.plugin.store.scape;
+    const found = scape ? findNode(scape.mainGoal, id) : null;
+    if (!found || !(await this.confirmDelete(found.node))) return;
     this.plugin.store.mutate((s) => deleteGoal(s, id));
     this.select(null);
+  }
+
+  /** 删除没有撤销，带后代的节点会一整支消失，所以这种情况必须先确认 */
+  private async confirmDelete(node: GoalNode): Promise<boolean> {
+    const descendants = flattenTree(node).length - 1;
+    if (!descendants) return true;
+    return confirmAction(
+      this.app,
+      `Delete "${node.title}" together with its ${descendants} sub-goal${descendants > 1 ? "s" : ""}? This cannot be undone.`
+    );
   }
 
   async onClose(): Promise<void> {
@@ -667,7 +680,8 @@ export class RadialGoalMapView extends ItemView {
     if (!isMain) {
       menu.addItem((item) =>
         item.setTitle("Delete").setIcon("trash-2")
-          .onClick(() => {
+          .onClick(async () => {
+            if (!(await this.confirmDelete(node))) return;
             this.plugin.store.mutate((s) => deleteGoal(s, node.id));
             if (this.selectedId === node.id) this.select(null);
           })

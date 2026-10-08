@@ -408,6 +408,48 @@ function promptInput(app, title, initial) {
     modal.open();
   });
 }
+function confirmAction(app, message, okText = "Delete") {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (ok) => {
+      if (settled)
+        return;
+      settled = true;
+      resolve(ok);
+    };
+    const modal = new ConfirmModal(app, message, okText, settle, () => settle(false));
+    modal.open();
+  });
+}
+var ConfirmModal = class extends import_obsidian2.Modal {
+  constructor(app, message, okText, onAnswer, onCancel) {
+    super(app);
+    this.message = message;
+    this.okText = okText;
+    this.onAnswer = onAnswer;
+    this.onCancel = onCancel;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("p", { text: this.message });
+    new import_obsidian2.Setting(contentEl).addButton(
+      (btn) => btn.setButtonText(this.okText).setCta().onClick(() => {
+        this.onAnswer(true);
+        this.close();
+      })
+    ).addButton(
+      (btn) => btn.setButtonText("Cancel").onClick(() => {
+        this.onAnswer(false);
+        this.close();
+      })
+    );
+  }
+  onClose() {
+    this.onCancel();
+    this.contentEl.empty();
+  }
+};
 var PromptModal = class extends import_obsidian2.Modal {
   constructor(app, titleText, initial, onSubmit) {
     super(app);
@@ -855,14 +897,28 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
       return;
     this.plugin.store.mutate((s) => addGoal(s, refId, position, title));
   }
-  deleteSelected() {
+  async deleteSelected() {
     if (!this.selectedId) {
       new import_obsidian4.Notice("Select a goal first");
       return;
     }
     const id = this.selectedId;
+    const scape = this.plugin.store.scape;
+    const found = scape ? findNode(scape.mainGoal, id) : null;
+    if (!found || !await this.confirmDelete(found.node))
+      return;
     this.plugin.store.mutate((s) => deleteGoal(s, id));
     this.select(null);
+  }
+  /** 删除没有撤销，带后代的节点会一整支消失，所以这种情况必须先确认 */
+  async confirmDelete(node) {
+    const descendants = flattenTree(node).length - 1;
+    if (!descendants)
+      return true;
+    return confirmAction(
+      this.app,
+      `Delete "${node.title}" together with its ${descendants} sub-goal${descendants > 1 ? "s" : ""}? This cannot be undone.`
+    );
   }
   async onClose() {
     var _a;
@@ -1306,7 +1362,9 @@ var RadialGoalMapView = class extends import_obsidian4.ItemView {
     menu.addSeparator();
     if (!isMain) {
       menu.addItem(
-        (item) => item.setTitle("Delete").setIcon("trash-2").onClick(() => {
+        (item) => item.setTitle("Delete").setIcon("trash-2").onClick(async () => {
+          if (!await this.confirmDelete(node))
+            return;
           this.plugin.store.mutate((s) => deleteGoal(s, node.id));
           if (this.selectedId === node.id)
             this.select(null);
@@ -1620,6 +1678,8 @@ var GanttView = class extends import_obsidian6.ItemView {
             if (found)
               found.progress = pct;
           });
+        } else {
+          this.render();
         }
       };
       window.addEventListener("pointermove", move);
