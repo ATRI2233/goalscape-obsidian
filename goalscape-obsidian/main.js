@@ -563,6 +563,31 @@ function toLogicalPoint(svg, clientX, clientY) {
   const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
   return { x: p.x, y: p.y };
 }
+var FULL_VIEW = { x: 0, y: 0, size: VIEW_SIZE };
+var MAX_ZOOM = 8;
+var ZOOM_PER_NOTCH = 1.15;
+var clampNum = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+function clampView(v) {
+  const size = clampNum(v.size, VIEW_SIZE / MAX_ZOOM, VIEW_SIZE);
+  const max = VIEW_SIZE - size;
+  return { x: clampNum(v.x, 0, max), y: clampNum(v.y, 0, max), size };
+}
+function zoomView(v, notch, anchor) {
+  const next = clampView({ ...v, size: v.size / Math.pow(ZOOM_PER_NOTCH, notch) });
+  const k = next.size / v.size;
+  return clampView({
+    x: anchor.x - (anchor.x - v.x) * k,
+    y: anchor.y - (anchor.y - v.y) * k,
+    size: next.size
+  });
+}
+function panView(v, dx, dy) {
+  return clampView({ ...v, x: v.x - dx, y: v.y - dy });
+}
+function viewBoxOf(v) {
+  const r = (n) => n.toFixed(2);
+  return `${r(v.x)} ${r(v.y)} ${r(v.size)} ${r(v.size)}`;
+}
 function hitTestSector(positions, point) {
   const dx = point.x - CX;
   const dy = point.y - CY;
@@ -1527,24 +1552,33 @@ var VIEW_OPTIONS = [
   { type: VIEW_RADIAL, label: "Radial map", icon: "target" },
   { type: VIEW_LIST, label: "Goal list", icon: "list" },
   { type: VIEW_GANTT, label: "Gantt", icon: "calendar" },
-  { type: VIEW_CANVAS, label: "Canvas (\u767D\u677F)", icon: "layout-grid" }
+  {
+    type: VIEW_CANVAS,
+    label: "Canvas (\u767D\u677F)",
+    icon: "layout-grid",
+    hint: "\u767D\u677F\u7531\u8FD9\u5F20\u56FE\u81EA\u52A8\u66F4\u65B0\uFF1A\u5361\u7247\u4F4D\u7F6E\u662F\u4F60\u81EA\u5DF1\u7684\uFF0C\u6807\u9898\u548C\u8FDE\u7EBF\u8DDF\u7740\u56FE\u8D70"
+  }
 ];
 
 // src/views/viewSwitcher.ts
 var import_obsidian7 = require("obsidian");
 function createViewSwitcher(container, plugin, leaf, currentType) {
+  var _a;
   const group = container.createDiv({ cls: "goalscape-view-switch" });
   group.setAttr("role", "group");
   group.setAttr("aria-label", "Presentation mode");
   for (const option of VIEW_OPTIONS) {
     const btn = group.createEl("button", { cls: "goalscape-view-seg" });
     btn.setAttr("aria-label", option.label);
+    btn.setAttr("data-view", option.type);
     if (option.type === currentType) {
       btn.addClass("is-active");
       btn.setAttr("aria-current", "true");
     }
+    if (option.type === VIEW_CANVAS)
+      btn.toggleClass("is-stale", plugin.canvasStale);
     (0, import_obsidian7.setIcon)(btn, option.icon);
-    (0, import_obsidian7.setTooltip)(btn, option.label, { placement: "bottom" });
+    (0, import_obsidian7.setTooltip)(btn, (_a = option.hint) != null ? _a : option.label, { placement: "bottom" });
     btn.addEventListener("click", () => {
       if (option.type === currentType)
         return;
@@ -1563,6 +1597,7 @@ function scapeName(path) {
   return path.split("/").pop().replace(/\.goalscape\.json$/, "");
 }
 var viewSeq = 0;
+var PAN_ACTIVATE_PX = 5;
 var RadialGoalMapView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
@@ -1570,6 +1605,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.selectedId = null;
     this.filterCriteria = {};
     this.nodePositions = /* @__PURE__ */ new Map();
+    /** 当前视野（viewBox），跨 render 保持；分屏各自一份，互不影响 */
+    this.view = FULL_VIEW;
+    /** 平移收尾时浏览器补的那次 click 不该清掉选中态 */
+    this.panMoved = false;
     /** 分屏会同时挂两个 svg，id 撞了以后 url(#id) 只认文档里第一个 defs，所以逐视图编号 */
     this.uid = `goalscape-${++viewSeq}`;
     this.gradSeq = 0;
@@ -1598,6 +1637,12 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     });
     const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
     this.rootEl = mainRow.createDiv({ cls: "goalscape-radial-root" });
+    this.registerDomEvent(this.rootEl, "wheel", (e) => this.onWheel(e), { passive: false });
+    this.registerDomEvent(this.rootEl, "pointerdown", (e) => this.onBackgroundPointerDown(e));
+    this.registerDomEvent(this.rootEl, "dblclick", (e) => {
+      if (e.target instanceof SVGSVGElement)
+        this.setView(FULL_VIEW);
+    });
     const panelEl = mainRow.createDiv({ cls: "goalscape-panel" });
     this.infoPanel = new InfoPanel(panelEl, this.plugin);
     this.infoPanel.show(this.selectedId);
@@ -1671,7 +1716,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     if (!scape)
       return;
     const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
+    svg.setAttribute("viewBox", viewBoxOf(this.view));
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
     const defs = document.createElementNS(SVG_NS, "defs");
@@ -1783,6 +1828,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     };
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
     svg.addEventListener("click", () => {
+      if (this.panMoved) {
+        this.panMoved = false;
+        return;
+      }
       if (this.selectedId)
         this.clearSelection();
     });
@@ -1866,6 +1915,57 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       }
     });
     menu.showAtMouseEvent(event);
+  }
+  // ──────────────────────────── 视野（滚轮缩放 / 平移） ────────────────────────────
+  /** 只改 viewBox：扇区、渐变、标签一概不重建，命中测试拿 getScreenCTM 反算，跟着视野自然对齐 */
+  setView(v) {
+    this.view = v;
+    const svg = this.liveSvg();
+    if (svg)
+      svg.setAttribute("viewBox", viewBoxOf(v));
+  }
+  /**
+   * 滚轮以光标为锚缩放：放大外层环时若朝图中心收，正看着的那一块会被直接推出屏幕。
+   * 一格滚轮折成约 100（行/页模式先换算到同一量纲），单次事件最多吃 3 格，快速甩也不至于一格到底。
+   */
+  onWheel(e) {
+    const svg = this.liveSvg();
+    if (!svg)
+      return;
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 300 : 100;
+    const notch = Math.max(-3, Math.min(3, -e.deltaY / unit));
+    if (!notch)
+      return;
+    this.setView(zoomView(this.view, notch, toLogicalPoint(svg, e.clientX, e.clientY)));
+  }
+  /**
+   * 平移只接手 svg 空白处：扇区上的 pointerdown 归 reparent 拖拽，两处都接同一个手势会互相抢。
+   * 位移从"按下那一刻的视野"起算、不在上一次结果上累加，所以顶到边界再拖回来不会攒出漂移。
+   */
+  onBackgroundPointerDown(e) {
+    this.panMoved = false;
+    const svg = e.target;
+    if (!(svg instanceof SVGSVGElement) || e.button !== 0)
+      return;
+    const ctm = svg.getScreenCTM();
+    if (!(ctm == null ? void 0 : ctm.a))
+      return;
+    const from = { x: e.clientX, y: e.clientY, view: this.view };
+    let moved = false;
+    const move = (ev) => {
+      if (!moved && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) <= PAN_ACTIVATE_PX)
+        return;
+      moved = true;
+      this.setView(panView(from.view, (ev.clientX - from.x) / ctm.a, (ev.clientY - from.y) / ctm.a));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      this.panMoved = viewBoxOf(from.view) !== viewBoxOf(this.view);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
   // ──────────────────────────── 拖拽现场 ────────────────────────────
   /** 交给拖拽控制器的最小现场；视图内部状态其余保持私有 */
@@ -2306,6 +2406,10 @@ var GoalscapeSettingTab = class extends import_obsidian11.PluginSettingTab {
     new import_obsidian11.Setting(containerEl).setName("Level contrast").setDesc("\u5C42\u6B21\u5E73\u7F13 \u2190\u2192 \u5C42\u6B21\u5206\u660E\u3002\u63A7\u5236\u5F80\u5916\u4E00\u5708\u6BD4\u5185\u5708\u4EAE\u591A\u5C11\uFF0C\u8DDF\u989C\u8272\u672C\u8EAB\u65E0\u5173\u3002").addSlider(
       (s) => s.setLimits(0, 100, 1).setValue(this.plugin.toneSettings.contrast).setDynamicTooltip().onChange((v) => this.apply({ contrast: v }))
     );
+    containerEl.createEl("h2", { text: "\u767D\u677F (.canvas)" });
+    new import_obsidian11.Setting(containerEl).setName("\u81EA\u52A8\u66F4\u65B0\u767D\u677F").setDesc(
+      "\u6539\u5B8C\u76EE\u6807\u5C31\u81EA\u52A8\u628A\u540C\u540D .canvas \u5237\u65B0\uFF0C\u4E0D\u7528\u624B\u70B9\u5BFC\u51FA\u3002\u767D\u677F\u6807\u7B7E\u9875\u5F00\u7740\u65F6\u4F1A\u5148\u7B49\u5F85\uFF08\u8FD9\u65F6\u786C\u5199\u4F1A\u628A\u4F60\u5728\u770B\u7684\u5185\u5BB9\u76D6\u6389\uFF09\uFF0C\u5C0F\u5706\u70B9\u8868\u793A\u8FD8\u6B20\u4E00\u6B21\u66F4\u65B0\uFF0C\u5173\u6389\u6807\u7B7E\u9875\u5C31\u8865\u4E0A\u3002\u767D\u677F\u6587\u4EF6\u4E0D\u5B58\u5728\u65F6\u4E0D\u4F1A\u51ED\u7A7A\u521B\u5EFA\u3002"
+    ).addToggle((t) => t.setValue(this.plugin.canvasAuto).onChange((v) => this.plugin.setCanvasAuto(v)));
   }
   apply(patch) {
     this.plugin.toneSettings = { ...this.plugin.toneSettings, ...patch };
@@ -2315,6 +2419,10 @@ var GoalscapeSettingTab = class extends import_obsidian11.PluginSettingTab {
 };
 
 // src/export/canvasSync.ts
+var LAYOUT_KEYS = ["x", "y", "width", "height"];
+function generatedEdgeId(childId) {
+  return `e-${childId}`;
+}
 var PROGRESS_COLORS = {
   0: "1",
   // red
@@ -2330,12 +2438,13 @@ function progressToPreset(progress) {
   const idx = Math.min(3, Math.floor(progress / 25));
   return (_a = PROGRESS_COLORS[idx]) != null ? _a : "1";
 }
-function toCanvas(scape) {
+var NODE_W = 220;
+var NODE_H = 100;
+function buildCanvas(scape) {
   const nodes = [];
   const edges = [];
+  const parentOf = /* @__PURE__ */ new Map();
   const R = 600;
-  const NODE_W = 220;
-  const NODE_H = 100;
   function walk(node, depth, startAngle, endAngle, rInner, parentId) {
     var _a, _b;
     const mid = (startAngle + endAngle) / 2;
@@ -2347,16 +2456,20 @@ function toCanvas(scape) {
     nodes.push({
       id,
       type: "text",
-      x: Math.round(x - NODE_W / 2),
-      y: Math.round(y - NODE_H / 2),
+      x: Math.round(x),
+      y: Math.round(y),
       width: NODE_W,
       height: NODE_H,
       text: `**${node.title}**
 \u5360\u7236\u7EA7 ${node.importance}% \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`,
-      color: progressToPreset((_b = node.progress) != null ? _b : 0)
+      color: progressToPreset((_b = node.progress) != null ? _b : 0),
+      // 机器字段：Obsidian 不认识就原样留住（实测），镜像靠它认出哪张卡属于哪个目标
+      gsId: id,
+      gsDepth: depth
     });
     if (parentId) {
-      edges.push({ id: `e-${id}`, fromNode: parentId, toNode: id });
+      edges.push({ id: generatedEdgeId(id), fromNode: parentId, toNode: id });
+      parentOf.set(id, parentId);
     }
     const shares = childShares(node);
     if (!shares.some((s) => s > 0))
@@ -2370,10 +2483,118 @@ function toCanvas(scape) {
     });
   }
   walk(scape.mainGoal, 0, 0, Math.PI * 2, 0);
-  return { nodes, edges };
+  return { doc: { nodes, edges }, parentOf };
 }
 function canvasToJson(canvas) {
   return JSON.stringify(canvas, null, 2);
+}
+function parseCanvasJson(raw) {
+  try {
+    const v = JSON.parse(raw);
+    if (!v || !Array.isArray(v.nodes))
+      return null;
+    return {
+      nodes: v.nodes.filter((n) => !!n && typeof n.id === "string"),
+      edges: (Array.isArray(v.edges) ? v.edges : []).filter(
+        (e) => !!e && typeof e.fromNode === "string" && typeof e.toNode === "string" && typeof e.id === "string"
+      )
+    };
+  } catch (e) {
+    return null;
+  }
+}
+function trustedSnapshot(live, disk) {
+  if (live && live.nodes.length > 0)
+    return live;
+  return disk;
+}
+function claimedGoal(node) {
+  return typeof node.gsId === "string" ? node.gsId : node.id;
+}
+function collides(card, others, pad) {
+  return others.some(
+    (o) => Math.abs(card.x - o.x) < (card.width + o.width) / 2 + pad && Math.abs(card.y - o.y) < (card.height + o.height) / 2 + pad
+  );
+}
+var NEW_CARD_PAD = 24;
+var NEW_CARD_STEP = 140;
+var NEW_CARD_RINGS = 5;
+function placeNewCard(card, parent, occupied) {
+  if (!parent || !collides(card, occupied, NEW_CARD_PAD))
+    return card;
+  const dx = card.x - parent.x;
+  const dy = card.y - parent.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const px = -uy;
+  const py = ux;
+  for (let ring = 1; ring <= NEW_CARD_RINGS; ring++) {
+    for (const lateral of [0, -1, 1, -2, 2]) {
+      const cand = {
+        ...card,
+        x: Math.round(card.x + ux * ring * NEW_CARD_STEP + px * lateral * NEW_CARD_STEP),
+        y: Math.round(card.y + uy * ring * NEW_CARD_STEP + py * lateral * NEW_CARD_STEP)
+      };
+      if (!collides(cand, occupied, NEW_CARD_PAD))
+        return cand;
+    }
+  }
+  return card;
+}
+function refreshCanvas(scape, existing) {
+  const { doc: fresh, parentOf } = buildCanvas(scape);
+  if (!existing)
+    return fresh;
+  const liveIds = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
+  const mirrored = /* @__PURE__ */ new Map();
+  const extras = [];
+  for (const n of existing.nodes) {
+    const goal = claimedGoal(n);
+    if (liveIds.has(goal)) {
+      if (!mirrored.has(goal)) {
+        mirrored.set(goal, n);
+        continue;
+      }
+      const copy = { ...n };
+      delete copy.gsId;
+      delete copy.gsDepth;
+      extras.push(copy);
+      continue;
+    }
+    if (typeof n.gsId === "string")
+      continue;
+    extras.push(n);
+  }
+  const nodes = [];
+  for (const f of fresh.nodes) {
+    const o = mirrored.get(f.id);
+    if (!o) {
+      const parentId = parentOf.get(f.id);
+      const parentCard = nodes.find((c) => c.id === parentId);
+      nodes.push(placeNewCard(f, parentCard, [...nodes, ...extras]));
+      continue;
+    }
+    const merged = { ...o, ...f };
+    for (const k of LAYOUT_KEYS) {
+      const v = o[k];
+      if (typeof v === "number" && Number.isFinite(v))
+        merged[k] = v;
+    }
+    nodes.push(merged);
+  }
+  const kept = new Set([...nodes, ...extras].map((n) => n.id));
+  const ids = new Set(fresh.edges.map((e) => e.id));
+  const pairs = new Set(fresh.edges.map((e) => `${e.fromNode}>${e.toNode}`));
+  return {
+    nodes: [...nodes, ...extras],
+    edges: [
+      ...fresh.edges,
+      ...existing.edges.filter(
+        (e) => !ids.has(e.id) && !pairs.has(`${e.fromNode}>${e.toNode}`) && kept.has(e.fromNode) && kept.has(e.toNode)
+      )
+    ]
+  };
 }
 
 // src/export/exporters.ts
@@ -2425,7 +2646,9 @@ function withBackground(clone, color) {
   return clone;
 }
 function exportSvg(svgEl) {
-  const clone = withBackground(inlineComputedStyles(svgEl), themeBackground(svgEl));
+  const styled = inlineComputedStyles(svgEl);
+  styled.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
+  const clone = withBackground(styled, themeBackground(svgEl));
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("width", "1000");
   clone.setAttribute("height", "1000");
@@ -2509,6 +2732,10 @@ function downloadText(text, filename, mime = "text/plain") {
 }
 
 // src/main.ts
+var CANVAS_DEBOUNCE_MS = 800;
+var CANVAS_WRITE_RETRY = 3;
+var CANVAS_WRITE_SETTLE_MS = 150;
+var CANVAS_SETTLE_MS = 1e3;
 var GoalscapePlugin = class extends import_obsidian12.Plugin {
   constructor() {
     super(...arguments);
@@ -2516,15 +2743,24 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     this.clipboard = new SubtreeClipboard();
     /** 设置页那两根滑杆的原始值（0..100），换算见 palette.toneFromSliders */
     this.toneSettings = { ...DEFAULT_SLIDERS };
+    /** 白板自动镜像开关。关掉只剩手点命令 */
+    this.canvasAuto = true;
+    /** 白板标签页开着、这次没写进去的路径 —— 工具栏那个小点就按它亮 */
+    this.canvasPending = null;
+    this.canvasTimer = null;
+    /** 欠着一次更新时回头看标签页关没关的轮询 */
+    this.canvasSettleTimer = null;
+    this.canvasWriting = false;
   }
   /** 视图与导出统一从这里取当前基调，别各自读 settings 再各自换算一遍 */
   get tone() {
     return toneFromSliders(this.toneSettings.intensity, this.toneSettings.contrast);
   }
   async onload() {
-    var _a;
+    var _a, _b;
     const saved = await this.loadData();
     this.toneSettings = { ...this.toneSettings, ...(_a = saved == null ? void 0 : saved.tone) != null ? _a : {} };
+    this.canvasAuto = (_b = saved == null ? void 0 : saved.canvasAuto) != null ? _b : true;
     this.store = new GoalTreeStore(this, (saved == null ? void 0 : saved.currentPath) || DEFAULT_GOALSCAPE_PATH);
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
@@ -2538,7 +2774,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     this.addCommand({ id: "open-list-goalscape", name: "Open goal list view", callback: () => this.openView(VIEW_LIST) });
     this.addCommand({ id: "open-gantt-goalscape", name: "Open Gantt view", callback: () => this.openView(VIEW_GANTT) });
     this.addCommand({ id: "open-goalscape-source", name: "Open source JSON file", callback: () => this.openSourceFile() });
-    this.addCommand({ id: "export-canvas", name: "Export to .canvas", callback: () => this.exportCanvas() });
+    this.addCommand({ id: "export-canvas", name: "Refresh .canvas from goals", callback: () => this.exportCanvas() });
     this.addCommand({ id: "export-png", name: "Export radial map as PNG", callback: () => this.exportPng() });
     this.addCommand({ id: "export-svg", name: "Export radial map as SVG", callback: () => this.exportSvg() });
     this.addCommand({ id: "export-csv", name: "Export goals as CSV", callback: () => this.exportCsv() });
@@ -2554,6 +2790,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       })
     );
     await this.store.load();
+    this.watchCanvas();
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);
     } else {
@@ -2561,6 +2798,11 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     }
   }
   onunload() {
+    for (const t of [this.canvasTimer, this.canvasSettleTimer])
+      if (t !== null)
+        window.clearTimeout(t);
+    this.canvasTimer = null;
+    this.canvasSettleTimer = null;
   }
   async openView(type) {
     const { workspace } = this.app;
@@ -2597,7 +2839,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
   }
   /** data.json 只有一个写入方：这里。任何要落盘的字段都得经这条路，否则互相覆盖 */
   async persistData() {
-    await this.saveData({ currentPath: this.store.path, tone: this.toneSettings });
+    await this.saveData({ currentPath: this.store.path, tone: this.toneSettings, canvasAuto: this.canvasAuto });
   }
   async createGoalscape(name) {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
@@ -2646,37 +2888,196 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     const base = this.store.path.split("/").pop().replace(/\.goalscape\.json$/, "");
     return `${folder}/${base}.canvas`;
   }
-  async exportCanvas() {
-    const scape = this.store.scape;
-    if (!scape)
-      return;
-    const json = canvasToJson(toCanvas(scape));
-    const canvasPath = this.canvasPathFor();
-    const existing = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (existing instanceof import_obsidian12.TFile) {
-      await this.app.vault.modify(existing, json);
-    } else {
-      await this.app.vault.create(canvasPath, json);
-    }
-    new import_obsidian12.Notice(`Canvas exported: ${canvasPath}`);
-    await this.openCanvasFile(canvasPath);
+  /** 当前这张图的白板有没有"还没写进去的改动" */
+  get canvasStale() {
+    return !!this.canvasPending && this.canvasPending === this.canvasPathFor();
   }
   /**
-   * 切换器里的 Canvas 项：文件已存在就**原样打开**，不重新生成。
-   * 白板里手工摆的位置/连线经不起一次重导出 —— toCanvas() 是按放射布局重算坐标的单向转换，
-   * 且 GoalNode 根本没有 x/y 字段，位置在 goalscape 数据里无处可存。
-   * 只有文件还不存在时才生成第一版。
+   * 树 → 白板的自动镜像。三条约束都来自实测，不是洁癖：
+   * - 白板文件不存在时**绝不自动创建**，凭空往 vault 扔文件是另一种丢数据；
+   * - 白板标签页开着时不写盘：Obsidian 的 canvas 视图内存领先磁盘几十秒，
+   *   它任何一次补写都会盖在我们后面 —— 用户今天的布局就是这么没的；
+   * - 内容一样不写：插件启动也会 notify 一次，不该白白改一次文件。
+   */
+  watchCanvas() {
+    this.register(this.store.subscribe(() => this.queueCanvasRefresh()));
+    this.registerEvent(this.app.workspace.on("layout-change", () => this.settlePendingCanvas()));
+    this.paintCanvasBadges();
+  }
+  queueCanvasRefresh() {
+    if (!this.canvasAuto || !this.store.scape)
+      return;
+    if (this.canvasTimer !== null)
+      window.clearTimeout(this.canvasTimer);
+    this.canvasTimer = window.setTimeout(() => {
+      this.canvasTimer = null;
+      void this.refreshCanvasFile(false);
+    }, CANVAS_DEBOUNCE_MS);
+  }
+  settlePendingCanvas() {
+    if (!this.canvasAuto || !this.canvasPending)
+      return;
+    if (this.canvasPending !== this.canvasPathFor()) {
+      this.canvasPending = null;
+      this.paintCanvasBadges();
+      return;
+    }
+    if (this.canvasOpenLeaves(this.canvasPending).length) {
+      this.armCanvasSettle();
+      return;
+    }
+    void this.refreshCanvasFile(false);
+  }
+  armCanvasSettle() {
+    if (this.canvasSettleTimer !== null)
+      return;
+    this.canvasSettleTimer = window.setTimeout(() => {
+      this.canvasSettleTimer = null;
+      this.settlePendingCanvas();
+    }, CANVAS_SETTLE_MS);
+  }
+  /** 设置页那个开关。关掉之后不该留一颗永远不会消失的小点，打开则欠着的马上补一次 */
+  setCanvasAuto(v) {
+    this.canvasAuto = v;
+    void this.persistData();
+    if (v) {
+      this.queueCanvasRefresh();
+      return;
+    }
+    this.canvasPending = null;
+    this.paintCanvasBadges();
+  }
+  /**
+   * Obsidian 没有公开"这块白板有没有未保存的改动"，而它任何一次补写都会盖在我们后面
+   * （实测内存领先磁盘几十秒，关标签页时还会再落一次），所以规则只能是一条：**有人开着就不写**。
+   */
+  canvasOpenLeaves(canvasPath) {
+    return this.app.workspace.getLeavesOfType("canvas").filter((l) => {
+      var _a;
+      return ((_a = l.view.file) == null ? void 0 : _a.path) === canvasPath;
+    });
+  }
+  liveCanvasDoc(leaf) {
+    var _a;
+    const canvas = (_a = leaf == null ? void 0 : leaf.view) == null ? void 0 : _a.canvas;
+    if (typeof (canvas == null ? void 0 : canvas.getData) !== "function")
+      return null;
+    try {
+      return parseCanvasJson(JSON.stringify(canvas.getData()));
+    } catch (e) {
+      return null;
+    }
+  }
+  /** 白板快照：内存优先（实测它领先磁盘几十秒），但只有真加载出卡片才算可信，否则退回磁盘 */
+  async canvasSnapshot(canvasPath) {
+    const leaf = this.canvasOpenLeaves(canvasPath)[0];
+    const disk = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile ? parseCanvasJson(await this.app.vault.adapter.read(canvasPath).catch(() => "")) : null;
+    return trustedSnapshot(this.liveCanvasDoc(leaf), disk);
+  }
+  /**
+   * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
+   * 自动路径只在"文件已存在 && 没人开着这块白板"时写。
+   */
+  async refreshCanvasFile(explicit) {
+    const scape = this.store.scape;
+    if (!scape || this.canvasWriting)
+      return;
+    const path = this.canvasPathFor();
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof import_obsidian12.TFile) && !explicit)
+      return;
+    const open = this.canvasOpenLeaves(path);
+    if (!explicit && open.length) {
+      this.canvasPending = path;
+      this.paintCanvasBadges();
+      return;
+    }
+    const json = canvasToJson(refreshCanvas(scape, await this.canvasSnapshot(path)));
+    if (file instanceof import_obsidian12.TFile) {
+      const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
+      if (disk === json.trim()) {
+        this.canvasPending = null;
+        this.paintCanvasBadges();
+        if (explicit) {
+          new import_obsidian12.Notice(`\u767D\u677F\u5DF2\u662F\u6700\u65B0\uFF1A${path}`);
+          await this.openCanvasFile(path);
+        }
+        return;
+      }
+    }
+    this.canvasWriting = true;
+    let written = false;
+    try {
+      for (const l of open)
+        l.detach();
+      await new Promise((r) => window.setTimeout(r, CANVAS_WRITE_SETTLE_MS));
+      written = await this.writeCanvasDoc(path, json);
+      this.canvasPending = written ? null : path;
+    } finally {
+      this.canvasWriting = false;
+    }
+    this.paintCanvasBadges();
+    if (!explicit)
+      return;
+    new import_obsidian12.Notice(written ? `\u767D\u677F\u5DF2\u66F4\u65B0\uFF1A${path}` : `\u767D\u677F\u5199\u5165\u5931\u8D25\uFF1A${path}`);
+    await this.openCanvasFile(path);
+  }
+  /**
+   * 写完读回来确认落盘的是我们这份 —— 刚摘掉的 canvas 视图会把内存里那份补写一次，
+   * 实测就发生在我们的 modify 之后。重试几次比假装没这回事便宜。
+   */
+  async writeCanvasDoc(path, json) {
+    for (let i = 0; i < CANVAS_WRITE_RETRY; i++) {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      try {
+        if (f instanceof import_obsidian12.TFile)
+          await this.app.vault.modify(f, json);
+        else
+          await this.app.vault.create(path, json);
+      } catch (e) {
+        return false;
+      }
+      const back = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
+      if (back === json.trim())
+        return true;
+      await new Promise((r) => window.setTimeout(r, CANVAS_WRITE_SETTLE_MS));
+    }
+    return false;
+  }
+  /** 工具栏 Canvas 段上的小点：这块白板有还没写进去的改动 */
+  paintCanvasBadges() {
+    const stale = this.canvasStale;
+    for (const type of [VIEW_RADIAL, VIEW_LIST, VIEW_GANTT]) {
+      for (const leaf of this.app.workspace.getLeavesOfType(type)) {
+        const seg = leaf.view.containerEl.querySelector(
+          `.goalscape-view-seg[data-view='${VIEW_CANVAS}']`
+        );
+        seg == null ? void 0 : seg.toggleClass("is-stale", stale);
+      }
+    }
+  }
+  async exportCanvas() {
+    await this.refreshCanvasFile(true);
+  }
+  /**
+   * 切换器里的 Canvas 项。三种情况分开走，因为"正在看的白板"盖不得：
+   * 文件不存在 → 生成第一版；存在且没开着 → 先刷成最新的再打开（点它就是来看最新图）；
+   * 已经开着 → 只切过去不写盘，待更新的小点继续亮着，等标签页关掉再补。
    */
   async openCanvas() {
-    const scape = this.store.scape;
-    if (!scape)
-      return;
     const canvasPath = this.canvasPathFor();
-    if (!(this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile)) {
-      await this.app.vault.create(canvasPath, canvasToJson(toCanvas(scape)));
-      new import_obsidian12.Notice(`Created ${canvasPath}`);
+    const exists = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile;
+    if (exists) {
+      const open = this.canvasOpenLeaves(canvasPath);
+      if (open.length) {
+        this.app.workspace.revealLeaf(open[0]);
+        return;
+      }
+      await this.refreshCanvasFile(false);
+      await this.openCanvasFile(canvasPath);
+      return;
     }
-    await this.openCanvasFile(canvasPath);
+    await this.refreshCanvasFile(true);
   }
   async openCanvasFile(canvasPath) {
     const file = this.app.vault.getAbstractFileByPath(canvasPath);

@@ -12,6 +12,8 @@ export interface ViewOption {
   label: string;
   /** lucide 图标名，切换器用它画分段按钮 */
   icon: string;
+  /** 悬浮说明。缺省就用 label —— 白板那条要多说一句"谁是谁的镜像" */
+  hint?: string;
 }
 
 /** 白板不是本插件注册的 ItemView，而是 vault 里的 .canvas 文件，用一个哨兵值代表 */
@@ -22,5 +24,10 @@ export const VIEW_OPTIONS: ViewOption[] = [
   { type: VIEW_RADIAL, label: "Radial map", icon: "target" },
   { type: VIEW_LIST, label: "Goal list", icon: "list" },
   { type: VIEW_GANTT, label: "Gantt", icon: "calendar" },
-  { type: VIEW_CANVAS, label: "Canvas (白板)", icon: "layout-grid" },
+  {
+    type: VIEW_CANVAS,
+    label: "Canvas (白板)",
+    icon: "layout-grid",
+    hint: "白板由这张图自动更新：卡片位置是你自己的，标题和连线跟着图走",
+  },
 ];

@@ -1,7 +1,8 @@
 // src/settingsTab.ts
-// 插件设置页。目前只有"颜色基调"两根滑杆 —— 浓淡本来就不该让用户自己挑，
-// 但要给他们一个不用改代码就能整体调的出口：嫌太艳往左拖，想层次更分明往右拖。
-// 拖动即时生效：存盘 + 让所有已打开的视图重画。
+// 插件设置页。两块：
+// 1) 颜色基调两根滑杆 —— 浓淡本来不该让用户自己挑，但要给一个不改代码就能整体调的出口：
+//    嫌太艳往左拖，想层次更分明往右拖。拖动即时生效：存盘 + 让所有已打开的视图重画。
+// 2) 白板自动更新开关 —— 默认开；关掉就只剩手点命令，白板文件会一直停在上一次的样子。
 
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type GoalscapePlugin from "./main";
@@ -37,6 +38,15 @@ export class GoalscapeSettingTab extends PluginSettingTab {
           .setDynamicTooltip()
           .onChange((v) => this.apply({ contrast: v }))
       );
+
+    containerEl.createEl("h2", { text: "白板 (.canvas)" });
+    new Setting(containerEl)
+      .setName("自动更新白板")
+      .setDesc(
+        "改完目标就自动把同名 .canvas 刷新，不用手点导出。白板标签页开着时会先等待（这时硬写会把你在看的内容盖掉），" +
+          "小圆点表示还欠一次更新，关掉标签页就补上。白板文件不存在时不会凭空创建。"
+      )
+      .addToggle((t) => t.setValue(this.plugin.canvasAuto).onChange((v) => this.plugin.setCanvasAuto(v)));
   }
 
   private apply(patch: Partial<{ intensity: number; contrast: number }>): void {

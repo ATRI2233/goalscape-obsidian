@@ -44,6 +44,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   width: 26px;
   height: 22px;
   padding: 0;
@@ -67,6 +68,20 @@
 .goalscape-view-seg svg {
   width: 15px;
   height: 15px;
+}
+
+/* 这块白板有还没写进去的改动（用户正开着它，盖写不得）。
+   小点只由 ::after 画，按钮宽度写死 26px，所以不会把工具栏撑宽。 */
+.goalscape-view-seg.is-stale::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  right: 1px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-orange);
+  box-shadow: 0 0 0 1.5px var(--background-secondary);
 }
 
 /* 当前图文件名：点开是 Obsidian 原生菜单，长名字省略号截断，不撑宽工具栏 */
@@ -721,4 +736,38 @@
   color: var(--text-error);
   font-size: 12px;
   margin-bottom: 12px;
+}
+
+/* ═══════════════ 从白板同步的预演模态框 ═══════════════ */
+
+.goalscape-sync-summary {
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.goalscape-sync-problems {
+  border: 1px solid var(--text-error);
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  color: var(--text-error);
+  font-size: 13px;
+}
+
+.goalscape-sync-section h3 {
+  font-size: 13px;
+  margin: 12px 0 4px;
+  color: var(--text-muted);
+}
+
+.goalscape-sync-section ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+}
+
+.goalscape-sync-untouched {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 12px;
 }

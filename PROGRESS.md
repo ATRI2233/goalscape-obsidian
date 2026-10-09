@@ -179,6 +179,50 @@ Responsible 全链路删除，`normalize` 读档即 `delete` 旧键让历史 JSO
 `npm test` 107/107、`npm run build` 干净。踩到的坑：`git add` 里混进已被 `git mv` 挪走的旧路径会让**整条 add 因
 pathspec 不匹配而失败**（只提交了 rename），以及并发会话正在写同一文件时被读到半截，会造成一次不可复现的偶发失败。
 
+### 白板 ⇄ 数据：合并导出 + "从白板同步"（手册里的 Stage B/C 落地）——**整节已被下一节推翻**
+- 导出从覆盖改成合并（`mergeCanvas`）：卡片身份认 **gsId**（旧白板退化成节点 id），`x/y/width/height` 一律留住，
+  用户自己加的便签和它牵的线原样保留，目标树新增的节点补一张卡。
+- 新命令 `goalscape:sync-from-canvas`：`diffCanvas` 只出**计划**（换父/新建/兄弟顺序/改标题）→
+  `CanvasSyncModal` 念一遍 → 用户点 Apply 才写；写前把当前 json 备份成 `Goalscapes/<名>-synced-<时间戳>.goalscape.json.bak`
+  （`.bak` 后缀不进图选择器）。删卡片只报"缺卡 K 个"，永不删目标。
+- 拦住而不是半应用：成环 / 重复 gsId / 多条入边 / 认不出中心卡 → 只报问题、Apply 按死、数据一字节不动。
+- 手册之外补的关键一步：**新建的目标要立刻回写 `gsId` 把那张便签认领掉**（`stampAdoptedCards`）。
+  不认领，第二次同步会把同一条便签再变成一个目标 —— 同步没有撤销，重复建比漏建难收拾。
+  认领顺带逼出"合并导出按 gsId 认卡片"，否则重导出会给同一个目标画两张卡。
+- 实机抓到的坑（单测抓不到）：canvas 标签页 **`detach()` 时会把内存里那份补写一次**，
+  所以"先写盘、后摘页"会把刚写的内容盖掉 —— 导出与认领两处都改成先摘页再写盘。
+  同一条坑在回归脚本里表现为"手工编辑没留住"：改成写完验、验不到就重写（并留 400ms 沉降）。
+  另一处：断言"内存文档认得 gsId"必须轮询 `canvas.getData()`，导出完立刻读会拿到 `nodes:0`。
+- 实测：`npm test` 135/135（`src/export/__tests__/canvasSync.test.ts` 23 条，含两轮收敛）、
+  `npm run check` 全绿 16.2s、实机 94 项 12.6s；两条新步骤（合并导出 / 同步全流程）连跑两次各 21 项全过，
+  临时白板与 `.bak` 由步骤自己 `finally` 清掉，目录清单回到起始。预览模态框暗/亮两主题都截图看过，
+  Apply/Cancel 合成一行（两个 `Setting` 各带一道分隔线，看着像两张表）。
+- Stage D（字段回写）前提已验证可行、未做；Stage E 做了两条：problems 非空时 Apply 直接禁用、预览期间图换过就作废重来。
+  实时 watch 没做（手册里也写了不要做）。细节见 `CANVAS-WRITEBACK.md` 第 7 节。
+
+### 白板改成单向自动镜像：回写方向整体删除（2026-10-09）
+- 用户在真实 vault 里连做三件事（白板换父 / 改标题 / 挪位置）全部落空，据此判定"白板不兼容原有设计"，
+  要求只剩两条：改动能实时体现、再生成不会弄乱布局。**回写（白板→数据）连同命令、预览模态框、`.bak`、
+  `diffCanvas/applyCanvasPlan/stampAdoptedCards/mergeCanvas` 一起删掉**，"兄弟顺序"这个概念也没留。
+- 删它的三条理由（都实测过）：一旦有反向通道，导出就必须吃掉未同步的改动；`.canvas` 的节点数组顺序是 Obsidian 的
+  创建/z 序而不是用户意图，按它排序会造出用户从没做过的重排（按几何角度推断更危险）；数据层没有 undo，误判不可恢复。
+- 现在的形状：`store.subscribe` → 800ms 去抖 → `refreshCanvas(树, 快照)` → 先摘页再写盘、写完读回校验（≤3 次）。
+  留住 `x/y/width/height` + 用户便签 + 它们牵的线；`text`/`color`/生成边跟树走；带 `gsId` 而树里没这个目标的鬼卡删掉。
+- 三条红线：文件不存在**绝不自动创建**；**有人开着这块白板就不写**（Obsidian 没有公开的 dirty 标记，
+  不做"干净就写"的优化）；内容一致就不碰文件。欠着的时候工具栏 Canvas 段亮一个 6px 橙点，关页/每秒回头看一眼就补上。
+- 设置页加第三个开关"自动更新白板"（默认开，存 `data.json`）；关掉时小点跟着灭，重新打开立刻补欠着的那次。
+  命令 `export-canvas` 留着，改名 "Refresh .canvas from goals"。
+- 事故记录：`trustedSnapshot` 之前把"刚打开的 canvas 视图 `getData()` 返回 `nodes:0`"当成可信快照，
+  于是整份文件按算法重画 —— 实测 15 张卡里 14 张回到算法位，用户布局就是这么没的。
+- **测试基建的坑（比功能坑贵）**：`test/run-tests.mjs` 按文件名扁平拼 esbuild 产物路径，而 esbuild 会搬 `outbase`
+  以下的目录结构 → `node --test` 跑的是 `node_modules/.goalscape-tests/` 下一份永不被覆盖的旧产物，
+  **新写的 14 条断言一条都没执行过，`npm test` 照样报 135/135 全绿**。已改成 `outbase: root` + 逐个 `existsSync` 校验 +
+  跑前清空 outDir。教训：加完测试先确认它被跑到了（故意改坏一行看它红不红）。
+- 上面那个假绿掩盖的真 bug：`refreshCanvas` 算 `kept` 时漏了用户自己的便签，于是"便签牵到树上的那条线"每次镜像都被删。
+- 实测：`npm test` 126/126（canvasSync 14 条）、`npm run check` 33.3s 全绿、实机 99 项 28.9s。
+  实机重写为四段 26 项：`canvas 段：开着只切过去、关掉标签页才补写` / `mirror 自动镜像` /
+  `mirror 只往一个方向走` / `settings 自动更新白板开关`。橙点亮着的样子看过截图（暗色主题，工具栏没被撑宽）。
+
 ## 剩余未实测
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
@@ -192,6 +236,9 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
   色盘整体降饱和 —— 都提过，用户没点，未动。
 - `canvasSync.progressToPreset` 仍按进度映射红/橙/黄/绿：JSON Canvas 只有 6 个 preset 色、表达不了任意色相，
   改成"分支色相→最近 preset"会引入量化误差，等点头再动。
+- 白板镜像里"用户改过布局/加了便签"是**脚本直接写 `.canvas` 模拟的**，没请真人在 Obsidian 里拖一遍再看：
+  真手拖还会带出组节点、复制卡片、`fromSide` 等东西，Stage A 只验过单键保留。
+- Canvas 段那个橙点只在暗色主题看过截图，亮色没单独看（颜色用 `--color-orange` + `--background-secondary` 描边，理论上自适应）。
 - 分层守卫那次改动（`findInScape` → `findNode` 的 4 个写入点：list 折叠/勾选/进度滑杆、gantt 叶子进度拖拽）
   只过了 `tsc` + 单测，**没跑实机回归**——`npm run check` 会把 `main.js` 部署进 vault 并要求真实 Obsidian 在最前台。
 
@@ -199,6 +246,8 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
 
 1. 人工点一次 PNG/SVG/CSV/Markdown 下载，确认系统保存框行为（自动化会卡住，未测）。
 2. Focus Filter 加"高亮匹配项列表"侧栏、Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
-3. 白板回写数据：方案已复审并改成分级（合并导出 → 手动结构同步 → 字段回写），
-   执行手册见 `CANVAS-WRITEBACK.md`；开工前必须先做里面的 Stage A spike（自定义键是否被 Obsidian 保留、`.canvas` 写盘时机）。
-3. 上面"剩余未实测"里等用户点头的几项：留白版模板、层级明度阶梯、色盘降饱和、Focus Filter 色块可读性。
+3. 白板方向已收口成单向镜像（自动更新 + 待更新小点 + 设置开关），**回写不再做**：白板改父子/顺序既危险又不可撤销，
+   理由记在 `CANVAS-WRITEBACK.md` 第 3 节。要动结构就在放射图/列表里动。
+4. Notes 融入 Obsidian：面板 Markdown 渲染 + `links` 块间链接 + 反链 → 放射图选中弦线/文件卡片 → 白板链接边与 file 节点 → 导出一致性，
+   另有可选的 `[[` 补全。合计 2.75d（全收 3.25d），操作书见 `NOTES-INTEGRATION.md`（白板生成物带 `x-`/`f-`/`n-` 确定性 id，与单向镜像的合并规则互通）。
+5. 上面"剩余未实测"里等用户点头的几项：留白版模板、层级明度阶梯、色盘降饱和、Focus Filter 色块可读性。

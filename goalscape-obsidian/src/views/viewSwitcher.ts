@@ -22,12 +22,16 @@ export function createViewSwitcher(
   for (const option of VIEW_OPTIONS) {
     const btn = group.createEl("button", { cls: "goalscape-view-seg" });
     btn.setAttr("aria-label", option.label);
+    // main.ts 靠这个属性找到 Canvas 段来点亮"待更新"的小点
+    btn.setAttr("data-view", option.type);
     if (option.type === currentType) {
       btn.addClass("is-active");
       btn.setAttr("aria-current", "true");
     }
+    // 新开的标签页也得反映当前状态，否则小点要等到下一次改动才出现
+    if (option.type === VIEW_CANVAS) btn.toggleClass("is-stale", plugin.canvasStale);
     setIcon(btn, option.icon);
-    setTooltip(btn, option.label, { placement: "bottom" });
+    setTooltip(btn, option.hint ?? option.label, { placement: "bottom" });
 
     btn.addEventListener("click", () => {
       if (option.type === currentType) return;

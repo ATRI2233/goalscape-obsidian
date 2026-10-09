@@ -9,14 +9,14 @@
 // 产物落在 node_modules/.goalscape-tests/（已被 .gitignore 覆盖），带 inline sourcemap，
 // 失败栈能直接指回 .ts 源码行。
 
-import { existsSync, readdirSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, readdirSync, mkdirSync, rmSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { build } from "esbuild";
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
-const testDirs = ["data", "views"].map((d) => join(root, "src", d, "__tests__"));
+const testDirs = ["data", "views", "export"].map((d) => join(root, "src", d, "__tests__"));
 const outDir = join(root, "node_modules", ".goalscape-tests");
 
 const all = testDirs
@@ -35,9 +35,15 @@ if (!files.length) {
   process.exit(1);
 }
 
+rmSync(outDir, { recursive: true, force: true });
+mkdirSync(outDir, { recursive: true });
 await build({
   entryPoints: files,
   outdir: outDir,
+  // esbuild 把"各入口相对 outbase 的路径"原样搬进 outdir，所以产物在
+  // outDir/src/export/__tests__/x.mjs 而不是 outDir/x.mjs。（这里曾按文件名扁平拼路径，
+  // 于是 node --test 跑的是一份永远不会被覆盖的旧产物：新写的断言根本没被执行。）
+  outbase: root,
   outExtension: { ".js": ".mjs" },
   absWorkingDir: root,
   bundle: true,
@@ -50,7 +56,13 @@ await build({
   alias: { obsidian: join(root, "test", "mocks", "obsidian.ts") },
 });
 
-const outs = files.map((f) => join(outDir, basename(f).replace(/\.ts$/, ".mjs")));
+const outs = files.map((f) => join(outDir, relative(root, f).replace(/\.ts$/, ".mjs")));
+for (const o of outs) {
+  if (!existsSync(o)) {
+    console.error(`打包产物缺失：${o}`);
+    process.exit(1);
+  }
+}
 const result = spawnSync(
   process.execPath,
   ["--test", "--test-reporter=spec", ...outs],

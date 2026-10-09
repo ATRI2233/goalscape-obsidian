@@ -410,52 +410,314 @@ step("file-menu 目录栏右键新建图", async () => {
     JSON.stringify(created));
 });
 
-step("canvas 段复用已有白板、不重导出", async () => {
-  const seg = `.goalscape-view-seg[aria-label^="Canvas"]`;
-  const doc = () => json(`JSON.parse(await app.vault.adapter.read(${JSON.stringify(TMP_CANVAS)}))`);
-  /** 每次点击前都重新钉住当前图：用户本人可能正在应用里切图，不钉就会拿到别人的树 */
-  const clickCanvas = async () => {
-    await useTmpMap();
-    await clickEl(seg);
-    await waitFor(`app.workspace.getLeavesOfType('canvas').some(l=>l.view.file?.path===${JSON.stringify(TMP_CANVAS)})`, "白板标签页打开");
-    await new Promise((r) => setTimeout(r, 700)); // 给 Obsidian 自己的落盘留出时间
-  };
-  const closeCanvas = () => json(`(async()=>{
-    for(const l of app.workspace.getLeavesOfType('canvas'))
-      if(l.view.file?.path===${JSON.stringify(TMP_CANVAS)}) await l.detach();
-    return 1;})()`);
+// ───────────── 白板镜像：树 → .canvas 单向、自动、保住手工布局 ─────────────
 
-  await clickCanvas();
-  const first = await doc();
+/** Canvas 段的 data-view 就是 viewTypes 里的 VIEW_CANVAS（按界面文案找会被 "Canvas (白板)" 这种叫法带偏） */
+const CANVAS_SEG = ".goalscape-view-seg[data-view='goalscape-canvas-file']";
+/** 后台标签页里的工具栏是 display:none，宽度量出来是 0 —— 优先取看得见的那个段 */
+const segState = () => json(`(()=>{const all=[...document.querySelectorAll(${JSON.stringify(CANVAS_SEG)})];
+  const b=all.find(e=>e.offsetParent)||all[0];
+  return {stale:b.classList.contains('is-stale'), w:Math.round(b.getBoundingClientRect().width),
+    active:b.classList.contains('is-active')};})()`);
+const backToRadial = () => json(`(async()=>{const l=app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0];
+  app.workspace.revealLeaf(l); await __gsSettle(400); return 1;})()`);
+/** 每次点击前都重新钉住当前图：用户本人可能正在应用里切图，不钉就会拿到别人的树 */
+const clickCanvasSeg = async () => {
+  await useTmpMap();
+  await clickEl(CANVAS_SEG);
+  await new Promise((r) => setTimeout(r, 300));
+};
+const readScape = () => json(`(async()=>{try{
+  return JSON.parse(await app.vault.adapter.read(${JSON.stringify(TMP_PATH)}));}catch{return null;}})()`);
+/** 文件有没有被碰过：镜像"内容一致就不写"这条只能靠 mtime+大小验 */
+const canvasStamp = () => {
+  const s = fs.statSync(path.join(SCAPE_DIR, `${TMP_NAME}.canvas`));
+  return `${s.size}@${Math.round(s.mtimeMs)}`;
+};
 
-  // 手工把一个节点挪走并改名：若第二次点 Canvas 是"原样打开"，这些值必须还在；
-  // 若走了重导出（toCanvas 按放射布局重算坐标），坐标和文本都会被冲掉。
-  const moved = { ...first.nodes[0], x: 9999, y: -8888, label: "ZZ-MARKER" };
-  await json(`(async()=>{
-    const f=app.vault.getAbstractFileByPath(${JSON.stringify(TMP_CANVAS)});
-    const doc=${JSON.stringify({ ...first, nodes: first.nodes.map((n, i) => (i === 0 ? moved : n)) })};
-    await app.vault.modify(f, JSON.stringify(doc)); return 1;})()`);
-  await closeCanvas();
+step("canvas 段：开着只切过去、关掉标签页才补写", async () => {
+  await useTmpMap();
+  await setTmpTree(GRID);
+  await resetCanvas();
 
-  await clickCanvas();
-  const second = await doc();
-  const kept = second.nodes?.[0];
-  ok("第二次点 Canvas 原样打开（手工挪动/改名的节点没被重算）",
-    kept?.label === "ZZ-MARKER" && kept?.x === 9999 && kept?.y === -8888,
-    JSON.stringify(kept)?.slice(0, 120));
-  ok("节点与连线数量不变",
-    second.nodes?.length === first.nodes?.length && second.edges?.length === first.edges?.length,
-    `${first.nodes?.length}n/${first.edges?.length}e → ${second.nodes?.length}n/${second.edges?.length}e`);
-  const bytes = await json(`app.vault.adapter.read(${JSON.stringify(TMP_CANVAS)}).then(t=>t.length)`);
-  info("白板文件被 Obsidian 自己的序列化器改写过（字节数变化属正常，节点数据未丢）", `${bytes} chars`);
+  await clickCanvasSeg();
+  const first = await waitCanvasDoc((d) => d.nodes.length === 4, "第一次点 Canvas 建出四张卡");
+  ok("白板文件不存在时，Canvas 段生成第一版并打开标签页",
+    first.nodes.every((n) => typeof n.gsId === "string") && first.edges.length === 3,
+    JSON.stringify({ nodes: first.nodes.length, edges: first.edges.map((e) => e.id) }));
 
-  await closeCanvas();
-  const state = await json(`({
-    radialTabs:app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)}).length,
-    activeSeg:[...document.querySelectorAll('.goalscape-view-seg.is-active')].map(b=>b.getAttribute('aria-label')).join(','),
+  // 标签页开着的时候改树：canvas 视图的内存领先磁盘几十秒，这时硬写会被它的补写盖掉 —— 只能欠着
+  await setTmpTree(GRID_PLUS);
+  await new Promise((r) => setTimeout(r, 1500)); // 防抖 800ms 早就过了
+  const held = await readCanvasDoc();
+  ok("白板标签页开着时不写盘（欠着而不是盖掉）",
+    !held.nodes.some((n) => n.id === "g-c"), JSON.stringify(held.nodes.map((n) => n.id)));
+  await backToRadial(); // 回到放射图这一侧，工具栏才看得见、量得出宽度
+  const lit = await segState();
+  ok("欠着更新时 Canvas 段上有小点，且段按钮宽度没被撑开",
+    lit.stale === true && lit.w >= 20 && lit.w <= 30, JSON.stringify(lit));
+  info("小点亮着的样子", await shot("canvas-stale-dot"));
+
+  await clickCanvasSeg();
+  const tabs = await json(`app.workspace.getLeavesOfType('canvas')
+    .filter(l=>l.view.file?.path===${JSON.stringify(TMP_CANVAS)}).length`);
+  const still = await readCanvasDoc();
+  ok("再点 Canvas 只切过去：标签页不重复堆叠、也没趁机写盘",
+    tabs === 1 && !still.nodes.some((n) => n.id === "g-c"), `${tabs} tabs`);
+
+  // 关掉标签页正是补写的时机（视图关闭时自己会先把内存那份落盘，我们的写在它后面）
+  await closeCanvasTabs();
+  const settled = await waitCanvasDoc((d) => d.nodes.some((n) => n.id === "g-c"), "关掉标签页后补写");
+  ok("关掉白板标签页后自动补上欠着的那次，连线按新树接",
+    settled.edges.some((e) => e.id === "e-g-c" && e.fromNode === "g-b" && e.toNode === "g-c"),
+    JSON.stringify(settled.edges.map((e) => `${e.id}:${e.fromNode}>${e.toNode}`)));
+  const off = await segState();
+  ok("补写之后小点消失", off.stale === false, JSON.stringify(off));
+
+  const view = await json(`({
+    radial:app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)}).length,
+    active:[...document.querySelectorAll('.goalscape-view-seg.is-active')].map(b=>b.getAttribute('aria-label')).join(','),
     canvasTabs:app.workspace.getLeavesOfType('canvas').filter(l=>l.view.file?.path===${JSON.stringify(TMP_CANVAS)}).length})`);
-  ok("Canvas 段不改变本标签页视图、白板标签不重复堆叠",
-    state.radialTabs === 1 && state.activeSeg === "Radial map" && state.canvasTabs === 0, JSON.stringify(state));
+  ok("本标签页的视图与高亮不被 Canvas 段改动（它不是第四种呈现方式）",
+    view.radial === 1 && view.active === "Radial map" && view.canvasTabs === 0, JSON.stringify(view));
+});
+
+// ───────────── 白板镜像的测试脚手架（合成树 + 读写白板的轮询原语） ─────────────
+
+/** 层级够简单、又足够让"加孩子/改名"看得出结果的小树；id 前缀 g- 免得和别的步骤的 n- 混起来 */
+const GRID = {
+  id: "g-root", title: "Root", importance: 100, tags: [], children: [
+    { id: "g-a", title: "Alpha", importance: 60, tags: [], children: [
+      { id: "g-a1", title: "Alpha-1", importance: 100, tags: [], children: [] },
+    ] },
+    { id: "g-b", title: "Bravo", importance: 40, tags: [], children: [] },
+  ],
+};
+
+/** 长出一个孩子：镜像必须给 g-c 补一张卡，同时不碰别的卡片位置 */
+const GRID_PLUS = structuredClone(GRID);
+GRID_PLUS.children[1].children = [{ id: "g-c", title: "Charlie", importance: 100, tags: [], children: [] }];
+
+const gsCommand = (id) => ev(`app.commands.executeCommandById(${JSON.stringify(`${PLUGIN}:${id}`)})`);
+const closeCanvasTabs = async () => {
+  await json(`(async()=>{
+    for(const l of app.workspace.getLeavesOfType('canvas'))
+      if(l.view.file?.path===${JSON.stringify(TMP_CANVAS)}) await l.detach(); return 1;})()`);
+  // 摘页不等于内存文档死了：Obsidian 还会把那份没有手工改动的文档补写一次，先等它落完
+  await new Promise((r) => setTimeout(r, 400));
+};
+/** adapter.write 会先截断再写（实测有 0 字节瞬时读），所以按内容谓词轮询而不是读一次就算 */
+const readCanvasDoc = () => json(`(async()=>{try{
+  const d=JSON.parse(await app.vault.adapter.read(${JSON.stringify(TMP_CANVAS)}));
+  return d&&Array.isArray(d.nodes)?d:null;}catch{return null;}})()`);
+async function waitCanvasDoc(pred, label) {
+  for (let k = 0; k < 80; k++) {
+    const d = await readCanvasDoc();
+    if (d && pred(d)) return d;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  throw new Error(`等白板内容超时：${label}`);
+}
+/** 开着的白板标签页里的内存文档（Obsidian 自己解析过的那份）：文件写对了不代表它认得未知键 */
+async function waitLiveCanvasDoc(pred, label) {
+  for (let k = 0; k < 80; k++) {
+    const d = await json(`(()=>{const l=app.workspace.getLeavesOfType('canvas')
+        .find(x=>x.view.file?.path===${JSON.stringify(TMP_CANVAS)});
+      const c=l?.view?.canvas; return c&&typeof c.getData==='function'?c.getData():null;})()`);
+    if (d && pred(d)) return d;
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  throw new Error(`等白板内存文档超时：${label}`);
+}
+const writeCanvasDoc = (doc) => json(`(async()=>{
+  const f=app.vault.getAbstractFileByPath(${JSON.stringify(TMP_CANVAS)});
+  if(!f) throw new Error('临时白板不存在');
+  await app.vault.modify(f, ${JSON.stringify(JSON.stringify(doc))}); return 1;})()`);
+/** 手工改白板：写完必须验到，验不到就再写一次 —— 补写的那一次可能正好落在 modify 之后 */
+async function putCanvasDoc(doc, pred, label) {
+  for (let k = 0; k < 4; k++) {
+    await writeCanvasDoc(doc);
+    for (let i = 0; i < 12; i++) {
+      const d = await readCanvasDoc();
+      if (d && pred(d)) return d;
+      await new Promise((r) => setTimeout(r, 60));
+    }
+  }
+  throw new Error(`手工写的白板内容没能留住：${label}`);
+}
+/** 白板是命令的输入也是它的输出：先关掉标签页再删文件，别留一份内存文档回头盖掉磁盘 */
+const resetCanvas = async () => {
+  await closeCanvasTabs();
+  await json(`(async()=>{const f=app.vault.getAbstractFileByPath(${JSON.stringify(TMP_CANVAS)});
+    if(f) await app.vault.delete(f); return 1;})()`);
+};
+const setTmpTree = (tree) => json(`(async()=>{${PL}.store.mutate(s=>{s.mainGoal=${JSON.stringify(tree)};});
+  await __gsSettle(400); return 1;})()`);
+
+step("mirror 自动镜像：不用点命令也更新，手工布局与便签都保住", async () => {
+  await useTmpMap();
+  await setTmpTree(GRID);
+  await resetCanvas();
+  await new Promise((r) => setTimeout(r, 1300)); // 防抖 800ms 过了一整轮
+  ok("白板文件还不存在时，改树不会凭空往 vault 里扔文件",
+    !(await json(`app.vault.adapter.exists(${JSON.stringify(TMP_CANVAS)})`)));
+
+  await gsCommand("export-canvas");
+  const first = await waitCanvasDoc((d) => d.nodes.length === 4, "首次导出四张卡片");
+  ok("首次导出：每张卡带 gsId，连线是 e-<子目标> 这种可认的 id",
+    first.nodes.every((n) => typeof n.gsId === "string")
+      && first.edges.map((e) => e.id).sort().join(",") === "e-g-a,e-g-a1,e-g-b",
+    JSON.stringify({ nodes: first.nodes.length, edges: first.edges.map((e) => e.id) }));
+
+  // "靠机器字段认卡片"成不成立，取决于 Obsidian 自己的解析器留不留这个键 —— 这里当场验一次
+  await waitFor(`app.workspace.getLeavesOfType('canvas').some(l=>l.view.file?.path===${JSON.stringify(TMP_CANVAS)})`, "白板标签页打开");
+  const live = await waitLiveCanvasDoc((d) => Array.isArray(d.nodes) && d.nodes.length === 4, "内存文档四张卡片");
+  ok("Obsidian 内存里的白板文档认得 gsId（未知键被原样留住）",
+    live.nodes.every((n) => typeof n.gsId === "string"),
+    JSON.stringify(live.nodes.map((n) => `${n.id}:${n.gsId ?? "-"}`)).slice(0, 200));
+
+  await closeCanvasTabs();
+  // 用户自己摆的：把 g-a 挪远放大，再加一张便签和一条牵到树上的线
+  await putCanvasDoc({
+    ...first,
+    nodes: [...first.nodes.map((n) => (n.id === "g-a" ? { ...n, x: 9999, y: -8888, width: 444, height: 222 } : n)),
+      { id: "zz-sticky", type: "text", x: 1400, y: 900, width: 200, height: 120, text: "手工便签" }],
+    edges: [...first.edges, { id: "zz-edge", fromNode: "g-a", toNode: "zz-sticky" }],
+  }, (d) => d.nodes.some((n) => n.id === "zz-sticky" && n.x === 1400), "便签写进白板");
+
+  // 只改数据、不点任何命令：加一个孩子 g-c，并把 g-b 改名
+  const renamed = structuredClone(GRID_PLUS);
+  renamed.children[1].title = "Bravo 改名";
+  await setTmpTree(renamed);
+  const second = await waitCanvasDoc((d) => d.nodes.some((n) => n.id === "g-c"), "改树后白板自己补上新目标卡片");
+  const movedA = second.nodes.find((n) => n.id === "g-a");
+  ok("改树约 1 秒内白板自己更新（全程没点命令）",
+    second.nodes.length === 6 && second.nodes.some((n) => n.gsId === "g-c"),
+    JSON.stringify(second.nodes.map((n) => n.id)));
+  ok("再生成不会把布局挪动：手工摆的坐标与尺寸原样保留",
+    movedA?.x === 9999 && movedA?.y === -8888 && movedA?.width === 444 && movedA?.height === 222,
+    JSON.stringify(movedA));
+  ok("卡片文字跟着树走：改名后新标题写进原来那张卡，且只有一张",
+    /Bravo 改名/.test(second.nodes.find((n) => n.id === "g-b")?.text || "")
+      && second.nodes.filter((n) => n.gsId === "g-b").length === 1,
+    JSON.stringify(second.nodes.find((n) => n.id === "g-b")?.text));
+  ok("便签和它牵到树上的那条线不动",
+    second.nodes.some((n) => n.id === "zz-sticky") && second.edges.some((e) => e.id === "zz-edge"),
+    `${second.nodes.length}n/${second.edges.length}e`);
+  ok("新目标按新树连好（e-g-c 挂在 g-b 下）",
+    second.edges.some((e) => e.id === "e-g-c" && e.fromNode === "g-b" && e.toNode === "g-c"),
+    JSON.stringify(second.edges.map((e) => `${e.id}:${e.fromNode}>${e.toNode}`)));
+
+  await new Promise((r) => setTimeout(r, 700));
+  const stamp = canvasStamp();
+  await new Promise((r) => setTimeout(r, 1500)); // 树没再动，这一轮该一次都不写
+  const stamp2 = canvasStamp();
+  ok("内容一致就不再碰文件（幂等：再生成不会反复重写）", stamp === stamp2, `${stamp} → ${stamp2}`);
+
+  // 树里删掉一个目标：它的卡片跟着消失，但用户的便签不能连坐
+  // "卡片消失"这种减法条件对旧文件也成立，所以先等文件真的被改写过再验内容
+  const preStamp = canvasStamp();
+  const minus = structuredClone(renamed);
+  minus.children[1].children = [];
+  await setTmpTree(minus);
+  for (let k = 0; k < 40 && canvasStamp() === preStamp; k++) await new Promise((r) => setTimeout(r, 60));
+  const third = await waitCanvasDoc((d) => !d.nodes.some((n) => n.id === "g-c"), "删掉的目标卡片消失");
+  ok("树里删掉的目标，它的卡片与连线一起消失",
+    !third.edges.some((e) => e.toNode === "g-c" || e.fromNode === "g-c"), JSON.stringify(third.nodes.map((n) => n.id)));
+  ok("没认领目标的便签不会被连坐删掉",
+    third.nodes.some((n) => n.id === "zz-sticky") && third.edges.some((e) => e.id === "zz-edge"),
+    `${third.nodes.length}n/${third.edges.length}e`);
+  await closeCanvasTabs();
+});
+
+step("mirror 只往一个方向走：白板里的改动不回写数据", async () => {
+  await useTmpMap();
+  await setTmpTree(GRID);
+  await resetCanvas();
+  await gsCommand("export-canvas");
+  const base = await waitCanvasDoc((d) => d.nodes.length === 4, "单向验证用的白板");
+  await closeCanvasTabs();
+  const before = await readScape();
+
+  // 旧版"从白板同步"会吃的三样改动：换父箭头 + 改卡片文字 + 挪位置
+  await putCanvasDoc({
+    ...base,
+    nodes: base.nodes.map((n) => (n.id === "g-b" ? { ...n, x: 3000, y: 3000, text: "**白板里改的名字**" } : n)),
+    edges: base.edges.map((e) => (e.id === "e-g-a1" ? { ...e, fromNode: "g-b" } : e)),
+  }, (d) => d.nodes.find((n) => n.id === "g-b")?.x === 3000
+    && d.edges.find((e) => e.id === "e-g-a1")?.fromNode === "g-b", "白板里的三样改动");
+
+  await new Promise((r) => setTimeout(r, 1800)); // 防抖窗口过去两轮：镜像没有任何理由动
+  const now = await readScape();
+  ok("白板改箭头/改文字/挪位置 → 数据树一个字节都不动",
+    JSON.stringify(now?.mainGoal) === JSON.stringify(before.mainGoal),
+    JSON.stringify(now?.mainGoal)?.slice(0, 160));
+
+  // 下一次镜像按树纠正回来：结构与文字跟树走，位置跟白板走
+  await setTmpTree(GRID_PLUS);
+  const after = await waitCanvasDoc((d) => d.nodes.some((n) => n.id === "g-c"), "下一次镜像");
+  const b = after.nodes.find((n) => n.id === "g-b");
+  ok("白板里改的父子箭头会被树纠正回来（方向只有树 → 白板）",
+    after.edges.find((e) => e.id === "e-g-a1")?.fromNode === "g-a",
+    JSON.stringify(after.edges.map((e) => `${e.id}:${e.fromNode}>${e.toNode}`)));
+  ok("卡片文字回到树里的标题，手工挪的位置仍然保住",
+    /Bravo/.test(b?.text || "") && !/白板里改的名字/.test(b?.text || "") && b?.x === 3000 && b?.y === 3000,
+    JSON.stringify(b));
+  await closeCanvasTabs();
+});
+
+step("settings 自动更新白板开关", async () => {
+  await json(`(async()=>{const pl=${PL}; if(!pl.canvasAuto) pl.setCanvasAuto(true); return 1;})()`);
+  await useTmpMap();
+  await setTmpTree(GRID);
+  await resetCanvas();
+  await gsCommand("export-canvas");
+  await waitCanvasDoc((d) => d.nodes.length === 4, "开关验证用的白板");
+  await closeCanvasTabs();
+
+  const readSaved = () => json(`(async()=>{try{
+    return JSON.parse(await app.vault.adapter.read('.obsidian/plugins/${PLUGIN}/data.json'));}catch{return null;}})()`);
+  async function waitSaved(v) {
+    for (let k = 0; k < 60; k++) {
+      if ((await readSaved())?.canvasAuto === v) return true;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return false;
+  }
+  /** Obsidian 的 toggle 就是 input.checkbox-toggle，点一下翻一次；等到插件真收下值为止，不重复点 */
+  const flip = (want) => json(`(async()=>{const pl=${PL};
+    const rows=[...document.querySelectorAll('.modal .setting-item')].filter(e=>e.offsetParent);
+    const t=rows.map(e=>e.querySelector('input[type=checkbox]')).find(Boolean);
+    if(!t) throw new Error('设置页里没有开关：'+JSON.stringify(rows.map((e)=>e.querySelector('.setting-item-name')?.textContent)));
+    t.click();
+    for(let k=0;k<60&&pl.canvasAuto!==${want};k++) await new Promise(r=>setTimeout(r,50));
+    return {auto:pl.canvasAuto, rows:rows.length,
+      name:rows.find(e=>e.querySelector('input[type=checkbox]'))?.querySelector('.setting-item-name')?.textContent.trim()};})()`);
+
+  await json(`(async()=>{app.setting.close(); app.setting.open();
+    app.setting.openTabById(${JSON.stringify(PLUGIN)}); await __gsSettle(500); return 1;})()`);
+  const off = await flip(false);
+  ok("设置页第三个可见项就是「自动更新白板」，点它插件立刻收到关掉",
+    off.rows === 3 && /白板/.test(off.name || "") && off.auto === false, JSON.stringify(off));
+  ok("开关状态写进 data.json（重启插件还在）", await waitSaved(false), JSON.stringify(await readSaved()));
+
+  await setTmpTree(GRID_PLUS);
+  const offStamp = canvasStamp();
+  await new Promise((r) => setTimeout(r, 1600));
+  const held = await readCanvasDoc();
+  ok("关掉之后改树：白板停在原来的样子，一次都不写",
+    canvasStamp() === offStamp && !held.nodes.some((n) => n.id === "g-c"),
+    `${offStamp} → ${canvasStamp()}`);
+  ok("关掉之后小点也不该亮着（没有待更新可言）", (await segState()).stale === false,
+    JSON.stringify(await segState()));
+
+  const on = await flip(true);
+  await waitCanvasDoc((d) => d.nodes.some((n) => n.id === "g-c"), "开关回到开后补写").catch(() => null);
+  const caught = await readCanvasDoc();
+  ok("重新打开后立刻把欠着的那次补上（不用等下一次改动）",
+    on.auto === true && caught.nodes.some((n) => n.id === "g-c"), JSON.stringify(caught.nodes.map((n) => n.id)));
+  ok("开关回到开后 data.json 也跟着改回来", await waitSaved(true), JSON.stringify(await readSaved()));
+  await json(`(async()=>{app.setting.close(); return ${PL}.canvasAuto;})()`);
 });
 
 /** 刻意不对称的合成树：分支深度不同、环厚不同、兄弟和既有 <100（留白）也有 >100（溢出） */
@@ -893,7 +1155,7 @@ step("settings 颜色基调两根滑杆", async () => {
       restored:Object.keys(a).filter((k)=>a[k]!==back[k]).length,
       flatter:gapFlat<gapBefore, steeper:gapSteep>gapBefore, ordered:gapFlat<gapBefore&&gapBefore<gapSteep};})()`);
   ok("设置页两根滑杆：浓艳度左右两端分别变灰/变艳，拖回原位图也原样",
-    r.count === 2 && /intensity/i.test(r.names[0]) && /contrast/i.test(r.names[1])
+    r.count === 3 && /intensity/i.test(r.names[0]) && /contrast/i.test(r.names[1])
       && r.softer && r.louder && r.restored === 0,
     JSON.stringify(r));
   ok("层次分明度：往左压小内外圈的亮度差、往右拉大，且不会把顺序调反",
@@ -904,6 +1166,104 @@ step("settings 颜色基调两根滑杆", async () => {
       && r.savedFinal?.tone?.contrast === r.orig.contrast
       && typeof r.savedFinal?.currentPath === "string",
     JSON.stringify({ orig: r.orig, loud: r.savedLoud?.tone, final: r.savedFinal?.tone }));
+});
+
+step("viewport 滚轮以光标为锚缩放 + 空白处平移 + 双击还原", async () => {
+  await useTmpMap();
+  await json(`(async()=>{const pl=${PL};
+    pl.store.mutate(s=>{s.mainGoal=${JSON.stringify(toGoalNode(FOREST))};});
+    await __gsSettle(400);
+    const svg=document.querySelector('svg.goalscape-radial-svg');
+    svg.__gsNode=1;  // 节点身份标记：缩放只改 viewBox，被重建过就查不到这个标记
+    return 1;})()`);
+
+  // 光标底下那个点的逻辑坐标：缩放前后应当纹丝不动，这是"锚在光标上"的全部含义
+  const logicAt = (x, y) => json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    const q=new DOMPoint(${x},${y}).matrixTransform(svg.getScreenCTM().inverse());
+    return {x:Math.round(q.x),y:Math.round(q.y)};})()`);
+  const wheel = (x, y, deltaY) => json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    const e=new WheelEvent('wheel',{deltaY:${deltaY},clientX:${x},clientY:${y},bubbles:true,cancelable:true});
+    svg.dispatchEvent(e);
+    const top=document.elementFromPoint(${x},${y});
+    return {vb:svg.getAttribute('viewBox'),size:svg.viewBox.baseVal.width,
+      prevented:e.defaultPrevented,built:!!svg.__gsNode,
+      hit:top?.getAttribute?.('data-id')||String(top&&top.tagName)};})()`);
+
+  const anchor = await json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    const b=svg.querySelector('path[data-id="n-A1"]').getBoundingClientRect();
+    const x=Math.round(b.x+b.width/2),y=Math.round(b.y+b.height/2);
+    const q=new DOMPoint(x,y).matrixTransform(svg.getScreenCTM().inverse());
+    return {x,y,logic:{x:Math.round(q.x),y:Math.round(q.y)}};})()`);
+  const in1 = await wheel(anchor.x, anchor.y, -100);
+  const moved = await logicAt(anchor.x, anchor.y);
+  ok("滚轮被视图接管（没漏成面板滚动）", in1.prevented);
+  ok("放大生效且没重建 svg（只改 viewBox）",
+    in1.size < 1000 && in1.size > 0 && in1.built, JSON.stringify(in1));
+  ok("光标底下的逻辑点没漂",
+    Math.abs(moved.x - anchor.logic.x) <= 2 && Math.abs(moved.y - anchor.logic.y) <= 2,
+    `缩放前 ${JSON.stringify(anchor.logic)} → 缩放后 ${JSON.stringify(moved)}`);
+  ok("放大后命中测试仍对齐（同一点还落在 n-A1 上）", in1.hit === "n-A1", in1.hit);
+
+  let lim = in1;
+  for (let i = 0; i < 25; i++) lim = await wheel(anchor.x, anchor.y, -100);
+  const [lx, ly, ls] = lim.vb.split(" ").map(Number);
+  ok("放大夹在 8× 上限（再滚不会滚成像素）",
+    Math.abs(lim.size - 1000 / 8) < 0.02 && Math.abs(ls - lim.size) < 0.02, `size=${lim.size}`);
+  ok("极限视野仍在画布内", lx >= 0 && ly >= 0 && lx + ls <= 1000.01 && ly + ls <= 1000.01,
+    `viewBox=${lim.vb}`);
+  for (let i = 0; i < 25; i++) lim = await wheel(anchor.x, anchor.y, 100);
+  ok("往回滚一定能正好回到整张图", lim.vb === "0.00 0.00 1000.00 1000.00", lim.vb);
+
+  // 平移：先选中 n-A1（pointerdown + 同点 pointerup 走 reparent 的点击分支），再放大三格 ——
+  // 1× 那档平移在数学上就是空操作（窗口夹在画布内、余量为零），不放大根本挪不动。
+  const picked = await json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    const b=svg.querySelector('path[data-id="n-A1"]').getBoundingClientRect();
+    const x=Math.round(b.x+b.width/2),y=Math.round(b.y+b.height/2);
+    svg.querySelector('path[data-id="n-A1"]').dispatchEvent(
+      new PointerEvent('pointerdown',{clientX:x,clientY:y,button:0,bubbles:true}));
+    window.dispatchEvent(new PointerEvent('pointerup',{clientX:x,clientY:y,button:0}));
+    return document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-selected').length;})()`);
+  for (let i = 0; i < 3; i++) await wheel(anchor.x, anchor.y, -100);
+  // 找一个确实空白的 svg 角点当手势落点，并重新钉上"这张 svg 没被重建过"的标记（选中会 render 一次）
+  const bg = await json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    svg.__gsNode=1;
+    const r=svg.getBoundingClientRect();
+    for(const [x,y] of [[r.x+4,r.y+4],[r.right-4,r.y+4],[r.x+4,r.bottom-4],[r.right-4,r.bottom-4]])
+      if(document.elementFromPoint(x,y)===svg) return {x:Math.round(x),y:Math.round(y)};
+    return null;})()`);
+  ok("找得到 svg 空白处（平移手势的落点）", !!bg, JSON.stringify(bg));
+  ok("空白以外能选中扇区", picked === 1, String(picked));
+  if (!bg) return;
+
+  // 一次完整的空白处手势：pointerdown → move → up →（浏览器一定补的）click
+  const gesture = (dx, dy) => json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    const f=${JSON.stringify(bg)}, tx=f.x+${dx}, ty=f.y+${dy};
+    const pe=(t,el,x,y)=>el.dispatchEvent(new PointerEvent(t,{clientX:x,clientY:y,button:0,bubbles:true}));
+    pe('pointerdown',svg,f.x,f.y);
+    pe('pointermove',window,(f.x+tx)/2,(f.y+ty)/2);
+    pe('pointermove',window,tx,ty);
+    pe('pointerup',window,tx,ty);
+    svg.dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    return {vb:svg.getAttribute('viewBox'),built:!!svg.__gsNode,
+      kept:document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-selected').length};})()`);
+
+  const vBefore = await json(`document.querySelector('svg.goalscape-radial-svg').getAttribute('viewBox')`);
+  const pan = await gesture(-140, 90);
+  ok("空白处拖动平移了视野", pan.vb !== vBefore, `${vBefore} → ${pan.vb}`);
+  ok("平移不改数据、也不重建 svg（拖着手不会一卡一卡的）",
+    pan.built && (await json(`${PL}.store.scape.mainGoal.children.length`)) === 6, JSON.stringify(pan));
+  ok("平移收尾补的那次 click 没把选中清掉", pan.kept === 1, String(pan.kept));
+  ok("空白处单击仍然清除选中（抑制只吃真平移那一下）", (await gesture(0, 0)).kept === 0);
+
+  const edge = await gesture(-4000, 4000);
+  const [ex, ey, es] = edge.vb.split(" ").map(Number);
+  ok("顶到边界仍夹在画布内（拖不出丢图的视野）",
+    ex >= 0 && ey >= 0 && ex + es <= 1000.01 && ey + es <= 1000.01, edge.vb);
+
+  const reset = await json(`(()=>{const svg=document.querySelector('svg.goalscape-radial-svg');
+    svg.dispatchEvent(new MouseEvent('dblclick',{bubbles:true,cancelable:true}));
+    return svg.getAttribute('viewBox');})()`);
+  ok("双击空白处回到整张图", reset === "0.00 0.00 1000.00 1000.00", reset);
 });
 
 step("themes 暗/亮两主题截图", async () => {

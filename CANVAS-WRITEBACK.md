@@ -1,129 +1,98 @@
-# 白板 → 数据 回写：方案复审 + 执行手册
+# 白板 ⇄ 数据：回写方案已砍，现在是单向镜像
 
-写给后续接手实施的模型/人。目标不是"把功能写完"，而是**别把用户的目标树弄坏** ——
-数据层没有 undo、没有历史，一次错误的自动回写就是不可恢复的丢失。
+给后续接手的人。这份文档的前身是"白板 → 数据回写"的执行手册（Stage A–E）。
+**B/C/E 实现过、验收过，然后在真实使用中整体删掉了**；下面第 3 节写清为什么，别把它当未完成的工作再捡起来。
 
 ## 0. 一句话现状
 
-`canvasSync.toCanvas()` 是单向导出。白板里改的位置、连线、文字，**不会**回到 `.goalscape.json`；
-而 `exportCanvas()` 命令会整文件覆盖 `.canvas`，等于把用户手工摆的白板当场冲掉。
-要动手，先做 Stage A 的两个未知量验证，**不要**直接开写解析器。
+树 → `.canvas` 单向镜像：改目标树约 800ms 后白板自己更新，卡片位置/尺寸和用户自己的便签都留住；
+白板里做的任何改动都不回写数据。工具栏 Canvas 段上的橙色小点 = 这块白板欠一次更新。
 
-## 1. 已核对的代码事实（2026-10-08）
+## 1. 用户实际提的两条要求
 
-- `src/export/canvasSync.ts`：`node.id` = `goal.id`；`text` 是人读的 `**标题**\n占父级 X% · 进度 Y%`；
-  `color` 只有 JSON Canvas 的 6 个 preset（按进度四档映射）；edge 为 `{id: "e-<childId>", fromNode: 父, toNode: 子}`；
-  **节点上没有任何自定义字段**。`canvasToJson()` 只是 `JSON.stringify`，没有反向解析器。
-- `src/main.ts:180-234`：`canvasPathFor()` 用**图文件名**派生白板路径（不是根标题，避免多图撞名）；
-  `openCanvas()` 已存在就原样打开、只在缺失时生成；`exportCanvas()` 用 `vault.modify` 整覆盖。
-- `GoalNode`（`src/data/types.ts:4-24`）**没有 x/y**。`color` 只属于根和二级节点，
-  `normalize()`（`goalTree.ts:113-129`）会主动删掉深层节点上的 `color`。
-- `store.mutate()`（`goalTree.ts:176-182`）是唯一写入口：改内存 → 汇总 → 落盘 → 通知视图。无 undo。
-- `store` 只 watch `.goalscape.json`（`goalTree.ts:132-152`：300ms 去抖 + `writing` 自写标记），**完全没 watch `.canvas`**。
-- `crud.moveGoal()`（`crud.ts:69`）自带环检测，返回 boolean。回写换父**必须**走它，别自己拼 `children`。
+1. 能实时体现改动和变化；
+2. 生成新白板时，原有的排列布局不会乱。
+
+两条都不需要"白板 → 数据"这个方向。回写方向是方案复审时我自己加的目标，实现完在真实 vault 里
+一跑就三连崩（换父被吃掉、改名被吃掉、布局整个按算法重画），用户据此判定"白板明显不兼容原有项目设计"。
+
+## 2. 已核对的代码事实（仍然成立的部分）
+
+- `GoalNode`（`src/data/types.ts`）**没有 x/y**，位置在数据模型里无处可存 —— 这是"放射图读白板位置"根本不成立的原因。
+- `canvasPathFor()` 用**图文件名**派生白板路径（不是根标题：每张新图默认根标题都叫 Main Goal，多图会撞名）。
+- `store.mutate()` 是唯一写入口（改内存 → 汇总 → 落盘 → 通知）；`store.subscribe()` 给镜像用；
+  store 只 watch `.goalscape.json`，**不 watch `.canvas`**（现在也不需要）。
+- JSON Canvas 的 `x/y` 是**卡片中心**，不是左上角。按左上角写会把整张图往左上偏半格。
 - 测试基线：`npm test`（node:test + esbuild，零第三方依赖）、`npm run check`（类型检查→打包→部署→单测→9333 实机回归）。
 
-## 2. 对上一版"四层分级"的复审
+## 3. 为什么把回写整体删掉（三条，每条都实测过）
 
-1. **Tier 0（给 `GoalNode` 加 `canvasPos`）否决。** 位置是呈现，不是目标数据；塞进 `goalscape.json`
-   之后放射图根本不读它（放射图按角度递推算坐标），唯一作用是"重导出不冲掉布局"，
-   而这个目标用**合并导出**就能达到，布局留在 `.canvas` 文件里 —— 不污染数据模型，也不用做迁移。
-2. **Tier 2（字段回写）建立在一个未验证假设上**：Obsidian 保存 `.canvas` 时是否保留节点上的自定义键。
-   若不保留，字段只能从 `text` 里正则抠，容错成本翻倍。所以它前面必须插一个 spike。
-3. **Tier 3（冲突策略）不是最后一层，而是结构回写的前置条件。** 没有环/孤儿/重复 id 的策略，
-   结构回写第一次跑就可能改坏图，而数据层没法回退。
-4. **上一版漏掉的最大成本项：实时 vs 手动触发。** 实时 watch `.canvas` 要处理拖拽期间的多次写盘、
-   `adapter.write` 的 0 字节瞬时读（本项目已实测过）、以及 export↔import 乒乓。
-   改成"手动一条命令 + 预演 diff"能砍掉近一半工作量，并消灭几乎全部数据风险。
-5. **漏掉的语义空档：白板里没有 importance 这个量。** 连线只能给出父子关系与顺序，给不出权重。
-   不要向用户承诺"白板能调权重"。
+1. **导出必然吃掉未同步的改动。** 一旦存在反向通道，导出就得保住白板上"还没同步"的编辑；
+   而导出的语义是"按树重画"。两者不可能同时成立 —— 用户改完箭头、再触发一次自动镜像，改动就没了。
+2. **兄弟顺序判不出来。** 第一版按 `.canvas` 的**节点数组顺序**定兄弟次序，实测那个顺序是 Obsidian 的创建/z 序，
+   不是用户意图，于是每次同步都产出一串用户从没做过的"重排"。改成按几何角度推断更危险（用户只是为美观挪位置）。
+3. **一次误判就是不可恢复的丢失。** 数据层没有 undo、没有历史；`diffCanvas` 的 problems 只能拦住成环/重复，
+   拦不住"把用户没做的改动写进去"。
 
-## 3. 修正后的分级
+删掉的东西：`sync-from-canvas` 命令、`CanvasSyncModal` 预览、`.bak` 备份、`diffCanvas`/`applyCanvasPlan`/
+`stampAdoptedCards`/`mergeCanvas`，以及"兄弟顺序"这一整个概念。
 
-| 阶段 | 目标 | 工作量 | 可独立发布 |
-|---|---|---|---|
-| A spike | 验两个未知量：自定义键是否被保留 / `.canvas` 的写盘时机与事件 | 0.25d | 否 |
-| B 合并导出 | `exportCanvas()` 不再冲掉白板：按 id 复用已有 `x/y/w/h` 与用户加的便签 | 0.5d | ✅ |
-| C 结构回写（手动） | `parseCanvas()` + 同步命令：换父/顺序/改标题/新建，带预演 diff + 快照备份 | 1.5–2d | ✅ |
-| D 字段回写 | 仅当 A 结论为"键会保留"：progress / due / tags | 0.5–1d | ✅ |
-| E 守护硬化 | 重复 id 中止、孤儿忽略、外部改动重读、失败回滚 | 0.5–1d | 并入 C |
-
-合计 3.5–5.5 人日。**第一个有意义的交付是 B + C ≈ 2–2.5 天**（B 让白板可用，C 让白板有意义）。
-
-## 4. 各阶段验收标准与实现要点
-
-### Stage A — 先做，两小时内要有结论
-
-- 在 vault 里手工给一个 canvas 节点加 `"gsId": "xxx"`，在 Obsidian 中拖动**别的**节点、保存、关闭重开，
-  看键还在不在。再试一次拖动**该节点本身**。
-- 记录：拖动一个节点期间 `vault.on("modify")` 对 `.canvas` 触发几次、什么时机（每帧还是松手一次）；
-  Obsidian 自己会不会往 edge 上补 `fromSide/toSide/label`、会不会把 `e-<id>` 换成它自己的随机 id；
-  复制粘贴节点时新节点的 id 规则。
-- 结论写进第 6 节。**A 没结论就不要开 C/D。**
-
-### Stage B — 合并导出（低风险、立刻有用）
-
-- 新增纯函数 `mergeCanvas(fresh: JsonCanvas, existing: JsonCanvas | null): JsonCanvas` 放 `canvasSync.ts`：
-  - 节点集合以 `fresh` 为准（数据是真相）；id 命中 `existing` 的，保留 `existing` 的 `x/y/width/height` 和自定义键。
-  - `text`/`color` 用 `fresh` 覆盖（它们由数据派生，白板改了也不该留住）。
-  - `existing` 里 id 不在数据中的节点（用户自己加的便签/图片/分组）**原样保留** —— 别删用户的东西。
-- `exportCanvas()` 改为：读现有文件 → parse → merge → write；读失败或 JSON 解析失败退化成整覆盖，并 Notice 说明原因。
-- 测：`merge(toCanvas(s), toCanvas(s))` 与 `toCanvas(s)` 等价（幂等）；把 existing 的坐标挪走后合并结果保住新坐标；
-  existing 里的外来节点数量不减。
-
-### Stage C — 结构回写（核心，谨慎）
-
-数据流严格单向、**手动触发**：
+## 4. 现在的镜像契约（`src/export/canvasSync.ts`）
 
 ```
-命令 goalscape:sync-from-canvas
-  → adapter.read(.canvas)
-  → parseCanvas(canvas, scape)  ⇒ 变更计划（不改数据）
-  → Modal 列出 N 条变更 + problems + 风险
-  → 用户确认
-  → 备份当前 json 到 Goalscapes/.backup/<name>-<时间戳>.json
-  → 一次 store.mutate() 应用全部变更
-  → Notice 汇报（应用 x 条 / 忽略 y 条 / 备份路径）
+store.subscribe → 800ms 去抖 → refreshCanvasFile(false)
+  快照 = trustedSnapshot(打开着的视图 getData(), 磁盘文件)   // 内存领先磁盘几十秒，但 0 张卡不可信
+  合并 = refreshCanvas(scape, 快照)                          // 派生字段跟树，位置尺寸跟白板
+  写盘 = 先摘标签页 → modify/create → 读回校验，最多 3 次
 ```
 
-- `parseCanvas(canvas, scape)` 返回计划而非直接改数据：
-  `{moves: [{id, newParentId}], renames: [{id, title}], creates: [{parentId, title, index}], order: [{parentId, childIds[]}], problems: [{code, msg}]}`。
-  **纯函数、不改入参**，node:test 才能全量覆盖。
-- 应用规则：换父一律 `moveGoal()`（返回 false 记 problem）；顺序只重排 `children` 数组，**不动 importance**；
-  新建节点走 `createGoalNode({title})` + `addGoal()`。
-- **删除策略：白板里删节点不删数据**，只在报告里说"白板少了 K 个节点，已忽略"。这是底线。
-- 标题来源：优先自定义键（A 通过时）；否则取 `text` 第一行剥 `**`。剥不出来记 problem，**不要猜**。
-- 失败原子性：同一个 goalId 出现在两个 canvas 节点上（用户复制过节点）→ **整个同步中止**并报重复，
-  不做部分应用。半应用的状态最难恢复。
-- 测（新增 `src/export/__tests__/canvasSync.test.ts`）：换父成环被拒、孤儿被忽略、重复 id 中止、
-  新建落到正确父与位置、畸形 `text` 不改数据、"导出→白板改→导入→再导出"两轮收敛。
-- 实机（`test/ui-regression.mjs`）：脚本写一个改过的 `.canvas` → 触发命令 → 断言 `.goalscape.json` 落盘内容 →
-  恢复现场（还原 json、删备份与临时白板）。老坑提醒：窗口必须前台、`adapter.write` 有 0 字节瞬时读、截图别用 clip。
+- **认卡片靠 `gsId`**，不靠节点 id、更不靠位置；旧白板（没有 `gsId`）退化成"节点 id 就是目标 id"，照样认得出。
+- 留住：`x/y/width/height`、用户自己的便签/文件卡、以及它们牵的连线。
+- 跟树走：`text`、`color`、生成边 `e-<子目标>`（白板里改箭头会在下一次镜像被树纠正回来）。
+- 删掉：带 `gsId` 但树里已没这个目标的鬼卡，以及指向它的线。
+- 新卡片落在父卡片附近，压到任何已有卡片就沿"父→子"射线让位（实测不会压、也不会跳到画布另一头）。
 
-### Stage D — 字段回写（有条件）
+三条写盘红线（都来自实测，不是洁癖）：
 
-- 仅当 A 证明自定义键会保留。导出时给每个节点写机器字段（`data: {gsId, progress, due, tags}` 或扁平键，按 A 的结论选更稳的那个）；
-  导入时逐字段比对，只回写白板侧**确实变了**的字段。
-- **`color` 不回写**：6 个 preset 是有损量化，且插件里 color 只属于根和二级节点，
-  从白板反推出来的值会被 `normalize()` 立刻清掉 —— 白做，还会让用户困惑。
-- `progress` 回写要注意：父级进度由 rollup 引擎算，只有叶子能手工填（`types.ts:16`）。给父级写 progress 是无效操作，应记 problem。
-
-### Stage E — 守护
-
-- 同步前快照（C 已含）；`problems` 非空时默认不应用，除非用户点"忽略并继续"。
-- 算计划用的 `scape` 必须是**当下重新读的**：若期间 `goalscape.json` 被外部改过（用户在别处编辑），
-  重读后再算，避免用陈旧内存态覆盖。
+1. **白板文件不存在时绝不自动创建** —— 凭空往 vault 扔文件是另一种丢数据；只有点 Canvas 段或命令才建第一版。
+2. **有人开着这块白板就不写** —— canvas 视图内存领先磁盘几十秒，关页时还会补写一次，硬写必然被盖。
+   欠着的状态用工具栏小点表示，关掉标签页（或 `layout-change`，或每秒一次的回头看）就补上。
+   Obsidian 没有公开的"这块白板干不干净"标记，所以不做"干净就写"的优化。
+3. **内容一致就不碰文件** —— 插件启动也会 notify 一次，不该白白重写一次白板。
 
 ## 5. 明确不要做的事
 
 - 不要给 `GoalNode` 加 x/y。
-- 不要做实时 watch `.canvas` 自动回写（除非用户明确要求，且 B/C 已稳定用过一段时间）。
-- 不要从白板反推 `importance` / `brightness` / `bandScale` / `color`。
-- 不要在回写路径里绕过 `store.mutate()`。
-- 不要引入任何新的测试依赖。
+- 不要把白板 → 数据的回写加回来（理由见第 3 节）。要改结构就在放射图/列表里改。
+- 不要从白板反推 `importance` / `brightness` / `bandScale` / `color`；`color` 是 6 档有损量化，
+  且插件里 color 只属于根和二级节点，反推回来会被 `normalize()` 立刻清掉。
+- 不要在镜像路径里绕过 `store.mutate()` / `store.subscribe()` 自己造一条写路径。
+- 不要引入新的测试依赖。
 
-## 6. 已验证事实（Stage A 的结论填这里）
+## 6. 已验证事实（Stage A 探针，Obsidian 1.9.14，2026-10-08）
 
-- 待填：自定义键是否被 Obsidian 保留 —— 未知。
-- 待填：`.canvas` 的 modify 事件频率与时机 —— 未知。
-- 待填：Obsidian 对 edge 字段的补写行为 —— 未知。
+探针只动临时文件，跑完删除。这几条是镜像实现的地基，回写砍掉了它们仍然有效：
+
+1. **自定义键原样保留**：Obsidian 把不认识的键收进节点的 `unknownData`，`canvas.getData()` 序列化时再吐回文件
+   （`gsId`/`gsDepth` 都活着）。所以机器字段**不要**用 `text/type/id/color/x/y/width/height` 这些已知键命名。
+2. **edge 的 id 与自定义键保留**，但 Obsidian 会**补写 `fromSide`**（按几何算）—— 解析器不能假设 edge 字段集固定。
+3. **视图内存领先磁盘几十秒**：节点在内存里已经移动，文件在 4–20 秒窗口内仍是旧坐标；
+   直接改 `node.x` 或 `requestSave()` 都不落盘。
+4. **刚打开的 canvas 视图 `getData()` 会返回 `nodes: 0`** —— 拿它当快照等于把整份文件按算法重画，
+   用户布局和他自己的便签一起没。真实事故：一次镜像后 15 张卡里 14 张回到算法位。`trustedSnapshot` 就是为这条写的。
+5. **`detach()` 时视图会把内存那份补写一次** —— 顺序必须"先摘页、后写盘"，且写完读回校验、验不到就重写。
+6. 可用的视图侧入口：`leaf.view.canvas` 持有 `nodes`/`edges` 两个 Map，`getData()` 出序列化结果；节点对象上没有 `updatePosition`。
+
+## 7. 落地状态（单向镜像，2026-10-09）
+
+- 引擎：`toCanvas` / `refreshCanvas` / `trustedSnapshot` / `parseCanvasJson` / `canvasToJson` / `generatedEdgeId`。
+- 接线：`watchCanvas`（subscribe + layout-change）、`refreshCanvasFile(explicit)`、`writeCanvasDoc`（写后读回 ≤3 次）、
+  `paintCanvasBadges`、`setCanvasAuto`、`openCanvas` 三态。设置页第三个开关"自动更新白板"，存进 `data.json`。
+- 数字：`npm test` 126/126（canvasSync 14 条）、`npm run check` 33.3s 全绿、实机 99 项 28.9s。
+  实机新增三步：`canvas 段：开着只切过去、关掉标签页才补写`、`mirror 自动镜像`、`mirror 只往一个方向走`、
+  `settings 自动更新白板开关`（四段共 26 项断言）。
+- **一个测试基建的坑（比功能坑更贵）**：`test/run-tests.mjs` 按"文件名扁平"拼 esbuild 产物路径，
+  而 esbuild 会把入口相对 `outbase` 的目录结构搬进 outdir。结果 `node --test` 跑的是
+  `node_modules/.goalscape-tests/` 下一份**永远不会被覆盖的旧产物** —— 新写的断言一条都没执行过，
+  而 `npm test` 照样报全绿。已改为 `outbase: root` + 按真实路径逐个 `existsSync` 校验，跑前清空 outDir。
+  教训：加完测试要先确认它**被跑到了**（改坏一行看它红不红），否则计数毫无意义。

@@ -1,0 +1,228 @@
+// 树 → 白板的单向镜像契约。这里盯的是**丢东西**：
+// 用户摆的位置、他自己的便签和他画的连线不能被冲掉；树里删掉的目标不能留鬼卡；
+// 新卡不能压到已有卡；同一棵树导两次结果必须一模一样（"再生成一次布局就乱了"是不合格的）。
+// 反向（白板 → 数据）实现过、删掉了，别再往回加，理由写在 canvasSync.ts 末尾。
+
+import { describe, it } from "node:test";
+import * as assert from "node:assert/strict";
+import { createGoalNode } from "../../data/types";
+import type { GoalNode, GoalScape } from "../../data/types";
+import {
+  toCanvas,
+  refreshCanvas,
+  trustedSnapshot,
+  parseCanvasJson,
+  canvasToJson,
+  generatedEdgeId,
+} from "../canvasSync";
+import type { CanvasNode, JsonCanvas } from "../canvasSync";
+
+function makeScape(): GoalScape {
+  return {
+    version: 1,
+    mainGoal: createGoalNode({
+      id: "root",
+      title: "Main",
+      importance: 100,
+      children: [
+        createGoalNode({ id: "health", title: "Health", importance: 60, children: [
+          createGoalNode({ id: "h1", title: "Run", importance: 50 }),
+          createGoalNode({ id: "h2", title: "Sleep", importance: 50 }),
+        ] }),
+        createGoalNode({ id: "career", title: "Career", importance: 40, children: [
+          createGoalNode({ id: "c1", title: "Ship", importance: 100 }),
+        ] }),
+      ],
+    }),
+  };
+}
+
+const card = (id: string, gsId: string | undefined, extra: Partial<CanvasNode> = {}): CanvasNode => ({
+  id,
+  type: "text",
+  x: 0,
+  y: 0,
+  width: 220,
+  height: 100,
+  text: `**${id}**`,
+  ...(gsId ? { gsId } : {}),
+  ...extra,
+});
+
+/** 与 canvasSync 里判重叠同口径：24px 呼吸位 */
+function overlaps(a: CanvasNode, b: CanvasNode): boolean {
+  return (
+    Math.abs(a.x - b.x) < (a.width + b.width) / 2 + 24 &&
+    Math.abs(a.y - b.y) < (a.height + b.height) / 2 + 24
+  );
+}
+
+function byId(c: JsonCanvas, id: string): CanvasNode {
+  const n = c.nodes.find((x) => x.id === id);
+  assert.ok(n, `卡片 ${id} 不在结果里`);
+  return n;
+}
+
+function findGoal(node: GoalNode, id: string): GoalNode | null {
+  if (node.id === id) return node;
+  for (const c of node.children) {
+    const hit = findGoal(c, id);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+describe("导出：机器字段、连线与坐标语义", () => {
+  it("每张卡片带 gsId，父子连线用可识别的生成 id", () => {
+    const c = toCanvas(makeScape());
+    assert.deepEqual(c.nodes.map((n) => n.gsId), ["root", "health", "h1", "h2", "career", "c1"]);
+    assert.deepEqual(c.edges.map((e) => e.id), ["health", "h1", "h2", "career", "c1"].map(generatedEdgeId));
+    assert.deepEqual(c.edges.map((e) => `${e.fromNode}>${e.toNode}`), [
+      "root>health", "health>h1", "health>h2", "root>career", "career>c1",
+    ]);
+  });
+
+  it("x/y 是卡片中心（JSON Canvas 的语义），中心盘落在原点", () => {
+    const root = byId(toCanvas(makeScape()), "root");
+    // 根节点是 cos(mid)*0，算出来是 -0；=== 与 JSON.stringify 都把它当 0，deepEqual 却当成另一个值
+    assert.ok(root.x === 0 && root.y === 0, "多减半个卡片尺寸就是把整张图往左上偏一格的由来");
+  });
+});
+
+describe("镜像：用户摆的东西不能被冲掉", () => {
+  it("沿用旧文件的 x/y/width/height，其余字段按数据重写", () => {
+    const fresh = toCanvas(makeScape());
+    const existing: JsonCanvas = {
+      nodes: fresh.nodes.map((n) => ({ ...n, x: n.x + 5000, y: n.y - 400, width: 300 })),
+      edges: [],
+    };
+    const merged = refreshCanvas(makeScape(), existing);
+    const h = byId(merged, "health");
+    assert.equal(h.x, byId(fresh, "health").x + 5000);
+    assert.equal(h.width, 300, "尺寸也是用户调过的");
+    assert.match(h.text ?? "", /Health/, "文字仍由数据派生");
+  });
+
+  it("便签和它自己牵的线原样保留", () => {
+    const fresh = toCanvas(makeScape());
+    const merged = refreshCanvas(makeScape(), {
+      nodes: [card("sticky-1", undefined, { text: "随手记" }), ...fresh.nodes],
+      edges: [{ id: "u-1", fromNode: "sticky-1", toNode: "root" }],
+    });
+    assert.ok(merged.nodes.some((n) => n.id === "sticky-1"), "便签不能被删");
+    assert.ok(merged.edges.some((e) => e.id === "u-1"), "便签牵到树上那条线不能被删");
+  });
+
+  it("白板里改箭头不改结构：同 id 的生成边一律以树为准", () => {
+    const fresh = toCanvas(makeScape());
+    fresh.edges.find((e) => e.id === generatedEdgeId("h1"))!.fromNode = "career";
+    const merged = refreshCanvas(makeScape(), fresh);
+    assert.equal(
+      merged.edges.find((e) => e.id === generatedEdgeId("h1"))!.fromNode,
+      "health",
+      "结构只有树一个主人；要保双向改动，导出就必然吃掉没同步的改动"
+    );
+  });
+
+  it("没有旧文件时结果就是数据本身", () => {
+    const fresh = toCanvas(makeScape());
+    assert.deepEqual(refreshCanvas(makeScape(), null), fresh);
+  });
+
+  it("同一棵树导两次一模一样（再生成不会把布局挪动）", () => {
+    const once = refreshCanvas(makeScape(), toCanvas(makeScape()));
+    const twice = refreshCanvas(makeScape(), once);
+    assert.equal(canvasToJson(twice), canvasToJson(once));
+  });
+
+  it("旧白板（没有 gsId，节点 id 就是目标 id）照样认得出卡片", () => {
+    const legacy = toCanvas(makeScape());
+    for (const n of legacy.nodes) delete n.gsId;
+    const existing: JsonCanvas = { nodes: legacy.nodes.map((n) => ({ ...n, x: n.x + 800 })), edges: [] };
+    const merged = refreshCanvas(makeScape(), existing);
+    assert.equal(byId(merged, "health").x, byId(existing, "health").x, "旧白板的位置也要留住");
+    assert.equal(merged.nodes.filter((n) => n.id === "health").length, 1, "不能既当镜子又当便签画两遍");
+  });
+});
+
+describe("镜像：树变了之后白板上不留脏东西", () => {
+  it("树里删掉的目标，它的卡片跟着消失；没 gsId 的卡片不能误删", () => {
+    const scape = makeScape();
+    const fresh = toCanvas(scape);
+    const existing: JsonCanvas = {
+      nodes: [
+        ...fresh.nodes.filter((n) => n.id !== "h1"),
+        card("gone", "h1"),
+        card("mine", undefined, { text: "自己加的" }),
+      ],
+      edges: [
+        ...fresh.edges.filter((e) => e.toNode !== "h1"),
+        { id: generatedEdgeId("h1"), fromNode: "health", toNode: "gone" },
+      ],
+    };
+    const merged = refreshCanvas(scape, existing);
+    assert.ok(!merged.nodes.some((n) => n.id === "gone"), "鬼卡要删");
+    assert.ok(merged.nodes.some((n) => n.id === "mine"), "用户自己的卡片不能被当成鬼卡");
+    assert.ok(!merged.edges.some((e) => e.toNode === "gone" || e.fromNode === "gone"), "指向鬼卡的线要一起删");
+  });
+
+  it("两张卡声称代表同一个目标：第一张当镜子，多出来的降级成便签", () => {
+    const scape = makeScape();
+    const mirrored = byId(toCanvas(scape), "health");
+    const copy = card("health-copy", "health", { x: mirrored.x + 4000, y: mirrored.y + 4000 });
+    const merged = refreshCanvas(scape, { nodes: [{ ...mirrored, x: -7777, y: 111 }, copy], edges: [] });
+    assert.deepEqual([byId(merged, "health").x, byId(merged, "health").y], [-7777, 111], "镜子用第一张的位置");
+    assert.equal(byId(merged, "health-copy").gsId, undefined, "副本要抹掉认领，否则下一轮它又来抢");
+    assert.equal(merged.nodes.filter((n) => n.gsId === "health").length, 1, "同一目标只能有一张镜子卡");
+  });
+
+  it("新目标加在已有卡片堆里：不压任何卡片，也不飞到远处", () => {
+    const scape = makeScape();
+    findGoal(scape.mainGoal, "c1")!.children.push(createGoalNode({ id: "n1", title: "New", importance: 100 }));
+    const algo = byId(toCanvas(scape), "n1");
+    // 用户摆的东西：一张便签正好压在 n1 该待的位置上
+    const existing: JsonCanvas = {
+      nodes: [...toCanvas(makeScape()).nodes, card("blocker", undefined, { x: algo.x, y: algo.y, text: "我摆在这" })],
+      edges: [],
+    };
+
+    const merged = refreshCanvas(scape, existing);
+    const placed = byId(merged, "n1");
+    for (const other of merged.nodes) {
+      if (other.id !== "n1") assert.ok(!overlaps(placed, other), `新卡片压到了 ${other.id}`);
+    }
+    assert.ok(Math.hypot(placed.x - algo.x, placed.y - algo.y) <= 800, "让开就该在附近，不该跳去画布另一头");
+    assert.ok(merged.nodes.some((n) => n.id === "blocker"), "挡住它的便签不能被删");
+  });
+});
+
+describe("快照可信度：内存里那份只有加载出卡片才算数", () => {
+  const doc = (n: number): JsonCanvas => ({
+    nodes: Array.from({ length: n }, (_, i) => card(`k${i}`, `k${i}`)),
+    edges: [],
+  });
+
+  it("刚打开的 canvas 视图 getData() 会返回 0 张卡，这时必须退回磁盘那份", () => {
+    const disk = doc(3);
+    assert.equal(trustedSnapshot(doc(0), disk), disk);
+    assert.equal(trustedSnapshot(null, disk), disk);
+    const live = doc(4);
+    assert.equal(trustedSnapshot(live, disk), live, "内存里有卡片就以内存为准（它领先磁盘几十秒）");
+    assert.equal(trustedSnapshot(null, null), null);
+  });
+
+  it("不可信快照必须被挡掉，否则整份文件按算法重画、用户布局全没", () => {
+    const hand = toCanvas(makeScape()).nodes.map((n) => ({ ...n, x: n.x + 3000, y: n.y - 2000 }));
+    const existing: JsonCanvas = { nodes: hand, edges: [] };
+    const saved = refreshCanvas(makeScape(), trustedSnapshot(doc(0), existing));
+    const wrecked = refreshCanvas(makeScape(), doc(0));
+    assert.equal(byId(saved, "health").x, byId(existing, "health").x, "挡下来之后手工位置保住");
+    assert.notEqual(byId(wrecked, "health").x, byId(existing, "health").x, "不挡就被按算法重画");
+  });
+
+  it("坏 JSON / 缺字段一律解析为 null，由调用方决定退化", () => {
+    assert.equal(parseCanvasJson("{not json"), null);
+    assert.equal(parseCanvasJson(JSON.stringify({ nodes: "nope" })), null);
+    assert.deepEqual(parseCanvasJson(JSON.stringify({ nodes: [{ id: "a" }, { x: 1 }] }))?.nodes.length, 1);
+  });
+});
