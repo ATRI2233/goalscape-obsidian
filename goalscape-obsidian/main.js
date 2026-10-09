@@ -47,6 +47,7 @@ function createGoalNode(partial) {
     start: partial.start,
     tags: (_c = partial.tags) != null ? _c : [],
     notes: partial.notes,
+    links: partial.links,
     fields: partial.fields,
     collapsed: partial.collapsed,
     children: (_d = partial.children) != null ? _d : []
@@ -94,6 +95,98 @@ function branchColors(root) {
   };
   rec(root, DEFAULT_BRANCH_COLOR, 0);
   return out;
+}
+
+// src/data/notes.ts
+function eachRealLine(md, fn) {
+  let inFence = false;
+  for (const line of md.split(/\r?\n/)) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (!inFence)
+      fn(line);
+  }
+}
+function parseWikiTargets(md) {
+  const out = [];
+  if (!md)
+    return out;
+  eachRealLine(md, (line) => {
+    for (const m of line.matchAll(/(?<!!)\[\[([^\]|#]+?)(?:#[^|]*)?(?:\|[^\]]*)?\]\]/g)) {
+      const t = m[1].trim();
+      if (t && !out.includes(t))
+        out.push(t);
+    }
+  });
+  return out;
+}
+function parseTags(md) {
+  const out = [];
+  if (!md)
+    return out;
+  eachRealLine(md, (line) => {
+    for (const m of line.matchAll(/(^|[\s(])#([\p{L}_][\p{L}\p{N}_/-]*)/gu)) {
+      if (!out.includes(m[2]))
+        out.push(m[2]);
+    }
+  });
+  return out;
+}
+function firstLine(md, max = 60) {
+  if (!md)
+    return "";
+  let inFence = false;
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^\s*(```|~~~)/.test(raw)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || !line || line.startsWith("#"))
+      continue;
+    const plain = line.replace(/!?\[\[([^\]|]+?)(?:[#[|][^\]]*)?\]\]/g, "$1").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[*_`>]/g, "").trim();
+    if (!plain)
+      continue;
+    return plain.length > max ? `${plain.slice(0, max - 1)}\u2026` : plain;
+  }
+  return "";
+}
+function backlinks(root, id) {
+  return flattenTree(root).filter((n) => {
+    var _a;
+    return n.id !== id && ((_a = n.links) != null ? _a : []).includes(id);
+  });
+}
+function effectiveTags(node, md) {
+  var _a;
+  const seen = new Set(node.tags.map((t) => t.toLowerCase()));
+  const out = [...node.tags];
+  for (const t of parseTags((_a = md != null ? md : node.notes) != null ? _a : "")) {
+    const k = t.toLowerCase();
+    if (seen.has(k))
+      continue;
+    seen.add(k);
+    out.push(t);
+  }
+  return out;
+}
+function pruneLinks(root) {
+  const alive = new Set(flattenTree(root).map((n) => n.id));
+  for (const n of flattenTree(root)) {
+    if (!n.links)
+      continue;
+    const kept = [];
+    for (const id of n.links) {
+      if (id !== n.id && alive.has(id) && !kept.includes(id))
+        kept.push(id);
+    }
+    if (kept.length)
+      n.links = kept;
+    else
+      delete n.links;
+  }
 }
 
 // src/data/rollup.ts
@@ -223,6 +316,8 @@ var GoalTreeStore = class {
     (_e = node.tags) != null ? _e : node.tags = [];
     (_f = node.children) != null ? _f : node.children = [];
     node.children.forEach((c) => this.normalize(c, depth + 1));
+    if (depth === 0)
+      pruneLinks(node);
   }
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */
   registerExternalWatch() {
@@ -433,6 +528,7 @@ function deleteGoal(scape, id) {
   const idx = found.parent.children.findIndex((c) => c.id === id);
   if (idx >= 0)
     found.parent.children.splice(idx, 1);
+  pruneLinks(scape.mainGoal);
   return true;
 }
 function renameGoal(scape, id, title) {
@@ -786,6 +882,19 @@ function confirmAction(app, message, okText = "Delete") {
     modal.open();
   });
 }
+function promptPick(app, title, options) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (id) => {
+      if (settled)
+        return;
+      settled = true;
+      resolve(id);
+    };
+    const modal = new PickModal(app, title, options, settle);
+    modal.open();
+  });
+}
 var ConfirmModal = class extends import_obsidian2.Modal {
   constructor(app, message, okText, onAnswer, onCancel) {
     super(app);
@@ -813,6 +922,31 @@ var ConfirmModal = class extends import_obsidian2.Modal {
   onClose() {
     this.onCancel();
     this.contentEl.empty();
+  }
+};
+var PickModal = class extends import_obsidian2.Modal {
+  constructor(app, titleText, options, onPick) {
+    super(app);
+    this.titleText = titleText;
+    this.options = options;
+    this.onPick = onPick;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.titleText });
+    const list = contentEl.createDiv({ cls: "goalscape-pick-list" });
+    for (const opt of this.options) {
+      const btn = list.createEl("button", { cls: "goalscape-pick-btn", text: opt.label });
+      btn.addEventListener("click", () => {
+        this.onPick(opt.id);
+        this.close();
+      });
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+    this.onPick(null);
   }
 };
 var PromptModal = class extends import_obsidian2.Modal {
@@ -874,16 +1008,31 @@ function normalizeHex(raw) {
   return `#${[...t].map((c) => c + c).join("")}`;
 }
 var InfoPanel = class {
-  constructor(container, plugin) {
+  constructor(container, plugin, onSelectNode) {
     this.container = container;
     this.plugin = plugin;
+    this.onSelectNode = onSelectNode;
     this.nodeId = null;
+    /** notes 区双态：false = 渲染态（可点链接），true = textarea 编辑。切换选中节点即回到渲染态 */
+    this.notesEditing = false;
     /** 拖动滑杆时跳过外部触发的整面板重建，避免滑杆在拖拽中被重新创建而丢失指针 */
     this.interacting = false;
+    /**
+     * 渲染态下挂进 MarkdownRenderer 的宿主组件。
+     * 每次重建预览前先旧建新，Obsidian 靠它管理嵌入子组件的生命周期。
+     */
+    this.notesHost = null;
   }
-  /** 切换选中节点：始终强制重建 */
+  /** 视图销毁时调用：预览的嵌入子组件要跟着 unload，不然每开一次面板挂一组孤儿 */
+  destroy() {
+    var _a;
+    (_a = this.notesHost) == null ? void 0 : _a.unload();
+    this.notesHost = null;
+  }
+  /** 切换选中节点：始终强制重建，并把 notes 打回渲染态 */
   show(nodeId) {
     this.nodeId = nodeId;
+    this.notesEditing = false;
     this.render(true);
   }
   /** 数据变更后的被动刷新：拖拽中跳过，避免打断正在交互的控件 */
@@ -894,6 +1043,8 @@ var InfoPanel = class {
     var _a, _b, _c, _d;
     if (this.interacting && !force)
       return;
+    (_a = this.notesHost) == null ? void 0 : _a.unload();
+    this.notesHost = null;
     this.container.empty();
     const scape = this.plugin.store.scape;
     if (!this.nodeId || !scape) {
@@ -939,7 +1090,7 @@ var InfoPanel = class {
       );
     }
     if (isLeaf) {
-      new import_obsidian3.Setting(this.container).setName("Progress").setDesc(`${(_a = node.progress) != null ? _a : 0}%`).addSlider((slider) => {
+      new import_obsidian3.Setting(this.container).setName("Progress").setDesc(`${(_b = node.progress) != null ? _b : 0}%`).addSlider((slider) => {
         var _a2;
         slider.setLimits(0, 100, 1);
         slider.setValue((_a2 = node.progress) != null ? _a2 : 0);
@@ -950,7 +1101,7 @@ var InfoPanel = class {
         });
       });
     } else {
-      new import_obsidian3.Setting(this.container).setName("Progress (auto-rollup)").setDesc(`${(_b = node.progress) != null ? _b : 0}%`);
+      new import_obsidian3.Setting(this.container).setName("Progress (auto-rollup)").setDesc(`${(_c = node.progress) != null ? _c : 0}%`);
     }
     new import_obsidian3.Setting(this.container).setName("Due date").addText((text) => {
       var _a2;
@@ -981,13 +1132,8 @@ var InfoPanel = class {
       this.addHueControls(node, isMain);
     else
       this.addBrightnessControl(node);
-    this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
-    const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
-    notesArea.value = (_c = node.notes) != null ? _c : "";
-    notesArea.addEventListener("blur", () => {
-      const v = notesArea.value;
-      this.mutate((s) => this.patch(s, node.id, (n) => n.notes = v || void 0));
-    });
+    this.renderNotes(node);
+    this.renderLinks(node);
     this.container.createEl("h4", { text: "Custom fields" });
     const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
     const fields = (_d = node.fields) != null ? _d : {};
@@ -1140,6 +1286,117 @@ var InfoPanel = class {
       };
       window.addEventListener("pointerup", end);
     });
+  }
+  /**
+   * Notes 双态区：默认渲染态用原生 MarkdownRenderer 出 —— `[[链接]]` 可点、
+   * `#tag` 可点、`![[嵌入]]` 能渲染，悬浮 preview 白拿。点 "Edit" 切回 textarea，
+   * blur 落盘（落盘时机不变，不做自动保存）。sourcePath 传当前图文件路径，
+   * 相对链接才按这张图所在位置解析。
+   */
+  renderNotes(node) {
+    var _a;
+    const head = this.container.createDiv({ cls: "goalscape-panel-label goalscape-notes-head" });
+    head.createSpan({ text: "Notes" });
+    const toggle = head.createEl("button", {
+      cls: "goalscape-notes-toggle",
+      text: this.notesEditing ? "Done" : "Edit"
+    });
+    this.trackInteraction(toggle);
+    toggle.addEventListener("click", () => {
+      this.notesEditing = !this.notesEditing;
+      this.render(true);
+    });
+    if (this.notesEditing) {
+      const area = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
+      area.value = (_a = node.notes) != null ? _a : "";
+      area.addEventListener("blur", () => {
+        const v = area.value;
+        this.mutate((s) => this.patch(s, node.id, (n) => n.notes = v || void 0));
+      });
+      return;
+    }
+    const body = this.container.createDiv({ cls: "goalscape-notes-render" });
+    if (!node.notes || !node.notes.trim()) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "No notes yet." });
+      return;
+    }
+    const host = new import_obsidian3.Component();
+    this.notesHost = host;
+    void import_obsidian3.MarkdownRenderer.render(this.plugin.app, node.notes, body, this.plugin.store.path, host);
+  }
+  /**
+   * 块间链接：Linked goals（本块 links 指向的）+ Referenced by（反向现扫，不存第二份）。
+   * chip 一律"点主体跳选、点 × 断链"；跳选交给视图注入的 onSelectNode（含展开折叠祖先）。
+   */
+  renderLinks(node) {
+    var _a;
+    const scape = this.plugin.store.scape;
+    if (!scape)
+      return;
+    this.container.createEl("h4", { text: "Linked goals" });
+    const linksRow = this.container.createDiv({ cls: "goalscape-chips" });
+    const linked = ((_a = node.links) != null ? _a : []).map((id) => {
+      var _a2;
+      return (_a2 = findNode(scape.mainGoal, id)) == null ? void 0 : _a2.node;
+    }).filter((n) => Boolean(n));
+    if (!linked.length) {
+      linksRow.createDiv({ cls: "goalscape-panel-empty", text: "No links yet." });
+    }
+    for (const target of linked) {
+      this.createChip(linksRow, target.title, target.id, () => {
+        this.mutate(
+          (s) => this.patch(s, node.id, (n) => {
+            var _a2;
+            n.links = ((_a2 = n.links) != null ? _a2 : []).filter((x) => x !== target.id);
+            if (!n.links.length)
+              delete n.links;
+          })
+        );
+      });
+    }
+    const add = linksRow.createEl("button", { cls: "goalscape-chip-add", text: "Add link" });
+    this.trackInteraction(add);
+    add.addEventListener("click", async () => {
+      var _a2;
+      const used = /* @__PURE__ */ new Set([node.id, ...(_a2 = node.links) != null ? _a2 : []]);
+      const options = flattenTree(scape.mainGoal).filter((n) => !used.has(n.id)).map((n) => ({ id: n.id, label: n.title }));
+      if (!options.length) {
+        new import_obsidian3.Notice("No other goals to link.");
+        return;
+      }
+      const picked = await promptPick(this.plugin.app, "Link to goal", options);
+      if (!picked)
+        return;
+      this.mutate(
+        (s) => this.patch(s, node.id, (n) => {
+          var _a3;
+          n.links = Array.from(/* @__PURE__ */ new Set([...(_a3 = n.links) != null ? _a3 : [], picked]));
+        })
+      );
+    });
+    const refs = backlinks(scape.mainGoal, node.id);
+    if (refs.length) {
+      this.container.createEl("h4", { text: "Referenced by" });
+      const backRow = this.container.createDiv({ cls: "goalscape-chips" });
+      for (const src of refs) {
+        this.createChip(backRow, src.title, src.id);
+      }
+    }
+  }
+  /** 一个 chip：主体按钮跳选（onSelectNode），可选地带一个 × 断链按钮 */
+  createChip(row, title, targetId, onRemove) {
+    const chip = row.createDiv({ cls: "goalscape-chip" });
+    const label = chip.createEl("button", { cls: "goalscape-chip-main", text: title });
+    this.trackInteraction(label);
+    label.addEventListener("click", () => {
+      var _a;
+      return (_a = this.onSelectNode) == null ? void 0 : _a.call(this, targetId);
+    });
+    if (onRemove) {
+      const x = chip.createEl("button", { cls: "goalscape-chip-x", text: "\xD7" });
+      x.setAttr("aria-label", "Remove link");
+      x.addEventListener("click", onRemove);
+    }
   }
   mutate(fn) {
     this.plugin.store.mutate(fn);
@@ -1644,7 +1901,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         this.setView(FULL_VIEW);
     });
     const panelEl = mainRow.createDiv({ cls: "goalscape-panel" });
-    this.infoPanel = new InfoPanel(panelEl, this.plugin);
+    this.infoPanel = new InfoPanel(panelEl, this.plugin, (id) => this.selectRevealing(id));
     this.infoPanel.show(this.selectedId);
     this.weightDrag = new WeightDragController(this.plugin.store, this.dragSurface());
     this.reparentDrag = new ReparentDragController(this.plugin.store, this.dragSurface());
@@ -1657,6 +1914,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
   async onClose() {
     var _a;
     (_a = this.unsubscribe) == null ? void 0 : _a.call(this);
+    this.infoPanel.destroy();
     this.contentEl.empty();
   }
   // ──────────────────────────── 对外接口（供 main.ts 调用） ────────────────────────────
@@ -1729,7 +1987,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.gradSeq = 0;
     const fills = branchFills(scape.mainGoal, this.plugin.tone);
     const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles) => {
-      var _a, _b, _c, _d;
+      var _a, _b, _c, _d, _e, _f;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
@@ -1771,13 +2029,15 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         this.reparentDrag.start(e, node.id);
       });
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = `${node.title} \xB7 ${(_a = node.progress) != null ? _a : 0}%`;
+      const summary = firstLine((_a = node.notes) != null ? _a : "");
+      tip.textContent = summary ? `${node.title} \xB7 ${(_b = node.progress) != null ? _b : 0}%
+${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
       path.appendChild(tip);
       map.appendChild(path);
       const bevel = bevelArc(edge);
       if (bevel)
         this.addOverlay(map, bevel, dim, ["goalscape-bevel"]);
-      const rim = progressRim(edge, (_b = node.progress) != null ? _b : 0);
+      const rim = progressRim(edge, (_d = node.progress) != null ? _d : 0);
       if (rim) {
         this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
           stroke: ink.fill,
@@ -1789,10 +2049,10 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_c = node.progress) != null ? _c : 0}%`;
+        pct.textContent = `${(_e = node.progress) != null ? _e : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const fit = fitLabel(node.title, edge, `${(_d = node.progress) != null ? _d : 0}%`);
+        const fit = fitLabel(node.title, edge, `${(_f = node.progress) != null ? _f : 0}%`);
         if (fit) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
@@ -1827,6 +2087,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       });
     };
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
+    this.drawLinkDecorations(svg, defs, scape, fills);
     svg.addEventListener("click", () => {
       if (this.panMoved) {
         this.panMoved = false;
@@ -1899,6 +2160,27 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.render();
     this.infoPanel.show(id);
   }
+  /**
+   * 跳选：先沿祖先链把 collapsed 展开（否则目标可能被藏在折叠分支里，渲染层根本不画它，
+   * 选中态点了却没地方看），再走 select。折叠只是视图状态，展开它要落盘所以走 mutate。
+   * 已是 selectRevealing 的目标若已选中，仍然重跑一次以补齐展开。
+   */
+  selectRevealing(id) {
+    var _a, _b, _c, _d;
+    const scape = this.plugin.store.scape;
+    if (!scape || !findNode(scape.mainGoal, id))
+      return;
+    const collapsed = [];
+    let parent = (_b = (_a = findNode(scape.mainGoal, id)) == null ? void 0 : _a.parent) != null ? _b : null;
+    while (parent) {
+      if (parent.collapsed)
+        collapsed.push(parent);
+      parent = (_d = (_c = findNode(scape.mainGoal, parent.id)) == null ? void 0 : _c.parent) != null ? _d : null;
+    }
+    if (collapsed.length)
+      this.plugin.store.mutate(() => collapsed.forEach((n) => delete n.collapsed));
+    this.select(id);
+  }
   showContextMenu(event, node) {
     const scape = this.plugin.store.scape;
     if (!scape)
@@ -1915,6 +2197,138 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
       }
     });
     menu.showAtMouseEvent(event);
+  }
+  // ──────────────────────────── 链接装饰层（仅选中时） ────────────────────────────
+  /** 扇区弧中点（环带半径中值）：弦线端点的锚 */
+  sectorMid(shape) {
+    const mid = (shape.startAngle + shape.endAngle) / 2;
+    const r = (shape.rInner + shape.rOuter) / 2;
+    return { x: CX + Math.cos(mid) * r, y: CY + Math.sin(mid) * r };
+  }
+  /** 把对端扇区"点亮"（弦线 hover 的联动高亮） */
+  litSector(id, on) {
+    var _a;
+    const el = (_a = this.liveSvg()) == null ? void 0 : _a.querySelector(`path[data-id="${id}"]`);
+    if (!el)
+      return;
+    if (on)
+      el.addClass("goalscape-lit");
+    else
+      el.removeClass("goalscape-lit");
+  }
+  /**
+   * 零噪音规矩：不选中时图面和本功能出现之前完全一样。
+   * 出链与反链都画 —— links 数据结构里对端选中时画不到自己，backlinks 补上"谁引用我"，
+   * 和信息面板的 Referenced by 同语义。目标在折叠分支里没被画出来就跳过，
+   * 为一个看不见的端点改动别处的折叠状态不值得。
+   * 弦线：三次 bezier、两控制点钉在图心（弧线向圆心下垂），描边渐变取两端各自的底色。
+   */
+  drawLinkDecorations(svg, defs, scape, fills) {
+    var _a, _b, _c, _d;
+    if (!this.selectedId)
+      return;
+    const found = findNode(scape.mainGoal, this.selectedId);
+    const mine = found ? this.nodePositions.get(found.node.id) : void 0;
+    if (!found || !mine)
+      return;
+    const p1 = this.sectorMid(mine);
+    const partners = Array.from(
+      /* @__PURE__ */ new Set([
+        ...(_a = found.node.links) != null ? _a : [],
+        ...backlinks(scape.mainGoal, found.node.id).map((n) => n.id)
+      ])
+    ).filter((id) => id !== found.node.id);
+    const layer = document.createElementNS(SVG_NS, "g");
+    layer.addClass("goalscape-chord-layer");
+    svg.appendChild(layer);
+    for (const otherId of partners) {
+      const shape = this.nodePositions.get(otherId);
+      if (!shape)
+        continue;
+      const p2 = this.sectorMid(shape);
+      const c1 = (_b = fills.get(found.node.id)) != null ? _b : "#94a3b8";
+      const c2 = (_c = fills.get(otherId)) != null ? _c : "#94a3b8";
+      const gid = `${this.uid}-c${++this.gradSeq}`;
+      const grad = document.createElementNS(SVG_NS, "linearGradient");
+      grad.id = gid;
+      grad.setAttribute("gradientUnits", "userSpaceOnUse");
+      grad.setAttribute("x1", String(p1.x));
+      grad.setAttribute("y1", String(p1.y));
+      grad.setAttribute("x2", String(p2.x));
+      grad.setAttribute("y2", String(p2.y));
+      for (const [offset, color] of [["0", c1], ["1", c2]]) {
+        const stop = document.createElementNS(SVG_NS, "stop");
+        stop.setAttribute("offset", offset);
+        stop.setAttribute("stop-color", color);
+        grad.appendChild(stop);
+      }
+      defs.appendChild(grad);
+      const chord = document.createElementNS(SVG_NS, "path");
+      chord.setAttribute("d", `M ${p1.x} ${p1.y} C ${CX} ${CY} ${CX} ${CY} ${p2.x} ${p2.y}`);
+      chord.setAttribute("stroke", `url(#${gid})`);
+      chord.setAttribute("data-chord", otherId);
+      chord.addClass("goalscape-chord");
+      chord.addEventListener("pointerenter", () => {
+        chord.addClass("goalscape-chord-hot");
+        this.litSector(otherId, true);
+      });
+      chord.addEventListener("pointerleave", () => {
+        chord.removeClass("goalscape-chord-hot");
+        this.litSector(otherId, false);
+      });
+      chord.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.selectRevealing(otherId);
+      });
+      layer.appendChild(chord);
+      for (const [p, color] of [[p1, c1], [p2, c2]]) {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("cx", String(p.x));
+        dot.setAttribute("cy", String(p.y));
+        dot.setAttribute("r", "4");
+        dot.setAttribute("fill", color);
+        dot.addClass("goalscape-chord-dot");
+        layer.appendChild(dot);
+      }
+    }
+    const hits = [];
+    for (const t of parseWikiTargets((_d = found.node.notes) != null ? _d : "")) {
+      const f = this.app.metadataCache.getFirstLinkpathDest(t, this.plugin.store.path);
+      if (f)
+        hits.push({ link: t, name: f.basename });
+    }
+    if (!hits.length)
+      return;
+    const mid = (mine.startAngle + mine.endAngle) / 2;
+    const rCard = Math.min(mine.rOuter + 26, VIEW_SIZE / 2 - 16);
+    const step = Math.min(0.4, 40 / rCard);
+    hits.forEach((item, i) => {
+      const ang = mid + (i - (hits.length - 1) / 2) * step;
+      const x = CX + Math.cos(ang) * rCard;
+      const y = CY + Math.sin(ang) * rCard;
+      const g = document.createElementNS(SVG_NS, "g");
+      g.setAttribute("transform", `translate(${x - 5} ${y - 7})`);
+      g.addClass("goalscape-vfile");
+      const icon = document.createElementNS(SVG_NS, "path");
+      icon.setAttribute("d", "M0 0 H7 L10 3 V14 H0 Z M7 0 V3 H10");
+      icon.addClass("goalscape-vfile-icon");
+      g.appendChild(icon);
+      const name = document.createElementNS(SVG_NS, "text");
+      name.setAttribute("x", "5");
+      name.setAttribute("y", "24");
+      name.setAttribute("text-anchor", "middle");
+      name.addClass("goalscape-vfile-name");
+      name.textContent = item.name.length > 12 ? `${item.name.slice(0, 11)}\u2026` : item.name;
+      g.appendChild(name);
+      const tip = document.createElementNS(SVG_NS, "title");
+      tip.textContent = item.link;
+      g.appendChild(tip);
+      g.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.app.workspace.openLinkText(item.link, this.plugin.store.path, true);
+      });
+      svg.appendChild(g);
+    });
   }
   // ──────────────────────────── 视野（滚轮缩放 / 平移） ────────────────────────────
   /** 只改 viewBox：扇区、渐变、标签一概不重建，命中测试拿 getScreenCTM 反算，跟着视野自然对齐 */
@@ -2423,6 +2837,23 @@ var LAYOUT_KEYS = ["x", "y", "width", "height"];
 function generatedEdgeId(childId) {
   return `e-${childId}`;
 }
+function linkEdgeId(fromId, toId) {
+  return `x-${fromId}-${toId}`;
+}
+function fileEdgeId(goalId, filePath) {
+  return `n-${goalId}-${hashStr(filePath)}`;
+}
+function fileNodeId(goalId, filePath) {
+  return `f-${goalId}-${hashStr(filePath)}`;
+}
+function hashStr(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
 var PROGRESS_COLORS = {
   0: "1",
   // red
@@ -2440,29 +2871,49 @@ function progressToPreset(progress) {
 }
 var NODE_W = 220;
 var NODE_H = 100;
-function buildCanvas(scape) {
+var LINE_H = 24;
+var FILE_OUT = 300;
+var FILE_SIDE_STEP = 170;
+var FILE_W = 260;
+var FILE_H = 120;
+function cardLines(node) {
+  var _a, _b;
+  const lines = [
+    `**${node.title}**`,
+    `\u5360\u7236\u7EA7 ${node.importance}% \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`
+  ];
+  const tags = effectiveTags(node);
+  if (tags.length)
+    lines.push(tags.map((t) => `#${t}`).join(" "));
+  const summary = firstLine((_b = node.notes) != null ? _b : "");
+  if (summary)
+    lines.push(summary);
+  return lines;
+}
+function buildCanvas(scape, resolved) {
   const nodes = [];
   const edges = [];
   const parentOf = /* @__PURE__ */ new Map();
   const R = 600;
+  const live = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
   function walk(node, depth, startAngle, endAngle, rInner, parentId) {
-    var _a, _b;
+    var _a, _b, _c;
     const mid = (startAngle + endAngle) / 2;
     const rOuter = rInner + bandScaleOf(node) * R;
     const radius = depth === 0 ? 0 : (rInner + rOuter) / 2;
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
+    const lines = cardLines(node);
     nodes.push({
       id,
       type: "text",
       x: Math.round(x),
       y: Math.round(y),
       width: NODE_W,
-      height: NODE_H,
-      text: `**${node.title}**
-\u5360\u7236\u7EA7 ${node.importance}% \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`,
-      color: progressToPreset((_b = node.progress) != null ? _b : 0),
+      height: NODE_H + LINE_H * (lines.length - 2),
+      text: lines.join("\n"),
+      color: progressToPreset((_a = node.progress) != null ? _a : 0),
       // 机器字段：Obsidian 不认识就原样留住（实测），镜像靠它认出哪张卡属于哪个目标
       gsId: id,
       gsDepth: depth
@@ -2470,6 +2921,46 @@ function buildCanvas(scape) {
     if (parentId) {
       edges.push({ id: generatedEdgeId(id), fromNode: parentId, toNode: id });
       parentOf.set(id, parentId);
+    }
+    const files = resolved == null ? void 0 : resolved.get(id);
+    if (files == null ? void 0 : files.length) {
+      const len = Math.hypot(x, y);
+      const ux = len > 1 ? x / len : 1;
+      const uy = len > 1 ? y / len : 0;
+      files.forEach((file, k) => {
+        const fid = fileNodeId(id, file);
+        const lateral = (k - (files.length - 1) / 2) * FILE_SIDE_STEP;
+        const fx = x + ux * FILE_OUT - uy * lateral;
+        const fy = y + uy * FILE_OUT + ux * lateral;
+        nodes.push({
+          id: fid,
+          type: "file",
+          file,
+          x: Math.round(fx),
+          y: Math.round(fy),
+          width: FILE_W,
+          height: FILE_H,
+          // gsFile 而非 gsId：文件卡不是某个目标的镜子，挂 gsId 会跟目标卡片抢认领、
+          // 触发"复制卡降级"分支，两张卡互相把对方挤成便签
+          gsFile: file,
+          // 相对源卡片的偏移：拖动过源卡片之后，新出现的文件卡要跟着源卡片而不是算法位置
+          gsOx: Math.round(fx - x),
+          gsOy: Math.round(fy - y)
+        });
+        edges.push({ id: fileEdgeId(id, file), fromNode: id, toNode: fid });
+        parentOf.set(fid, id);
+      });
+    }
+    for (const to of (_b = node.links) != null ? _b : []) {
+      if (!live.has(to))
+        continue;
+      edges.push({
+        id: linkEdgeId(id, to),
+        fromNode: id,
+        toNode: to,
+        label: "\u{1F517}",
+        color: progressToPreset((_c = node.progress) != null ? _c : 0)
+      });
     }
     const shares = childShares(node);
     if (!shares.some((s) => s > 0))
@@ -2542,14 +3033,25 @@ function placeNewCard(card, parent, occupied) {
   }
   return card;
 }
-function refreshCanvas(scape, existing) {
-  const { doc: fresh, parentOf } = buildCanvas(scape);
+function isGeneratedEdge(id) {
+  return /^(e|x|n)-/.test(id);
+}
+function refreshCanvas(scape, existing, resolved) {
+  var _a;
+  const { doc: fresh, parentOf } = buildCanvas(scape, resolved);
   if (!existing)
     return fresh;
   const liveIds = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
+  const freshIds = new Set(fresh.nodes.map((n) => n.id));
   const mirrored = /* @__PURE__ */ new Map();
+  const fileCards = /* @__PURE__ */ new Map();
   const extras = [];
   for (const n of existing.nodes) {
+    if (typeof n.gsFile === "string") {
+      if (freshIds.has(n.id))
+        fileCards.set(n.id, n);
+      continue;
+    }
     const goal = claimedGoal(n);
     if (liveIds.has(goal)) {
       if (!mirrored.has(goal)) {
@@ -2568,11 +3070,12 @@ function refreshCanvas(scape, existing) {
   }
   const nodes = [];
   for (const f of fresh.nodes) {
-    const o = mirrored.get(f.id);
+    const o = (_a = mirrored.get(f.id)) != null ? _a : fileCards.get(f.id);
     if (!o) {
       const parentId = parentOf.get(f.id);
       const parentCard = nodes.find((c) => c.id === parentId);
-      nodes.push(placeNewCard(f, parentCard, [...nodes, ...extras]));
+      const cand = parentCard && typeof f.gsOx === "number" && typeof f.gsOy === "number" ? { ...f, x: parentCard.x + f.gsOx, y: parentCard.y + f.gsOy } : f;
+      nodes.push(placeNewCard(cand, parentCard, [...nodes, ...extras]));
       continue;
     }
     const merged = { ...o, ...f };
@@ -2591,7 +3094,7 @@ function refreshCanvas(scape, existing) {
     edges: [
       ...fresh.edges,
       ...existing.edges.filter(
-        (e) => !ids.has(e.id) && !pairs.has(`${e.fromNode}>${e.toNode}`) && kept.has(e.fromNode) && kept.has(e.toNode)
+        (e) => !isGeneratedEdge(e.id) && !ids.has(e.id) && !pairs.has(`${e.fromNode}>${e.toNode}`) && kept.has(e.fromNode) && kept.has(e.toNode)
       )
     ]
   };
@@ -2677,10 +3180,13 @@ async function exportPng(svgEl, scale = 2) {
   });
 }
 function exportCsv(scape, tone = DEFAULT_TONE) {
-  const rows = [["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle"]];
+  const rows = [
+    ["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle", "Notes", "Links"]
+  ];
   const fills = branchFills(scape.mainGoal, tone);
+  const titles = titleIndex(scape);
   const walk = (node, depth, parentTitle) => {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     rows.push([
       node.title,
       String(node.importance),
@@ -2690,13 +3196,22 @@ function exportCsv(scape, tone = DEFAULT_TONE) {
       node.tags.join("; "),
       (_d = fills.get(node.id)) != null ? _d : "",
       String(depth),
-      parentTitle
+      parentTitle,
+      firstLine((_e = node.notes) != null ? _e : ""),
+      linkTitles(node, titles).join("; ")
     ]);
     for (const c of node.children)
       walk(c, depth + 1, node.title);
   };
   walk(scape.mainGoal, 0, "");
   return String.fromCharCode(65279) + rows.map((r) => r.map(csvEscape).join(",")).join("\n");
+}
+function titleIndex(scape) {
+  return new Map(flattenTree(scape.mainGoal).map((n) => [n.id, n.title]));
+}
+function linkTitles(node, titles) {
+  var _a;
+  return ((_a = node.links) != null ? _a : []).map((id) => titles.get(id)).filter((t) => !!t);
 }
 function csvEscape(val) {
   if (val.includes(",") || val.includes('"') || val.includes("\n")) {
@@ -2706,11 +3221,18 @@ function csvEscape(val) {
 }
 function exportMarkdownOutline(scape) {
   const lines = [];
+  const titles = titleIndex(scape);
   const walk = (node, depth) => {
-    var _a, _b;
+    var _a, _b, _c;
     const indent = "  ".repeat(depth);
     const prog = node.children.length ? `(auto: ${(_a = node.progress) != null ? _a : 0}%)` : `(${(_b = node.progress) != null ? _b : 0}%)`;
     lines.push(`${indent}- **${node.title}** ${prog} [w:${node.importance}]`);
+    const summary = firstLine((_c = node.notes) != null ? _c : "");
+    if (summary)
+      lines.push(`${indent}  ${summary}`);
+    const links = linkTitles(node, titles);
+    if (links.length)
+      lines.push(`${indent}  \u2192 \u94FE\u63A5\uFF1A${links.join("\u3001")}`);
     for (const c of node.children)
       walk(c, depth + 1);
   };
@@ -2975,6 +3497,28 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     return trustedSnapshot(this.liveCanvasDoc(leaf), disk);
   }
   /**
+   * notes 里的 `[[wikilink]]` → vault 真实路径，按目标 id 归组。
+   * 只有解析成功的才进白板：点不动的幽灵卡片比没有卡片更糟。
+   * 解析要 metadataCache，而 canvasSync 归 export 层、不许 import obsidian（分层守卫），所以停在这里。
+   */
+  resolveNoteLinks() {
+    var _a;
+    const out = /* @__PURE__ */ new Map();
+    if (!this.store.scape)
+      return out;
+    for (const n of flattenTree(this.store.scape.mainGoal)) {
+      const paths = [];
+      for (const t of parseWikiTargets((_a = n.notes) != null ? _a : "")) {
+        const dest = this.app.metadataCache.getFirstLinkpathDest(t, this.store.path);
+        if (dest && !paths.includes(dest.path))
+          paths.push(dest.path);
+      }
+      if (paths.length)
+        out.set(n.id, paths);
+    }
+    return out;
+  }
+  /**
    * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
    * 自动路径只在"文件已存在 && 没人开着这块白板"时写。
    */
@@ -2992,7 +3536,9 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       this.paintCanvasBadges();
       return;
     }
-    const json = canvasToJson(refreshCanvas(scape, await this.canvasSnapshot(path)));
+    const json = canvasToJson(
+      refreshCanvas(scape, await this.canvasSnapshot(path), this.resolveNoteLinks())
+    );
     if (file instanceof import_obsidian12.TFile) {
       const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
       if (disk === json.trim()) {

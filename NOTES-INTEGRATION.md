@@ -1,132 +1,132 @@
 # Notes 融入 Obsidian：操作书
 
-写给后续接手实施的模型/人。目标：让每个块的 notes 从"存在 JSON 里的死字符串"变成
-Obsidian 网络里的一等公民 —— 面板里能渲染能点、放射图上看得见跨块连接、白板上连得出文件卡片。
+写给后续接手实施的模型/人。目标：让每个块的 notes 成为**真正的 Obsidian Markdown** ——
+面板里渲染、`[[链接]]` 能跳、`#tag` 能点，块与块之间有显式双向链接，
+放射图与白板把这两层连接画出来。用户已明确：**不需要原生编辑器的全部能力**（不做 `[[` 补全、
+不拆独立笔记文件），textarea 写 + 渲染态可点可跳就够。
 
 三条原则贯穿全部阶段：
-- **实用**：写 notes 的体验对齐 Obsidian 本体（渲染、可点链接、反链、补全）；
+- **实用**：撰写保持现状（textarea、blur 落盘），阅读升级为渲染态，链接可点可跳；
 - **可视**：链接关系在放射图和白板上都看得见，但只在需要时出现；
-- **美观**：放射图常态**零噪音** —— 不加任何角标/badge，所有链接可视化只在选中时出现，
-  弦线用 `branchFills` 底色渐变 + 低透明度，克制到"不选中就完全不知道有链接"。
+- **美观**：放射图常态**零噪音**（用户已确认）—— 不加任何角标，所有链接可视化只在选中时出现，
+  弦线用 `branchFills` 底色渐变 + 低透明度。
 
-## 0. 已核对的代码事实（2026-10-08）
+## 0. 已核对的代码事实（2026-10-09）
 
 - `infoPanel.ts:163-169`：notes 是纯 `textarea`，blur 落盘，无渲染、无预览。
 - `InfoPanel` 构造只收 `(container, plugin)`（`radialView.ts:73`），没有 Component；
   `MarkdownRenderer.render(app, md, el, sourcePath, component)` 需要一个生命周期宿主。
-- `GoalNode`（`data/types.ts:4-24`）**没有块间链接字段**；tags 是独立数组，与 notes 内容无关。
-- `canvasSync.toCanvas()`：节点 text 只有 `**标题**\n占父级 X% · 进度 Y%`，edge 只有父子树边，
-  id 形如 `e-<childId>`；`exportCanvas()` 整文件覆盖（`CANVAS-WRITEBACK.md` Stage B 的合并导出**未做**）。
-- **JSON Canvas 的 edge 不支持虚线样式**，只有 `color`（6 preset）和 `label` ——
-  白板链接边用"有色边 + label"与树边区分。
-- JSON Canvas 支持 `type: "file"` 节点（直接引用 vault 里的 md 文件）。
-- `radialView.ts:33` 有 `selectedId`，`:280` 已有"仅选中时绘制"的装饰先例（权重拖拽手柄）；
-  `collapsed` 是节点字段，跳选折叠分支内的节点前必须沿祖先链展开，否则跳过去看不见。
+- `GoalNode`（`data/types.ts:4-24`）**没有块间链接字段**。
+- **白板已收口成单向自动镜像**（2026-10-09，回写整块删除）：`canvasSync.refreshCanvas(树, 快照)`
+  重画派生字段（text/color/`e-<子id>` 树边）、留住已有卡片的 x/y/w/h 与用户便签及其连线、
+  删掉带 `gsId` 却认不出目标的鬼卡；机器字段走 `gs` 前缀（Obsidian 实测原样保留未知键）；
+  自动镜像由 `store.subscribe` + 800ms 去抖驱动，有"开着白板不写盘"等三条红线。
+- JSON Canvas 的 edge **不支持虚线**，只有 `color`（6 preset）和 `label`；支持 `type: "file"` 节点。
+- `radialView.ts:33` 有 `selectedId`，`:280` 已有"仅选中时绘制"的装饰先例；
+  `collapsed` 是节点字段，跳选折叠分支内的节点前必须沿祖先链展开。
 - `branchFills(root, tone)` 是底色唯一真源（弦线渐变取色用它，不用 `branchColors`）。
 - `exporters.ts` 的 Markdown 大纲与 CSV 目前**完全不带 notes/links**。
-- 分层守卫（`layering.test.ts`）：`data/`、`geometry/` 不得 import obsidian；纯逻辑必须放得进内层。
+- 分层守卫（`layering.test.ts`）：`data/`、`geometry/`、`export/` 不得 import obsidian。
+- 数据层**无 undo**；测试基建有假绿前科 —— 新加的断言必须故意改坏一行验证它真的在跑。
 
 ## 1. 设计决策（已定，不再讨论）
 
-1. **vault 笔记链接走原生 Markdown**：用户在 notes 里写 `[[某笔记]]`、`![[嵌入]]`、`#tag`，
-   面板预览用 `MarkdownRenderer` 渲染，点击、悬浮 page preview、反链全部白拿，不发明任何语法。
-2. **块间链接不走 Markdown，走显式字段** `GoalNode.links?: string[]`（存目标节点 id）。
-   理由：goal 不是 vault 文件，`[[标题]]` 撞名歧义无法判定；显式 id 列表可单测、可校验、
-   删除节点时可清理。编辑入口是信息面板的 picker 按钮（复用 `promptModal` 模式），显示为 chips。
-3. **反链必须做**：A 链了 B，选中 B 时面板显示「被 N 个目标引用」chips，点击跳选 A。
-   没有反链的双链只完成了一半。数据层是全树扫 `links` 的纯函数。
-4. **notes 里的 `#tag` 只读合流、不落盘**：新增纯函数 `effectiveTags(node, notes)`，
-   把 notes 里的 tag 并进 `node.tags` 供 focusFilter / Canvas text 消费；`node.tags` 字段本身不动，
-   避免"删了 notes 里一行字，tags 字段悄悄变了"这种不可逆写盘。
-5. **链接解析是领域逻辑**：放 `src/data/notes.ts`（解析 wikilink 目标、抽 tag、取首行摘要），
-   零 obsidian import，进 `npm test`。链接**是否真的存在于 vault** 由视图层拿
+1. **notes 留在 JSON、保持 textarea 编辑**，但面板默认显示**渲染态**（`MarkdownRenderer`）：
+   `[[vault 笔记]]` 可点、悬停有原生 page preview、`#tag` 可点、`![[嵌入]]` 能渲染。
+   点 "Edit" 切回 textarea，blur 落盘并回渲染态。落盘时机不变，不做自动保存。
+2. **块间链接走显式字段** `GoalNode.links?: string[]`（存目标节点 id），不走 `[[标题]]` 模糊匹配
+   （goal 不是文件，撞名歧义不可判定）。编辑入口是面板 picker（复用 `promptModal` 模式），显示为 chips，
+   点击 chip = 跳选该节点（先展开折叠祖先）。
+   **反链必须做**：A 链了 B，选中 B 时显示「被 N 个目标引用」chips。没有反链的双链只完成了一半。
+3. **notes 里的 `#tag` 只读合流、不落盘**：纯函数 `effectiveTags(node, notes)` 并进 `node.tags`
+   供 focusFilter / 白板 text 消费，避免"删了 notes 一行字，tags 字段悄悄变了"的不可逆写盘。
+4. **链接解析是领域逻辑**：`src/data/notes.ts`（wikilink 目标、tag、首行摘要、反链扫描），
+   零 obsidian import，进 `npm test`。链接**是否真的存在于 vault** 由视图/导出层拿
    `app.metadataCache` 判定，data 层不管。
-6. **放射图可视化只在选中时出现**，包含三件：
-   块间弦线（bezier 过图心、两端底色渐变、opacity ≈0.35）、
-   vault 笔记小文件卡片（扇区外缘径向外排、点击开笔记）、tooltip 追加 notes 首行摘要。
-   弦线可交互：hover 两端扇区同时高亮，点击跳选对端（**先展开对端的折叠祖先链**）。
+5. **放射图可视化只在选中时出现**：块间弦线（bezier 过图心、两端底色渐变、opacity ≈0.35、可交互）、
+   vault 笔记小文件卡片（扇区外缘、点击开笔记）、tooltip 追加摘要。常态图面与今天完全一致。
+6. **白板生成物全部是"树派生"，跟着镜像走**：链接边、file 节点每轮 `refreshCanvas` 重画，
+   用确定性 id + `gs` 前缀机器键标记，**位置尊重用户拖动**（同 goal 卡片的 LAYOUT_KEYS 规矩），
+   链接删掉后对应的 file 卡片下轮镜像自动消失（同鬼卡清理逻辑）。
 
 ## 2. 分阶段执行
 
 | 阶段 | 内容 | 主轴 | 工作量 | 可独立发布 |
 |---|---|---|---|---|
-| 1 面板 Markdown 化 | 编辑/预览切换 + `MarkdownRenderer` + `links` 字段与 picker + 反链 chips + `data/notes.ts` | 实用 | 1d | ✅ |
+| 1 面板 Markdown 化 | 渲染/编辑切换 + `links` 字段与 picker + 反链 + `data/notes.ts` | 实用 | 1d | ✅ |
 | 2 放射图链接可视化 | 选中弦线（可交互）+ vault 文件卡片 + tooltip 摘要 | 可视 + 美观 | 0.75d | ✅ |
-| 3 白板连接性 | 链接边（有色 + label）、file 节点、text 追加摘要与 tags | 可视 | 0.75d | ✅ |
-| 4 收尾一致性 | Markdown 大纲 / CSV 带 notes 摘要与链接标题 | 实用 | 0.25d | ✅ |
-| 5（可选）`[[` 补全 | textarea 监听 `[[`，浮层列 vault 文件名 + 本图节点标题 | 实用 | 0.5d | ✅ |
+| 3 白板连接性 | 链接边（有色 + label）+ file 节点 + 卡片 text 追加摘要与 tags | 可视 | 0.75d | ✅ |
+| 4 收尾一致性 | Markdown 大纲 / CSV 带摘要与链接 | 实用 | 0.25d | ✅ |
 
-合计 2.75d，全收 3.25d。**顺序不可换**：2、3、4 都消费阶段 1 落下的 `links` 字段与 `data/notes.ts`。
+合计约 2.75 人日。**顺序不可换**：2、3、4 都消费阶段 1 落下的 `links` 字段与 `data/notes.ts`。
 
 ### 阶段 1 — 信息面板 Markdown 化 + links 字段 + 反链
 
-- `InfoPanel` 构造加第三参 `component: Component`（传 view 本身即可，`RadialGoalMapView extends ItemView`
-  就是 Component）；调用点只有 `radialView.ts:73` 一处。
-- notes 区双态：默认**预览**（`MarkdownRenderer.render(app, notes, el, scapePath, component)`，
-  sourcePath 传当前 `.goalscape.json` 路径），点"Edit"切回 textarea，blur 落盘并回预览。
-  落盘时机不变（blur），不引入自动保存。
-- `GoalNode.links?: string[]`：
-  - `normalize()`（`goalTree.ts`）读档时去重、剔除自链、剔除树里不存在的 id；
-  - `crud.ts` 删除节点时，全树扫一遍把指向被删子树的 id 清掉；
-  - 面板 "Linked goals" 区块：chips（点击 = 跳选该节点，复用 `setSelectedId`，`radialView.ts:407`，
-    跳选前展开折叠祖先）+ "Add link" 按钮弹 picker（列本图全部节点标题，排除自己与已链）。
-- 反链区块 "Referenced by"：`backlinks(root, id)` 纯函数（`data/notes.ts`），chips 同交互。
-- `src/data/notes.ts`：`parseWikiTargets(md)`、`parseTags(md)`、`firstLine(md, max)`、`backlinks(root, id)`。
-  正则要跳过代码块与 `![[`（嵌入不算链接目标）。单测进 `data/__tests__`。
-- 验收：预览里 `[[笔记]]` 能点开、`#tag` 能点；links 增删落盘后重开仍在；反链双向一致；
-  删除被链接的节点后死 id 消失；`npm test` 全绿。
+- 数据层（全部进 `npm test`）：
+  - `GoalNode.links?: string[]`；`normalize()` 读档清洗：去重、剔自链、剔树里不存在的 id；
+  - `crud.ts` 删除节点时清全树指向被删子树的 link id；
+  - `data/notes.ts`：`parseWikiTargets(md)`、`parseTags(md)`、`firstLine(md, max)`、`backlinks(root, id)`、
+    `effectiveTags(node, notes)`。正则跳过代码块；`![[` 是嵌入不算链接目标。
+- `InfoPanel` 构造加第三参 `component: Component`（传 view 本身，`RadialGoalMapView extends ItemView`
+  就是 Component；调用点仅 `radialView.ts:73`）。
+- notes 区双态：默认渲染（`MarkdownRenderer.render(app, notes, el, scapePath, component)`，
+  sourcePath 传当前 `.goalscape.json` 路径），"Edit" 切回 textarea，blur 落盘回渲染态。
+- "Linked goals" chips + "Add link" picker（列本图全部节点标题，排除自己与已链）；
+  "Referenced by" 反链 chips；点击 chips = 跳选（`setSelectedId`，`radialView.ts:407`，先展开折叠祖先）。
+- 验收：渲染态 `[[笔记]]` 能点开、page preview 弹出、`#tag` 能点；links 增删落盘重开仍在；
+  反链双向一致；删除被链接节点后死 id 消失；`npm test` 全绿（新断言按"故意改坏验证在跑"的规矩过一遍）。
 
 ### 阶段 2 — 放射图链接可视化（选中时）
 
 - 选中且 `links` 非空时追加装饰层：每条链接一条三次 bezier，控制点过图心
-  （两端点取各自扇区弧中点、半径取环带中值），`stroke` 用 `linearGradient`
-  （两端 = 两节点 `branchFills` 底色），opacity ≈0.35、宽 2px、两端 4px 圆点。
-  装饰层不挂 data-id（第五轮配色的既有规矩）。
-- 弦线交互：hover 提亮该弦并高亮两端扇区；点击 = 跳选对端（先展开折叠祖先）。
-- vault 文件卡片：选中节点 notes 里每个**可解析**的 wikilink（`metadataCache.getFirstLinkPathDest`
-  命中）在扇区外缘径向外 24px 处排 16px 文件图标 + 文件名（截 12 字），横向错开防重叠，
-  点击 `workspace.openLinkText`。未解析链接不画（避免幽灵噪音）。
+  （端点取各自扇区弧中点、半径取环带中值），`linearGradient` 描边（两端 = 两节点 `branchFills` 底色），
+  opacity ≈0.35、宽 2px、端点 4px 圆点。装饰层不挂 data-id（第五轮配色既有规矩）。
+- 弦线交互：hover 提亮并高亮两端扇区；点击 = 跳选对端（先展开折叠祖先）。
+- vault 文件卡片：选中节点 notes 里**可解析**的 wikilink（`getFirstLinkPathDest` 命中才算）
+  在扇区外缘径向外 24px 排 16px 文件图标 + 文件名（截 12 字），横向错开防重叠，
+  点击 `openLinkText`。未解析链接不画（无幽灵噪音）。
 - tooltip：扇区 `<title>`（`radialView.ts:236`）追加 `\n摘要`（`firstLine` 截 60 字，无则不加）。
-- 验收：选中无链接节点 → 零新增元素；弦线数 = links 数；跨分支弦线两端颜色各自正确；
-  点击弦线跳选且折叠分支自动展开；`test:ui` 按结构断言。
+- 验收：选中无链接节点 → 零新增元素；弦线数 = links 数；跨分支弦线两端颜色正确；
+  点弦线跳选且折叠分支自动展开；`test:ui` 按结构断言。
 
-### 阶段 3 — 白板连接性
+### 阶段 3 — 白板连接性（适配单向镜像）
 
-- `toCanvas()` 三处增强：
-  1. 节点 text 追加 tags 行（`effectiveTags`，形如 `#a #b`）+ notes 摘要行（截 60 字）；
-  2. 链接边：`{id: "x-<fromId>-<toId>", fromNode, toNode, label: "🔗", color: 按源节点进度 preset}` ——
-     id 前缀 `x-` 与树边 `e-` 严格区分，**未来 `parseCanvas()` 见到 `x-` 一律忽略**
-     （写进 CANVAS-WRITEBACK.md 的 Stage C 注意事项）；
-  3. vault 笔记 file 节点：`{id: "f-<goalId>-<hash>", type: "file", file, ...}` + `n-` 前缀边，
-     位置在源节点径向外侧 300px，多个链接横向排开。
-- 生成的东西全部带确定性 id（`x-`/`f-`/`n-`），Stage B 合并导出实施时按 id 复用；
-  发布说明提醒：手工改过白板的用户先别重复导出（`exportCanvas()` 仍是整覆盖）。
-- `toCanvas` 需要 vault 解析结果 → 签名改成 `toCanvas(scape, resolvedLinks)`，
-  解析在调用方（main.ts）做，canvasSync 保持零 obsidian import（分层守卫会抓）。
-- 验收：链接边有 label、file 节点可直接点开笔记；重复导出幂等；data 层单测覆盖新分支。
+- `buildCanvas()` 增强（跟着 `refreshCanvas` 每轮重画）：
+  1. goal 卡片 text 追加 tags 行（`effectiveTags`）+ 摘要行（截 60 字）——纯派生字段，镜像本来就重画 text；
+  2. 链接边：`{id: "x-<fromId>-<toId>", fromNode, toNode, label: "🔗", color: 按源节点进度 preset}`，
+     进 `fresh.edges`（镜像的 pair 去重会自动处理用户手画的重复线）；
+  3. vault 笔记 file 节点：`{id: "f-<goalId>-<hash>", type: "file", file, gsFile: <path>, ...}`
+     + `n-<goalId>-<hash>` 边；位置在源卡片径向外侧 300px。
+- **file 节点不能带 goal 的 `gsId`**（会和 goal 卡片抢认领，触发镜像的"复制卡降级"分支）。
+  用 `gsFile` 机器键标记为树派生：`refreshCanvas` 加一条规则 —— 带 `gsFile` 的旧卡片，
+  id 在本轮 fresh 里就保留其 LAYOUT_KEYS（用户拖过位置就尊重），不在就删（链接没了卡片跟着消失）。
+  这条规则进 `canvasSync.test.ts`。
+- **边的所有权看 id 前缀**（实机补上的一条）：`e-`/`x-`/`n-` 的边只认本轮结果，本轮没再生成就删。
+  只按"两端卡片还在"判孤儿，删掉的链接会在白板上留一条幽灵线 —— 两端都还活着，所以它永远删不掉。
+- `buildCanvas` 需要 vault 解析结果 → 签名改成收第二个参数 `resolved`（wikilink → 真实路径的 Map），
+  解析在调用方（main.ts 的镜像驱动处）做，canvasSync 保持零 obsidian import（分层守卫会抓）。
+- 三条镜像红线不破：文件不存在不自动创建、开着白板不写盘、内容一致不碰文件。
+- 验收：链接边有 label；file 节点点开即笔记；拖动 file 卡片后再镜像位置不回弹；
+  删掉链接后下轮镜像 file 卡片消失；重复镜像幂等；`npm test` + 实机镜像四段全绿。
 
 ### 阶段 4 — 导出一致性
 
-- Markdown 大纲：每节标题下追加 notes 摘要行与 `→ 链接：标题A、标题B` 行（无则不加）。
-- CSV：加 `Notes`（摘要）与 `Links`（链接目标标题，分号分隔）两列，沿用既有 BOM 规矩。
-
-### 阶段 5（可选）— `[[` 自动补全
-
-- textarea 监听 `[[` 输入，弹轻量浮层：vault 文件名（`metadataCache` 取）+ 本图节点标题两组，
-  键盘上下 + Enter 插入，Esc 关闭。复用 `promptModal` 的浮层经验与"点外面关闭"的捕获阶段监听。
-- 不引第三方库。若排期紧可砍，裸 textarea 不影响其余阶段。
+- Markdown 大纲：每节标题下追加摘要行与 `→ 链接：标题A、标题B`（无则不加）。
+- CSV：加 `Notes`（摘要）与 `Links`（分号分隔标题）两列，沿用既有 BOM 规矩。
 
 ## 3. 明确不做
 
-- 每个 goal 拆独立 md 文件（frontmatter + Dataview）：数据模型迁移，与白板回写强耦合，
-  排在 CANVAS-WRITEBACK Stage B/C 之后另立操作书。
+- **每块挂独立笔记文件 / 原生编辑器撰写 / `[[` 补全**：用户已明确不需要编辑器的全部能力，
+  "md 格式 + 可跳转"就是验收线（2026-10-09 拍板）。
+- frontmatter 化目标属性供 Dataview 查询：与白板回写同级别的深水区，回写已删，此项一并搁置。
 - notes 自动保存 / 实时渲染（保持 blur 落盘）。
-- 放射图常态链接角标、全图弦线常显、未解析链接的幽灵节点（违背零噪音原则）。
-- Focus Filter 加"有 notes/有链接"维度（筛选器语义是"哪一家分支"，不混内容维度）。
+- 放射图常态角标、全图弦线常显、未解析链接幽灵节点（零噪音原则）。
+- Focus Filter 加"有 notes/有链接"维度（筛选器语义是"哪一家分支"）。
 - `[[标题]]` 模糊匹配块间链接（歧义不可判定，见决策 2）。
 
 ## 4. 测试与收尾
 
 每阶段收尾走既有流程：`npm run check`（类型 → 打包 → 部署 → 单测 → 9333 实机回归），
-新增纯逻辑进 `src/data/__tests__/notes.test.ts`，UI 断言进 `test/ui-regression.mjs`，零新依赖。
+纯逻辑进 `src/data/__tests__/notes.test.ts`，白板规则进 `canvasSync.test.ts`，
+UI 断言进 `test/ui-regression.mjs`，零新依赖。
 完成后按惯例更新 PROGRESS.md 并各自独立 commit。

@@ -14,8 +14,11 @@ import {
   parseCanvasJson,
   canvasToJson,
   generatedEdgeId,
+  linkEdgeId,
+  fileEdgeId,
+  fileNodeId,
 } from "../canvasSync";
-import type { CanvasNode, JsonCanvas } from "../canvasSync";
+import type { CanvasNode, JsonCanvas, ResolvedNotes } from "../canvasSync";
 
 function makeScape(): GoalScape {
   return {
@@ -193,6 +196,114 @@ describe("镜像：树变了之后白板上不留脏东西", () => {
     }
     assert.ok(Math.hypot(placed.x - algo.x, placed.y - algo.y) <= 800, "让开就该在附近，不该跳去画布另一头");
     assert.ok(merged.nodes.some((n) => n.id === "blocker"), "挡住它的便签不能被删");
+  });
+});
+
+describe("镜像：notes 派生出的链接边与笔记卡片", () => {
+  /** 用户自己从目录栏拖进白板的文件卡：没有 gsFile，不属于树，动不得 */
+  const userFile = (id: string, extra: Partial<CanvasNode> = {}): CanvasNode => ({
+    id,
+    type: "file",
+    file: "x.md",
+    x: 0,
+    y: 0,
+    width: 260,
+    height: 120,
+    ...extra,
+  });
+
+  it("卡片正文追加 tags 行与 notes 摘要，高度跟着行数走", () => {
+    const scape = makeScape();
+    const n = findGoal(scape.mainGoal, "h1")!;
+    n.tags = ["Now"];
+    n.notes = "今天跑 5 公里，见 [[跑步]]\n```\n#fence 里的不算\n```";
+    const c = byId(toCanvas(scape), "h1");
+    assert.match(c.text ?? "", /#Now/);
+    assert.match(c.text ?? "", /今天跑 5 公里，见 跑步/, "摘要把 wikilink 收成显示文本");
+    assert.ok(!/fence/.test(c.text ?? ""), "代码块里的 #tag 不该被当真标签");
+    assert.equal(c.height, 100 + 24 * 2);
+  });
+
+  it("links 生成带 label 的链接边；树里没这个 id 就不生成", () => {
+    const scape = makeScape();
+    findGoal(scape.mainGoal, "h1")!.links = ["c1", "ghost"];
+    const edges = toCanvas(scape).edges;
+    const e = edges.find((x) => x.id === linkEdgeId("h1", "c1"));
+    assert.deepEqual([e?.fromNode, e?.toNode, e?.label], ["h1", "c1", "🔗"]);
+    assert.ok(!edges.some((x) => x.id === linkEdgeId("h1", "ghost")));
+  });
+
+  it("解析到的笔记生成 file 卡片与连线，且不带 gsId", () => {
+    const resolved: ResolvedNotes = new Map([["h1", ["笔记/跑步.md"]]]);
+    const c = toCanvas(makeScape(), resolved);
+    const f = byId(c, fileNodeId("h1", "笔记/跑步.md"));
+    assert.deepEqual([f.type, f.file, f.gsFile], ["file", "笔记/跑步.md", "笔记/跑步.md"]);
+    assert.equal(f.gsId, undefined, "文件卡不是任何目标的镜子，挂 gsId 会跟目标卡片抢认领");
+    assert.ok(c.edges.some((e) => e.id === fileEdgeId("h1", "笔记/跑步.md")));
+    assert.equal(c.nodes.filter((n) => n.gsId === "h1").length, 1);
+  });
+
+  it("拖动过的文件卡位置留住；链接没了，卡片和线一起消失", () => {
+    const scape = makeScape();
+    const resolved: ResolvedNotes = new Map([["h1", ["a.md"]]]);
+    const fid = fileNodeId("h1", "a.md");
+    const first = refreshCanvas(scape, null, resolved);
+    const moved = { ...byId(first, fid), x: 4242, y: -646 };
+    const second = refreshCanvas(
+      scape,
+      { ...first, nodes: first.nodes.map((n) => (n.id === fid ? moved : n)) },
+      resolved
+    );
+    assert.deepEqual([byId(second, fid).x, byId(second, fid).y], [4242, -646], "用户拖过就尊重");
+
+    const third = refreshCanvas(scape, second, new Map());
+    assert.ok(!third.nodes.some((n) => n.id === fid), "链接没了卡片不能留着当僵尸");
+    assert.ok(!third.edges.some((e) => e.toNode === fid || e.fromNode === fid));
+  });
+
+  it("用户自己拖进来的文件卡不算派生卡", () => {
+    const merged = refreshCanvas(makeScape(), { nodes: [userFile("u-1")], edges: [] });
+    assert.ok(merged.nodes.some((n) => n.id === "u-1"), "本轮没生成它，也不能把它当成鬼卡删掉");
+  });
+
+  it("链接边认前缀不认两端：本轮没生成就删，用户手画的同样两个端点要留", () => {
+    const existing: JsonCanvas = {
+      nodes: toCanvas(makeScape()).nodes,
+      edges: [
+        { id: linkEdgeId("h1", "c1"), fromNode: "h1", toNode: "c1", label: "🔗" },
+        { id: "u-2", fromNode: "h1", toNode: "c1" },
+      ],
+    };
+    const merged = refreshCanvas(makeScape(), existing);
+    assert.ok(!merged.edges.some((e) => e.id === linkEdgeId("h1", "c1")), "残线会一直挂着，两端卡片都还在");
+    assert.ok(merged.edges.some((e) => e.id === "u-2"), "随机 id 是用户画的，动不得");
+  });
+
+  it("源卡片被拖远之后新出现的文件卡落在源卡片旁边", () => {
+    const scape = makeScape();
+    const resolved: ResolvedNotes = new Map([["h1", ["b.md"]]]);
+    const existing: JsonCanvas = {
+      nodes: toCanvas(scape).nodes.map((n) => ({ ...n, x: n.x + 5000, y: n.y + 3000 })),
+      edges: [],
+    };
+    const merged = refreshCanvas(scape, existing, resolved);
+    const f = byId(merged, fileNodeId("h1", "b.md"));
+    const h = byId(merged, "h1");
+    assert.ok(
+      Math.abs(f.x - h.x) < 600 && Math.abs(f.y - h.y) < 600,
+      "不该留在算法位置、跟源卡片隔空牵一条线"
+    );
+  });
+
+  it("带派生卡片的镜像同样幂等", () => {
+    const scape = makeScape();
+    const resolved: ResolvedNotes = new Map([
+      ["h1", ["a.md", "b.md"]],
+      ["career", ["c.md"]],
+    ]);
+    const once = refreshCanvas(scape, toCanvas(scape, resolved), resolved);
+    const twice = refreshCanvas(scape, once, resolved);
+    assert.equal(canvasToJson(twice), canvasToJson(once));
   });
 });
 

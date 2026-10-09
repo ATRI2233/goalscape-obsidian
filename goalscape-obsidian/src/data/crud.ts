@@ -3,6 +3,7 @@
 // 由 store 统一负责进度汇总、落盘与视图通知。
 
 import { GoalScape, GoalNode, createGoalNode, findNode } from "./types";
+import { pruneLinks } from "./notes";
 
 export type AddPosition = "child" | "sibling";
 
@@ -32,6 +33,8 @@ export function deleteGoal(scape: GoalScape, id: string): boolean {
   if (!found?.parent) return false;
   const idx = found.parent.children.findIndex((c) => c.id === id);
   if (idx >= 0) found.parent.children.splice(idx, 1);
+  // 被删子树可能别人正链接着它：立刻全树清扫，别让死 id 活到下一次读档
+  pruneLinks(scape.mainGoal);
   return true;
 }
 

@@ -6,12 +6,13 @@
 
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { GoalNode, flattenTree } from "../data/types";
+import { GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
+import { backlinks, firstLine, parseWikiTargets } from "../data/notes";
 import { SECTOR_RAMP, branchFills, shadeOf } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
-  SVG_NS, CX, CY,
+  SVG_NS, CX, CY, VIEW_SIZE,
   arcPath, bandScaleOf, bevelArc, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
   FULL_VIEW, Viewport, panView, toLogicalPoint, viewBoxOf, zoomView,
   SectorShape,
@@ -86,7 +87,7 @@ export class RadialGoalMapView extends ItemView {
       if (e.target instanceof SVGSVGElement) this.setView(FULL_VIEW);
     });
     const panelEl = mainRow.createDiv({ cls: "goalscape-panel" });
-    this.infoPanel = new InfoPanel(panelEl, this.plugin);
+    this.infoPanel = new InfoPanel(panelEl, this.plugin, (id) => this.selectRevealing(id));
     this.infoPanel.show(this.selectedId);
 
     this.weightDrag = new WeightDragController(this.plugin.store, this.dragSurface());
@@ -101,6 +102,7 @@ export class RadialGoalMapView extends ItemView {
 
   async onClose(): Promise<void> {
     this.unsubscribe?.();
+    this.infoPanel.destroy();
     this.contentEl.empty();
   }
 
@@ -252,7 +254,10 @@ export class RadialGoalMapView extends ItemView {
       // 原生 <title> 挂在扇区上：标签被截断、或者弧长太干脆没画字的格子，悬停也认得出是谁
       // （.goalscape-label 是 pointer-events:none，挂在文字上永远不会触发）
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = `${node.title} · ${node.progress ?? 0}%`;
+      const summary = firstLine(node.notes ?? "");
+      tip.textContent = summary
+        ? `${node.title} · ${node.progress ?? 0}%\n${summary}`
+        : `${node.title} · ${node.progress ?? 0}%`;
       path.appendChild(tip);
       map.appendChild(path);
 
@@ -318,6 +323,9 @@ export class RadialGoalMapView extends ItemView {
     };
 
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
+
+    // 链接装饰层：只有选中才存在，画在 map 之外（不跟扇区吃同一份投影）
+    this.drawLinkDecorations(svg, defs, scape, fills);
 
     svg.addEventListener("click", () => {
       // 平移结束时浏览器还会补一次 click，它不该把选中态清掉；下一次真点击前把标记归零
@@ -400,6 +408,25 @@ export class RadialGoalMapView extends ItemView {
     this.infoPanel.show(id);
   }
 
+  /**
+   * 跳选：先沿祖先链把 collapsed 展开（否则目标可能被藏在折叠分支里，渲染层根本不画它，
+   * 选中态点了却没地方看），再走 select。折叠只是视图状态，展开它要落盘所以走 mutate。
+   * 已是 selectRevealing 的目标若已选中，仍然重跑一次以补齐展开。
+   */
+  private selectRevealing(id: string): void {
+    const scape = this.plugin.store.scape;
+    if (!scape || !findNode(scape.mainGoal, id)) return;
+    const collapsed: GoalNode[] = [];
+    let parent = findNode(scape.mainGoal, id)?.parent ?? null;
+    while (parent) {
+      if (parent.collapsed) collapsed.push(parent);
+      parent = findNode(scape.mainGoal, parent.id)?.parent ?? null;
+    }
+    // mutate 拿到的就是这棵树本身，攥着的节点引用直接可改；没人折叠就整个跳过落盘
+    if (collapsed.length) this.plugin.store.mutate(() => collapsed.forEach((n) => delete n.collapsed));
+    this.select(id);
+  }
+
   private showContextMenu(event: MouseEvent, node: GoalNode): void {
     const scape = this.plugin.store.scape;
     if (!scape) return;
@@ -414,6 +441,146 @@ export class RadialGoalMapView extends ItemView {
       },
     });
     menu.showAtMouseEvent(event);
+  }
+
+  // ──────────────────────────── 链接装饰层（仅选中时） ────────────────────────────
+
+  /** 扇区弧中点（环带半径中值）：弦线端点的锚 */
+  private sectorMid(shape: SectorShape): { x: number; y: number } {
+    const mid = (shape.startAngle + shape.endAngle) / 2;
+    const r = (shape.rInner + shape.rOuter) / 2;
+    return { x: CX + Math.cos(mid) * r, y: CY + Math.sin(mid) * r };
+  }
+
+  /** 把对端扇区"点亮"（弦线 hover 的联动高亮） */
+  private litSector(id: string, on: boolean): void {
+    const el = this.liveSvg()?.querySelector(`path[data-id="${id}"]`);
+    if (!el) return;
+    if (on) el.addClass("goalscape-lit");
+    else el.removeClass("goalscape-lit");
+  }
+
+  /**
+   * 零噪音规矩：不选中时图面和本功能出现之前完全一样。
+   * 出链与反链都画 —— links 数据结构里对端选中时画不到自己，backlinks 补上"谁引用我"，
+   * 和信息面板的 Referenced by 同语义。目标在折叠分支里没被画出来就跳过，
+   * 为一个看不见的端点改动别处的折叠状态不值得。
+   * 弦线：三次 bezier、两控制点钉在图心（弧线向圆心下垂），描边渐变取两端各自的底色。
+   */
+  private drawLinkDecorations(
+    svg: SVGSVGElement,
+    defs: SVGDefsElement,
+    scape: GoalScape,
+    fills: Map<string, string>
+  ): void {
+    if (!this.selectedId) return;
+    const found = findNode(scape.mainGoal, this.selectedId);
+    const mine = found ? this.nodePositions.get(found.node.id) : undefined;
+    if (!found || !mine) return;
+
+    const p1 = this.sectorMid(mine);
+    const partners = Array.from(
+      new Set([
+        ...(found.node.links ?? []),
+        ...backlinks(scape.mainGoal, found.node.id).map((n) => n.id),
+      ])
+    ).filter((id) => id !== found.node.id);
+
+    const layer = document.createElementNS(SVG_NS, "g");
+    layer.addClass("goalscape-chord-layer");
+    svg.appendChild(layer);
+
+    for (const otherId of partners) {
+      const shape = this.nodePositions.get(otherId);
+      if (!shape) continue;
+      const p2 = this.sectorMid(shape);
+      const c1 = fills.get(found.node.id) ?? "#94a3b8";
+      const c2 = fills.get(otherId) ?? "#94a3b8";
+
+      const gid = `${this.uid}-c${++this.gradSeq}`;
+      const grad = document.createElementNS(SVG_NS, "linearGradient");
+      grad.id = gid;
+      grad.setAttribute("gradientUnits", "userSpaceOnUse");
+      grad.setAttribute("x1", String(p1.x));
+      grad.setAttribute("y1", String(p1.y));
+      grad.setAttribute("x2", String(p2.x));
+      grad.setAttribute("y2", String(p2.y));
+      for (const [offset, color] of [["0", c1], ["1", c2]] as const) {
+        const stop = document.createElementNS(SVG_NS, "stop");
+        stop.setAttribute("offset", offset);
+        stop.setAttribute("stop-color", color);
+        grad.appendChild(stop);
+      }
+      defs.appendChild(grad);
+
+      const chord = document.createElementNS(SVG_NS, "path");
+      chord.setAttribute("d", `M ${p1.x} ${p1.y} C ${CX} ${CY} ${CX} ${CY} ${p2.x} ${p2.y}`);
+      chord.setAttribute("stroke", `url(#${gid})`);
+      chord.setAttribute("data-chord", otherId);
+      chord.addClass("goalscape-chord");
+      chord.addEventListener("pointerenter", () => {
+        chord.addClass("goalscape-chord-hot");
+        this.litSector(otherId, true);
+      });
+      chord.addEventListener("pointerleave", () => {
+        chord.removeClass("goalscape-chord-hot");
+        this.litSector(otherId, false);
+      });
+      chord.addEventListener("click", (e) => {
+        e.stopPropagation();
+        this.selectRevealing(otherId);
+      });
+      layer.appendChild(chord);
+
+      for (const [p, color] of [[p1, c1], [p2, c2]] as const) {
+        const dot = document.createElementNS(SVG_NS, "circle");
+        dot.setAttribute("cx", String(p.x));
+        dot.setAttribute("cy", String(p.y));
+        dot.setAttribute("r", "4");
+        dot.setAttribute("fill", color);
+        dot.addClass("goalscape-chord-dot");
+        layer.appendChild(dot);
+      }
+    }
+
+    // vault 文件卡片：notes 里解析得到真实文件的才画（未解析的不制造幽灵）
+    const hits: { link: string; name: string }[] = [];
+    for (const t of parseWikiTargets(found.node.notes ?? "")) {
+      const f = this.app.metadataCache.getFirstLinkpathDest(t, this.plugin.store.path);
+      if (f) hits.push({ link: t, name: f.basename });
+    }
+    if (!hits.length) return;
+    const mid = (mine.startAngle + mine.endAngle) / 2;
+    // 顶格那一环的卡片可能被 viewBox 裁掉，半径钳在画布内、宁可贴着环缝
+    const rCard = Math.min(mine.rOuter + 26, VIEW_SIZE / 2 - 16);
+    const step = Math.min(0.4, 40 / rCard);
+    hits.forEach((item, i) => {
+      const ang = mid + (i - (hits.length - 1) / 2) * step;
+      const x = CX + Math.cos(ang) * rCard;
+      const y = CY + Math.sin(ang) * rCard;
+      const g = document.createElementNS(SVG_NS, "g");
+      g.setAttribute("transform", `translate(${x - 5} ${y - 7})`);
+      g.addClass("goalscape-vfile");
+      const icon = document.createElementNS(SVG_NS, "path");
+      icon.setAttribute("d", "M0 0 H7 L10 3 V14 H0 Z M7 0 V3 H10");
+      icon.addClass("goalscape-vfile-icon");
+      g.appendChild(icon);
+      const name = document.createElementNS(SVG_NS, "text");
+      name.setAttribute("x", "5");
+      name.setAttribute("y", "24");
+      name.setAttribute("text-anchor", "middle");
+      name.addClass("goalscape-vfile-name");
+      name.textContent = item.name.length > 12 ? `${item.name.slice(0, 11)}…` : item.name;
+      g.appendChild(name);
+      const tip = document.createElementNS(SVG_NS, "title");
+      tip.textContent = item.link;
+      g.appendChild(tip);
+      g.addEventListener("click", (e) => {
+        e.stopPropagation();
+        void this.app.workspace.openLinkText(item.link, this.plugin.store.path, true);
+      });
+      svg.appendChild(g);
+    });
   }
 
   // ──────────────────────────── 视野（滚轮缩放 / 平移） ────────────────────────────

@@ -1266,6 +1266,131 @@ step("viewport 滚轮以光标为锚缩放 + 空白处平移 + 双击还原", as
   ok("双击空白处回到整张图", reset === "0.00 0.00 1000.00 1000.00", reset);
 });
 
+// ───────────── notes 融入：面板渲染态 / 块间弦线 / 白板派生卡片 ─────────────
+
+/** 选中只能"真点一次扇区"：视图没留公开入口，走命中测试反而是更接近用户的验法。
+ *  取 0.3 而非 0.5 的弧中点 —— 选中态的弦线和端点圆点正好落在弧中点上，会拦住这一击 */
+const selectSector = (id) => json(`(async()=>{
+  const v=${PL}.radialViews()[0];
+  const sh=v.nodePositions.get(${JSON.stringify(id)});
+  if(!sh) return {ok:0};
+  const a=sh.startAngle+(sh.endAngle-sh.startAngle)*0.3, r=(sh.rInner+sh.rOuter)/2;
+  const svg=document.querySelector('svg.goalscape-radial-svg');
+  const p=new DOMPoint(500+Math.cos(a)*r,500+Math.sin(a)*r).matrixTransform(svg.getScreenCTM());
+  const el=document.elementFromPoint(p.x,p.y);
+  el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:31,isPrimary:true,clientX:p.x,clientY:p.y}));
+  el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:31,isPrimary:true,clientX:p.x,clientY:p.y}));
+  await __gsSettle(400);
+  return {ok:1,hit:el?.getAttribute?.('data-id')||String(el?.tagName)};})()`);
+
+/** 点图外的空角：清除选中（零噪音那条判据的起点） */
+const clearSelection = () => json(`(async()=>{
+  const svg=document.querySelector('svg.goalscape-radial-svg');
+  const b=svg.getBoundingClientRect();
+  const x=b.left+4, y=b.top+4;
+  const el=document.elementFromPoint(x,y);
+  el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:32,isPrimary:true,clientX:x,clientY:y}));
+  el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:32,isPrimary:true,clientX:x,clientY:y}));
+  el.dispatchEvent(new MouseEvent('click',{bubbles:true,clientX:x,clientY:y}));
+  await __gsSettle(400);
+  return document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-selected').length;})()`);
+
+const chordState = () => json(`(()=>({
+  chords:[...document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-chord')].map(c=>c.getAttribute('data-chord')),
+  dots:document.querySelectorAll('svg.goalscape-radial-svg circle.goalscape-chord-dot').length,
+  files:[...document.querySelectorAll('svg.goalscape-radial-svg g.goalscape-vfile')].map(g=>g.querySelector('title')?.textContent||''),
+  rendered:!!document.querySelector('.goalscape-notes-render'),
+  links:[...document.querySelectorAll('.goalscape-panel .goalscape-chip-main')].map(b=>b.textContent),
+  heads:[...document.querySelectorAll('.goalscape-panel h4')].map(h=>h.textContent),
+  unresolved:document.querySelectorAll('.goalscape-notes-render a.is-unresolved').length,
+  internal:document.querySelectorAll('.goalscape-notes-render a.internal-link').length,
+}))()`);
+
+step("notes 面板渲染、块间弦线与白板派生卡片", async () => {
+  await useTmpMap();
+  // 链接目标现取 vault 里的一篇真笔记：写死名字的话，"解析得到"这件事就从来没被验过
+  const note = await json(`(()=>{const f=app.vault.getMarkdownFiles()
+    .find(f=>!f.path.startsWith(${JSON.stringify(`${SCAPE_DIR_NAME}/`)}));
+    return f?{name:f.basename,path:f.path}:null;})()`);
+  if (!note) { skipped("vault 里没有可链接的笔记，notes 步骤跳过"); return; }
+
+  const TREE = {
+    id: "g-nroot", title: "Notes Root", importance: 100, tags: [], children: [
+      { id: "g-na", title: "Alpha", importance: 60, tags: ["Now"], children: [],
+        notes: `本周跑 5 公里，见 [[${note.name}]]\n第二段不进摘要`, links: ["g-nb"] },
+      { id: "g-nb", title: "Bravo", importance: 40, tags: [], children: [] },
+    ],
+  };
+  await setTmpTree(TREE);
+  await resetCanvas();
+
+  const sel = await selectSector("g-na");
+  ok("点扇区选中 Alpha", sel.hit === "g-na", JSON.stringify(sel));
+  const st = await chordState();
+  ok("notes 走原生 MarkdownRenderer：解析得到的 wikilink 成可点内部链接",
+    st.rendered && st.internal >= 1 && st.unresolved === 0, JSON.stringify(st));
+  ok("选中时的弦线数 = links + 反链去重后的对端数",
+    st.chords.join(",") === "g-nb" && st.dots === 2, JSON.stringify(st));
+  ok("解析得到的 vault 笔记在扇区外缘长出小文件卡片",
+    st.files.join(",") === note.name, JSON.stringify(st));
+  ok("Linked goals chip 用标题而不是 id",
+    st.heads.includes("Linked goals") && st.links.includes("Bravo"), JSON.stringify(st));
+
+  const back = await selectSector("g-nb");
+  const bs = await chordState();
+  ok("反链现扫得到引用方（A→B 之后选中 B 看得见 A）",
+    back.hit === "g-nb" && bs.heads.includes("Referenced by") && bs.links.includes("Alpha")
+      && bs.chords.join(",") === "g-na", JSON.stringify({ back, ...bs }));
+
+  await selectSector("g-na");
+  const edit = await json(`(()=>{document.querySelector('.goalscape-notes-toggle')
+    .dispatchEvent(new MouseEvent('click',{bubbles:true}));
+    return document.querySelector('.goalscape-panel-notes')?.value||null;})()`);
+  ok("Edit 切回 textarea，原文一字不改", (edit || "").includes(`[[${note.name}]]`), String(edit).slice(0, 40));
+
+  // 常态零噪音：没选中任何块时，弦线与文件卡片一概不存在
+  const selected = await clearSelection();
+  const noise = await chordState();
+  ok("取消选中后图面上零新增元素",
+    selected === 0 && !noise.chords.length && !noise.dots && !noise.files.length,
+    JSON.stringify({ selected, ...noise }));
+
+  await gsCommand("export-canvas");
+  const doc1 = await waitCanvasDoc(
+    (d) => d.nodes.some((n) => n.type === "file") && d.edges.some((e) => e.id === "x-g-na-g-nb"),
+    "白板长出笔记卡与链接边"
+  );
+  const fcard = doc1.nodes.find((n) => n.type === "file");
+  ok("白板：链接边是 x-<from>-<to> 且带 label，笔记卡带 gsFile 而不是 gsId",
+    fcard?.gsFile === note.path && fcard?.gsId === undefined
+      && doc1.edges.some((e) => e.id === "x-g-na-g-nb" && e.label === "🔗"),
+    JSON.stringify({ fcard, edge: doc1.edges.find((e) => e.id === "x-g-na-g-nb") }).slice(0, 240));
+  const cardA = doc1.nodes.find((n) => n.gsId === "g-na");
+  ok("卡片正文长出 tags 行与 notes 摘要",
+    /#Now/.test(cardA?.text || "") && /本周跑 5 公里/.test(cardA?.text || ""),
+    JSON.stringify(cardA?.text));
+
+  // 文件卡要 Obsidian 自己的解析器认得才算真长在了白板上（文件写对不代表它接得住 type:file）
+  await waitFor(`app.workspace.getLeavesOfType('canvas').some(l=>l.view.file?.path===${JSON.stringify(TMP_CANVAS)})`, "白板标签页打开（导出命令会点开它）");
+  const live = await waitLiveCanvasDoc((d) => d.nodes.some((n) => n.type === "file"), "内存文档里的笔记卡");
+  ok("Obsidian 内存文档接得住 type:file 与 gsFile 未知键",
+    live.nodes.some((n) => n.type === "file" && n.gsFile === note.path),
+    JSON.stringify(live.nodes.map((n) => `${n.id}:${n.type}`)).slice(0, 200));
+  await closeCanvasTabs();
+
+  const cut = structuredClone(TREE);
+  delete cut.children[0].notes;
+  delete cut.children[0].links;
+  await setTmpTree(cut);
+  const doc2 = await waitCanvasDoc(
+    (d) => !d.nodes.some((n) => n.type === "file") && !d.edges.some((e) => e.id === "x-g-na-g-nb"),
+    "链接与 notes 摘掉后派生卡消失"
+  );
+  ok("链接没了：下一轮镜像把笔记卡和链接边一起收走（不留僵尸）",
+    !doc2.nodes.some((n) => n.type === "file") && !doc2.edges.some((e) => e.id.startsWith("x-")),
+    JSON.stringify({ nodes: doc2.nodes.map((n) => n.type), edges: doc2.edges.map((e) => e.id) }));
+});
+
 step("themes 暗/亮两主题截图", async () => {
   await json(`(async()=>{
     const pl=${PL};

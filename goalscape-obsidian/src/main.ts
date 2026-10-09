@@ -3,6 +3,8 @@
 
 import { App, Plugin, TFile, TFolder, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
 import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH, GOALSCAPE_FOLDER, GOALSCAPE_SUFFIX } from "./data/goalTree";
+import { flattenTree } from "./data/types";
+import { parseWikiTargets } from "./data/notes";
 import { RadialGoalMapView } from "./views/radialView";
 import { GoalListView } from "./views/listView";
 import { GanttView } from "./views/ganttView";
@@ -18,6 +20,7 @@ import {
   parseCanvasJson,
   trustedSnapshot,
   type JsonCanvas,
+  type ResolvedNotes,
 } from "./export/canvasSync";
 import { exportSvg, exportPng, exportCsv, exportMarkdownOutline, downloadBlob, downloadText } from "./export/exporters";
 
@@ -310,6 +313,25 @@ export default class GoalscapePlugin extends Plugin {
   }
 
   /**
+   * notes 里的 `[[wikilink]]` → vault 真实路径，按目标 id 归组。
+   * 只有解析成功的才进白板：点不动的幽灵卡片比没有卡片更糟。
+   * 解析要 metadataCache，而 canvasSync 归 export 层、不许 import obsidian（分层守卫），所以停在这里。
+   */
+  private resolveNoteLinks(): ResolvedNotes {
+    const out = new Map<string, string[]>();
+    if (!this.store.scape) return out;
+    for (const n of flattenTree(this.store.scape.mainGoal)) {
+      const paths: string[] = [];
+      for (const t of parseWikiTargets(n.notes ?? "")) {
+        const dest = this.app.metadataCache.getFirstLinkpathDest(t, this.store.path);
+        if (dest && !paths.includes(dest.path)) paths.push(dest.path);
+      }
+      if (paths.length) out.set(n.id, paths);
+    }
+    return out;
+  }
+
+  /**
    * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
    * 自动路径只在"文件已存在 && 没人开着这块白板"时写。
    */
@@ -327,7 +349,9 @@ export default class GoalscapePlugin extends Plugin {
       return;
     }
 
-    const json = canvasToJson(refreshCanvas(scape, await this.canvasSnapshot(path)));
+    const json = canvasToJson(
+      refreshCanvas(scape, await this.canvasSnapshot(path), this.resolveNoteLinks())
+    );
     if (file instanceof TFile) {
       const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
       if (disk === json.trim()) {

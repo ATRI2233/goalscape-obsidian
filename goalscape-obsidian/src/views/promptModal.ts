@@ -24,6 +24,24 @@ export function confirmAction(app: App, message: string, okText = "Delete"): Pro
   });
 }
 
+/** 从一组候选里挑一个（links picker 用）；ESC/点空白关闭返回 null。 */
+export function promptPick(
+  app: App,
+  title: string,
+  options: { id: string; label: string }[]
+): Promise<string | null> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (id: string | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(id);
+    };
+    const modal = new PickModal(app, title, options, settle);
+    modal.open();
+  });
+}
+
 class ConfirmModal extends Modal {
   constructor(
     app: App,
@@ -58,6 +76,36 @@ class ConfirmModal extends Modal {
   onClose(): void {
     this.onCancel();
     this.contentEl.empty();
+  }
+}
+
+class PickModal extends Modal {
+  constructor(
+    app: App,
+    private titleText: string,
+    private options: { id: string; label: string }[],
+    private onPick: (id: string | null) => void
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.createEl("h3", { text: this.titleText });
+    const list = contentEl.createDiv({ cls: "goalscape-pick-list" });
+    for (const opt of this.options) {
+      const btn = list.createEl("button", { cls: "goalscape-pick-btn", text: opt.label });
+      btn.addEventListener("click", () => {
+        this.onPick(opt.id);
+        this.close();
+      });
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    this.onPick(null);
   }
 }
 

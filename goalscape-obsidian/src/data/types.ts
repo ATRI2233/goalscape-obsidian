@@ -18,6 +18,12 @@ export interface GoalNode {
   start?: string; // Gantt 用
   tags: string[]; // 含 "Now"/"Next" 等
   notes?: string; // Markdown
+  /**
+   * 块间链接：**显式存目标节点 id**，不用 `[[标题]]` 模糊匹配 ——
+   * goal 不是 vault 文件，标题撞名时歧义不可判定。
+   * 有意的单向设计：A→B 不代表 B→A，反向由 backlinks() 现扫，不存两份。
+   */
+  links?: string[];
   fields?: Record<string, string>; // 自定义字段
   collapsed?: boolean;
   children: GoalNode[];
@@ -42,6 +48,7 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     start: partial.start,
     tags: partial.tags ?? [],
     notes: partial.notes,
+    links: partial.links,
     fields: partial.fields,
     collapsed: partial.collapsed,
     children: partial.children ?? [],

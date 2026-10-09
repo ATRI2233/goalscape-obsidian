@@ -163,6 +163,24 @@ describe("deleteGoal", () => {
   it("不存在的 id 返回 false", () => {
     assert.equal(deleteGoal(scape, "ghost"), false);
   });
+
+  it("删除会清扫别的节点里指向被删子树的死链", () => {
+    // rel 链接到 h1 及其后代 h1a，删掉 h1 这一支后这些引用必须消失
+    node(scape, "rel").links = ["h1", "h1a", "career"];
+    assert.equal(deleteGoal(scape, "h1"), true);
+    assert.deepEqual(node(scape, "rel").links, ["career"], "死链 h1/h1a 被清掉，活链保留");
+  });
+});
+
+describe("links 不进剪贴板快照", () => {
+  it("复制/粘贴的子树不带走原节点的 links（克隆会生成全新 id，旧链会指向已被删掉的原节点）", () => {
+    node(scape, "health").links = ["career"];
+    const clip = extractSubtree(scape, "health")!;
+    assert.ok(clip, "health 应能取出");
+    assert.ok(!clip.links, "快照根不应带 links");
+    const pastedId = pasteSubtree(scape, "rel", "child", clip);
+    assert.ok(!node(scape, pastedId).links, "粘贴出的新节点也不应带 links");
+  });
 });
 
 describe("renameGoal", () => {

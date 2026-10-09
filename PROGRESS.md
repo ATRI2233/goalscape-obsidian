@@ -223,6 +223,35 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
   实机重写为四段 26 项：`canvas 段：开着只切过去、关掉标签页才补写` / `mirror 自动镜像` /
   `mirror 只往一个方向走` / `settings 自动更新白板开关`。橙点亮着的样子看过截图（暗色主题，工具栏没被撑宽）。
 
+### Notes 融入 Obsidian：面板渲染 / 块间链接 / 放射图与白板可视化（2026-10-09，四阶段全做完）
+- 数据层新增 `GoalNode.links?: string[]`，**存目标 id 而不是 `[[标题]]`**：goal 不是 vault 文件，撞名时歧义不可判定。
+  有意单向存，反链一律 `backlinks()` 现扫；读档与落盘各跑一次 `pruneLinks`（去重、剔自链、剔死 id、空数组删键）。
+- `src/data/notes.ts`（零 obsidian，进 `npm test`）：`parseWikiTargets`/`parseTags`/`firstLine`/`backlinks`/`effectiveTags`/`pruneLinks`。
+  代码围栏里的 `[[x]]`、`#tag` 不算，`![[嵌入]]` 不当链接目标；notes 里的 `#tag` **只读合流、不落盘**
+  （否则删正文一行字，tags 字段被悄悄写坏，而数据层没有 undo）。
+- 面板 Notes 双态：默认 `MarkdownRenderer.render(app, notes, el, scapePath, host)`，`[[链接]]` 可点、原生 page preview 白拿；
+  "Edit" 切回 textarea、blur 落盘（落盘时机不变）。**每渲染一次新建一个 `Component`、下次 render 前 unload** ——
+  把 view 当宿主传进去会让 render-children 只增不减。
+- 放射图零噪音（用户拍板）：弦线与文件卡片只在选中时画，解析不到的链接不画。弦线 = 三次 bezier、两控制点钉在图心、
+  两端各取 `branchFills` 底色做渐变描边；hover 提亮并高亮对端扇区，点击 = 跳选（`selectRevealing` 先展开折叠祖先）。
+- 白板跟着单向镜像重画：卡片 `text` 追加 tags 行与摘要（高度按行数长）、`x-<from>-<to>` 链接边（label 🔗、色按源进度）、
+  `f-<goal>-<hash>` 文件节点 + `n-` 边。文件卡带 `gsFile` 而**不带 `gsId`** —— 挂了 `gsId` 就和目标卡片抢认领，
+  触发"复制卡降级"分支，两张互相把对方挤成便签。
+- 为此加的两条镜像规则：① 带 `gsFile` 的旧卡本轮没再生成就删（链接没了不许留僵尸卡），拖过的位置照旧留住；
+  ② **id 前缀就是所有权** —— `e-`/`x-`/`n-` 的边只认本轮结果。只按"两端还在"判，删掉的链接会在白板上
+  留一条两端卡片都还活着的幽灵线（实机就是这么暴露的）。
+- `resolved`（wikilink → 真实路径）由 `main.ts` 用 `metadataCache.getFirstLinkpathDest` 算好再传进 canvasSync：
+  export 层不许 import obsidian（分层守卫抓得到）。
+- 实测：`npm test` 161/161（notes 19 条、canvasSync 新增 8 条、`exporters.test.ts` 新文件 7 条，全部按"故意改坏一行"验过在跑）；
+  实机 `notes` 步骤 14 项全绿 / 3.5s。链接目标是运行时从 vault 取的 —— 写死笔记名的话"解析得到"这件事从来没被验过。
+- 踩到的坑：
+  - 测试靠"真点一次扇区"选中，而弦线与端点圆点正好落在**弧中点**上，把这一击拦了下来 → 取 0.3 弧位才打得中。
+  - 只跑筛出来的步骤 = 跑的是**旧 bundle**：部署在 `npm run check` 里，插件重载在 `reload` 那一步里，
+    `node test/ui-regression.mjs notes` 两个都跳过了，于是整轮都在验几分钟前的代码。要么带上新建图的 `reload`，要么走 `npm run check`。
+  - "有标签页开着就不写"这条红线在诊断里表现成"永远等不到更新"：`export-canvas` 之后马上 `detach` 会赶上 `view.file`
+    还没赋值，一个标签页都没摘掉（实测 `openTabs:2`）→ 先等它挂上文件再摘。
+- 未跑：全量实机回归（用户当时只批了 notes 那几步）、真实系统保存框。
+
 ## 剩余未实测
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
@@ -239,6 +268,8 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
 - 白板镜像里"用户改过布局/加了便签"是**脚本直接写 `.canvas` 模拟的**，没请真人在 Obsidian 里拖一遍再看：
   真手拖还会带出组节点、复制卡片、`fromSide` 等东西，Stage A 只验过单键保留。
 - Canvas 段那个橙点只在暗色主题看过截图，亮色没单独看（颜色用 `--color-orange` + `--background-secondary` 描边，理论上自适应）。
+- notes 那四阶段之后**只跑了新增的 `notes` 实机步骤**（14 项全绿），全量回归没跑：白板卡片多了 tags/摘要两行、
+  高度按行数长、`text` 变长，这些对既有 `mirror`/`canvas 段` 步骤的影响只在单测层面验过。
 - 分层守卫那次改动（`findInScape` → `findNode` 的 4 个写入点：list 折叠/勾选/进度滑杆、gantt 叶子进度拖拽）
   只过了 `tsc` + 单测，**没跑实机回归**——`npm run check` 会把 `main.js` 部署进 vault 并要求真实 Obsidian 在最前台。
 
@@ -248,6 +279,7 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
 2. Focus Filter 加"高亮匹配项列表"侧栏、Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
 3. 白板方向已收口成单向镜像（自动更新 + 待更新小点 + 设置开关），**回写不再做**：白板改父子/顺序既危险又不可撤销，
    理由记在 `CANVAS-WRITEBACK.md` 第 3 节。要动结构就在放射图/列表里动。
-4. Notes 融入 Obsidian：面板 Markdown 渲染 + `links` 块间链接 + 反链 → 放射图选中弦线/文件卡片 → 白板链接边与 file 节点 → 导出一致性，
-   另有可选的 `[[` 补全。合计 2.75d（全收 3.25d），操作书见 `NOTES-INTEGRATION.md`（白板生成物带 `x-`/`f-`/`n-` 确定性 id，与单向镜像的合并规则互通）。
+4. Notes 融入 Obsidian（轻量版，用户拍板"md 格式 + 可跳转"即够，不拆笔记文件不做补全）：**四阶段已全做完**
+   （面板渲染态 + `links`/反链 → 放射图选中弦线与文件卡片 → 白板链接边与 file 节点 → Markdown/CSV 带摘要与链接），
+   操作书 `NOTES-INTEGRATION.md` 里的"明确不做"清单仍然有效；下一步是**看着改**（用户："先开始做吧,做好了再看着改"）。
 5. 上面"剩余未实测"里等用户点头的几项：留白版模板、层级明度阶梯、色盘降饱和、Focus Filter 色块可读性。

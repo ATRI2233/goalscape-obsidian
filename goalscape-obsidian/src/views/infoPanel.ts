@@ -1,15 +1,17 @@
 // src/views/infoPanel.ts
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
-// Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes / 自定义字段。
+// Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes（渲染态 + textarea 编辑）/
+// Linked goals / Referenced by / 自定义字段。
 // 所有改动统一走 store.mutate。
 
-import { Setting, Notice, setTooltip } from "obsidian";
+import { Component, MarkdownRenderer, Setting, Notice, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
-import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode } from "../data/types";
+import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
+import { backlinks } from "../data/notes";
 import { paletteSwatches } from "../data/palette";
 import { renameGoal, adjustImportance } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "../geometry/radialGeometry";
-import { promptInput } from "./promptModal";
+import { promptInput, promptPick } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
 const BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
@@ -39,14 +41,33 @@ function normalizeHex(raw: string): string | null {
 
 export class InfoPanel {
   private nodeId: string | null = null;
+  /** notes 区双态：false = 渲染态（可点链接），true = textarea 编辑。切换选中节点即回到渲染态 */
+  private notesEditing = false;
   /** 拖动滑杆时跳过外部触发的整面板重建，避免滑杆在拖拽中被重新创建而丢失指针 */
   private interacting = false;
+  /**
+   * 渲染态下挂进 MarkdownRenderer 的宿主组件。
+   * 每次重建预览前先旧建新，Obsidian 靠它管理嵌入子组件的生命周期。
+   */
+  private notesHost: Component | null = null;
 
-  constructor(private container: HTMLElement, private plugin: GoalscapePlugin) {}
+  constructor(
+    private container: HTMLElement,
+    private plugin: GoalscapePlugin,
+    /** 点链接 chip 时跳选目标块（由视图注入：含"展开折叠祖先"的完整跳选） */
+    private onSelectNode?: (id: string) => void
+  ) {}
 
-  /** 切换选中节点：始终强制重建 */
+  /** 视图销毁时调用：预览的嵌入子组件要跟着 unload，不然每开一次面板挂一组孤儿 */
+  destroy(): void {
+    this.notesHost?.unload();
+    this.notesHost = null;
+  }
+
+  /** 切换选中节点：始终强制重建，并把 notes 打回渲染态 */
   show(nodeId: string | null): void {
     this.nodeId = nodeId;
+    this.notesEditing = false;
     this.render(true);
   }
 
@@ -57,6 +78,10 @@ export class InfoPanel {
 
   private render(force: boolean): void {
     if (this.interacting && !force) return;
+    // 每次重建先卸掉上一份预览的宿主：嵌入子组件（Mermaid 之类）挂在它身上，
+    // 不卸就是每点一次扇区泄漏一组
+    this.notesHost?.unload();
+    this.notesHost = null;
     this.container.empty();
     const scape = this.plugin.store.scape;
     if (!this.nodeId || !scape) {
@@ -160,13 +185,8 @@ export class InfoPanel {
     if (ownsHue) this.addHueControls(node, isMain);
     else this.addBrightnessControl(node);
 
-    this.container.createEl("div", { cls: "goalscape-panel-label", text: "Notes" });
-    const notesArea = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
-    notesArea.value = node.notes ?? "";
-    notesArea.addEventListener("blur", () => {
-      const v = notesArea.value;
-      this.mutate((s) => this.patch(s, node.id, (n) => (n.notes = v || undefined)));
-    });
+    this.renderNotes(node);
+    this.renderLinks(node);
 
     this.container.createEl("h4", { text: "Custom fields" });
     const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
@@ -336,6 +356,115 @@ export class InfoPanel {
       };
       window.addEventListener("pointerup", end);
     });
+  }
+
+  /**
+   * Notes 双态区：默认渲染态用原生 MarkdownRenderer 出 —— `[[链接]]` 可点、
+   * `#tag` 可点、`![[嵌入]]` 能渲染，悬浮 preview 白拿。点 "Edit" 切回 textarea，
+   * blur 落盘（落盘时机不变，不做自动保存）。sourcePath 传当前图文件路径，
+   * 相对链接才按这张图所在位置解析。
+   */
+  private renderNotes(node: GoalNode): void {
+    const head = this.container.createDiv({ cls: "goalscape-panel-label goalscape-notes-head" });
+    head.createSpan({ text: "Notes" });
+    const toggle = head.createEl("button", {
+      cls: "goalscape-notes-toggle",
+      text: this.notesEditing ? "Done" : "Edit",
+    });
+    this.trackInteraction(toggle);
+    toggle.addEventListener("click", () => {
+      this.notesEditing = !this.notesEditing;
+      this.render(true);
+    });
+
+    if (this.notesEditing) {
+      const area = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
+      area.value = node.notes ?? "";
+      area.addEventListener("blur", () => {
+        const v = area.value;
+        this.mutate((s) => this.patch(s, node.id, (n) => (n.notes = v || undefined)));
+      });
+      return;
+    }
+
+    const body = this.container.createDiv({ cls: "goalscape-notes-render" });
+    if (!node.notes || !node.notes.trim()) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "No notes yet." });
+      return;
+    }
+    const host = new Component();
+    this.notesHost = host;
+    void MarkdownRenderer.render(this.plugin.app, node.notes, body, this.plugin.store.path, host);
+  }
+
+  /**
+   * 块间链接：Linked goals（本块 links 指向的）+ Referenced by（反向现扫，不存第二份）。
+   * chip 一律"点主体跳选、点 × 断链"；跳选交给视图注入的 onSelectNode（含展开折叠祖先）。
+   */
+  private renderLinks(node: GoalNode): void {
+    const scape = this.plugin.store.scape;
+    if (!scape) return;
+
+    this.container.createEl("h4", { text: "Linked goals" });
+    const linksRow = this.container.createDiv({ cls: "goalscape-chips" });
+    const linked = (node.links ?? [])
+      .map((id) => findNode(scape.mainGoal, id)?.node)
+      .filter((n): n is GoalNode => Boolean(n));
+    if (!linked.length) {
+      linksRow.createDiv({ cls: "goalscape-panel-empty", text: "No links yet." });
+    }
+    for (const target of linked) {
+      this.createChip(linksRow, target.title, target.id, () => {
+        this.mutate((s) =>
+          this.patch(s, node.id, (n) => {
+            n.links = (n.links ?? []).filter((x) => x !== target.id);
+            if (!n.links.length) delete n.links;
+          })
+        );
+      });
+    }
+    const add = linksRow.createEl("button", { cls: "goalscape-chip-add", text: "Add link" });
+    this.trackInteraction(add);
+    add.addEventListener("click", async () => {
+      const used = new Set([node.id, ...(node.links ?? [])]);
+      const options = flattenTree(scape.mainGoal)
+        .filter((n) => !used.has(n.id))
+        .map((n) => ({ id: n.id, label: n.title }));
+      if (!options.length) {
+        new Notice("No other goals to link.");
+        return;
+      }
+      const picked = await promptPick(this.plugin.app, "Link to goal", options);
+      if (!picked) return;
+      this.mutate((s) =>
+        this.patch(s, node.id, (n) => {
+          n.links = Array.from(new Set([...(n.links ?? []), picked]));
+        })
+      );
+    });
+
+    const refs = backlinks(scape.mainGoal, node.id);
+    if (refs.length) {
+      this.container.createEl("h4", { text: "Referenced by" });
+      const backRow = this.container.createDiv({ cls: "goalscape-chips" });
+      for (const src of refs) {
+        // 反链只读：断链要回到引用方那边做，这里只给跳转
+        this.createChip(backRow, src.title, src.id);
+      }
+    }
+  }
+
+  /** 一个 chip：主体按钮跳选（onSelectNode），可选地带一个 × 断链按钮 */
+  private createChip(row: HTMLElement, title: string, targetId: string, onRemove?: () => void): void {
+    const chip = row.createDiv({ cls: "goalscape-chip" });
+    const label = chip.createEl("button", { cls: "goalscape-chip-main", text: title });
+    this.trackInteraction(label);
+    label.addEventListener("click", () => this.onSelectNode?.(targetId));
+    if (onRemove) {
+      const x = chip.createEl("button", { cls: "goalscape-chip-x", text: "×" });
+      x.setAttr("aria-label", "Remove link");
+      x.addEventListener("click", onRemove);
+    }
   }
 
   private mutate(fn: (s: GoalScape) => void): void {

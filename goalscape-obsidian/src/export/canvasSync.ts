@@ -6,6 +6,7 @@
 
 import { GoalNode, GoalScape, flattenTree } from "../data/types";
 import { bandScaleOf, childShares } from "../geometry/radialGeometry";
+import { effectiveTags, firstLine } from "../data/notes";
 
 /**
  * Obsidian 会把未知键收进节点的 unknownData 并在保存时原样吐回（实测），
@@ -44,6 +45,33 @@ export function generatedEdgeId(childId: string): string {
   return `e-${childId}`;
 }
 
+/** 块间链接边（显式 links 字段）与"目标 → vault 笔记"边的 id */
+export function linkEdgeId(fromId: string, toId: string): string {
+  return `x-${fromId}-${toId}`;
+}
+export function fileEdgeId(goalId: string, filePath: string): string {
+  return `n-${goalId}-${hashStr(filePath)}`;
+}
+export function fileNodeId(goalId: string, filePath: string): string {
+  return `f-${goalId}-${hashStr(filePath)}`;
+}
+
+/** FNV-1a：路径进 id 只要稳定、不撞，不需要密码学强度 */
+function hashStr(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * 目标 id → notes 里解析成功的 vault 路径（按出现顺序、已去重）。
+ * 解析要靠 metadataCache，而本文件不许 import obsidian（分层守卫），所以由调用方算好传进来。
+ */
+export type ResolvedNotes = Map<string, string[]>;
+
 const PROGRESS_COLORS: Record<number, string> = {
   0: "1", // red
   1: "2", // orange
@@ -58,6 +86,14 @@ function progressToPreset(progress: number): string {
 
 const NODE_W = 220;
 const NODE_H = 100;
+/** 卡片每多一行正文就多给这么多高度：text 是派生字段，行数是它自己算出来的 */
+const LINE_H = 24;
+
+/** 笔记文件卡落在源卡片径向外侧这么多像素，多张则沿垂直方向并排 */
+const FILE_OUT = 300;
+const FILE_SIDE_STEP = 170;
+const FILE_W = 260;
+const FILE_H = 120;
 
 interface Built {
   doc: JsonCanvas;
@@ -65,11 +101,26 @@ interface Built {
   parentOf: Map<string, string>;
 }
 
-function buildCanvas(scape: GoalScape): Built {
+/** 卡片正文：标题 + 数值行，有 tags / notes 摘要再各追加一行 */
+function cardLines(node: GoalNode): string[] {
+  const lines = [
+    `**${node.title}**`,
+    `占父级 ${node.importance}% · 进度 ${node.progress ?? 0}%`,
+  ];
+  const tags = effectiveTags(node);
+  if (tags.length) lines.push(tags.map((t) => `#${t}`).join(" "));
+  const summary = firstLine(node.notes ?? "");
+  if (summary) lines.push(summary);
+  return lines;
+}
+
+function buildCanvas(scape: GoalScape, resolved?: ResolvedNotes): Built {
   const nodes: CanvasNode[] = [];
   const edges: CanvasEdge[] = [];
   const parentOf = new Map<string, string>();
   const R = 600;
+  // 链接目标必须真在树里：数据层 load/save 时清过一遍，这里只是不自相矛盾
+  const live = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
 
   function walk(
     node: GoalNode,
@@ -86,6 +137,7 @@ function buildCanvas(scape: GoalScape): Built {
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
+    const lines = cardLines(node);
 
     // JSON Canvas 里 x/y 是卡片的中心，不是左上角（Obsidian 按中心解释这个数）
     nodes.push({
@@ -94,8 +146,8 @@ function buildCanvas(scape: GoalScape): Built {
       x: Math.round(x),
       y: Math.round(y),
       width: NODE_W,
-      height: NODE_H,
-      text: `**${node.title}**\n占父级 ${node.importance}% · 进度 ${node.progress ?? 0}%`,
+      height: NODE_H + LINE_H * (lines.length - 2),
+      text: lines.join("\n"),
       color: progressToPreset(node.progress ?? 0),
       // 机器字段：Obsidian 不认识就原样留住（实测），镜像靠它认出哪张卡属于哪个目标
       gsId: id,
@@ -104,6 +156,48 @@ function buildCanvas(scape: GoalScape): Built {
     if (parentId) {
       edges.push({ id: generatedEdgeId(id), fromNode: parentId, toNode: id });
       parentOf.set(id, parentId);
+    }
+
+    const files = resolved?.get(id);
+    if (files?.length) {
+      // 径向外侧、沿切线并排：文件卡贴在属于自己的那张卡外面一圈，而不是散落全图
+      const len = Math.hypot(x, y);
+      const ux = len > 1 ? x / len : 1;
+      const uy = len > 1 ? y / len : 0;
+      files.forEach((file, k) => {
+        const fid = fileNodeId(id, file);
+        const lateral = (k - (files.length - 1) / 2) * FILE_SIDE_STEP;
+        const fx = x + ux * FILE_OUT - uy * lateral;
+        const fy = y + uy * FILE_OUT + ux * lateral;
+        nodes.push({
+          id: fid,
+          type: "file",
+          file,
+          x: Math.round(fx),
+          y: Math.round(fy),
+          width: FILE_W,
+          height: FILE_H,
+          // gsFile 而非 gsId：文件卡不是某个目标的镜子，挂 gsId 会跟目标卡片抢认领、
+          // 触发"复制卡降级"分支，两张卡互相把对方挤成便签
+          gsFile: file,
+          // 相对源卡片的偏移：拖动过源卡片之后，新出现的文件卡要跟着源卡片而不是算法位置
+          gsOx: Math.round(fx - x),
+          gsOy: Math.round(fy - y),
+        });
+        edges.push({ id: fileEdgeId(id, file), fromNode: id, toNode: fid });
+        parentOf.set(fid, id);
+      });
+    }
+
+    for (const to of node.links ?? []) {
+      if (!live.has(to)) continue;
+      edges.push({
+        id: linkEdgeId(id, to),
+        fromNode: id,
+        toNode: to,
+        label: "🔗",
+        color: progressToPreset(node.progress ?? 0),
+      });
     }
 
     const shares = childShares(node);
@@ -121,8 +215,8 @@ function buildCanvas(scape: GoalScape): Built {
   return { doc: { nodes, edges }, parentOf };
 }
 
-export function toCanvas(scape: GoalScape): JsonCanvas {
-  return buildCanvas(scape).doc;
+export function toCanvas(scape: GoalScape, resolved?: ResolvedNotes): JsonCanvas {
+  return buildCanvas(scape, resolved).doc;
 }
 
 export function canvasToJson(canvas: JsonCanvas): string {
@@ -209,19 +303,40 @@ function placeNewCard(
 }
 
 /**
+ * 边是不是我们生成的那一族：id 前缀就是所有权凭证。
+ * Obsidian 自建的边是十六进制随机 id，永远不会撞这四个前缀，所以认前缀比认内容可靠。
+ */
+function isGeneratedEdge(id: string): boolean {
+  return /^(e|x|n)-/.test(id);
+}
+
+/**
  * 树 → 白板：重画派生字段，留住用户的东西。
  * 留住：已有卡片的位置尺寸、用户自己的卡片（便签/文件卡）和它们的连线。
- * 删掉：带 gsId 但树里已经没这个目标的卡片 —— 那是上次镜像留下的鬼卡，不删就永远挂着。
+ * 删掉：带 gsId 但树里已经没这个目标的卡片 —— 那是上次镜像留下的鬼卡，不删就永远挂着；
+ *       带 gsFile 却不在本轮生成集合里的笔记卡 —— 链接没了，卡片跟着消失（同一套规矩）；
+ *       本轮没再生成的生成边（e-/x-/n-）—— 否则删掉的链接会在白板上留一条幽灵线。
  * 新卡片：落在父卡片附近且不压到任何卡片。
  */
-export function refreshCanvas(scape: GoalScape, existing: JsonCanvas | null): JsonCanvas {
-  const { doc: fresh, parentOf } = buildCanvas(scape);
+export function refreshCanvas(
+  scape: GoalScape,
+  existing: JsonCanvas | null,
+  resolved?: ResolvedNotes
+): JsonCanvas {
+  const { doc: fresh, parentOf } = buildCanvas(scape, resolved);
   if (!existing) return fresh;
 
   const liveIds = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
+  const freshIds = new Set(fresh.nodes.map((n) => n.id));
   const mirrored = new Map<string, CanvasNode>();
+  /** 上一轮生成的笔记文件卡，按自己的 id 认领自己（不是某个目标的镜子，不能进 mirrored） */
+  const fileCards = new Map<string, CanvasNode>();
   const extras: CanvasNode[] = [];
   for (const n of existing.nodes) {
+    if (typeof n.gsFile === "string") {
+      if (freshIds.has(n.id)) fileCards.set(n.id, n);
+      continue;
+    }
     const goal = claimedGoal(n);
     if (liveIds.has(goal)) {
       if (!mirrored.has(goal)) {
@@ -243,11 +358,17 @@ export function refreshCanvas(scape: GoalScape, existing: JsonCanvas | null): Js
 
   const nodes: CanvasNode[] = [];
   for (const f of fresh.nodes) {
-    const o = mirrored.get(f.id);
+    const o = mirrored.get(f.id) ?? fileCards.get(f.id);
     if (!o) {
       const parentId = parentOf.get(f.id);
       const parentCard = nodes.find((c) => c.id === parentId);
-      nodes.push(placeNewCard(f, parentCard, [...nodes, ...extras]));
+      // 笔记卡落在"源卡片现在真的在哪"外面一圈，而不是源卡片的算法位置：
+      // 整图被拖远之后，新出现的笔记卡若留在老地方就成了隔空牵线的一格
+      const cand: CanvasNode =
+        parentCard && typeof f.gsOx === "number" && typeof f.gsOy === "number"
+          ? { ...f, x: parentCard.x + f.gsOx, y: parentCard.y + f.gsOy }
+          : f;
+      nodes.push(placeNewCard(cand, parentCard, [...nodes, ...extras]));
       continue;
     }
     const merged: CanvasNode = { ...o, ...f };
@@ -268,6 +389,7 @@ export function refreshCanvas(scape: GoalScape, existing: JsonCanvas | null): Js
       ...fresh.edges,
       ...existing.edges.filter(
         (e) =>
+          !isGeneratedEdge(e.id) &&
           !ids.has(e.id) &&
           !pairs.has(`${e.fromNode}>${e.toNode}`) &&
           kept.has(e.fromNode) &&

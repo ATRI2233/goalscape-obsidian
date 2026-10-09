@@ -4,6 +4,7 @@
 
 import { TFile, Plugin, Notice } from "obsidian";
 import { GoalScape, GoalNode, createGoalNode, HUE_OWNER_DEPTH } from "./types";
+import { pruneLinks } from "./notes";
 import { recalcTree } from "./rollup";
 
 /** vault 里存放 goalscape 文件的目录与扩展名，多处按它筛选/建档，只在这一处定义 */
@@ -126,6 +127,8 @@ export class GoalTreeStore {
     node.tags ??= [];
     node.children ??= [];
     node.children.forEach((c) => this.normalize(c, depth + 1));
+    // links 的清洗要拿全树的 id 集合判"目标还存在吗"，只能在根上跑一次
+    if (depth === 0) pruneLinks(node);
   }
 
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */

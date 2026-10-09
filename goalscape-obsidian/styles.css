@@ -332,6 +332,52 @@
   filter: brightness(1.2);
 }
 
+/* 块间链接弦线：只在选中时出现，两端底色渐变、低透明度丝线（高级感靠"不选中就完全看不见"） */
+.goalscape-chord {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  opacity: 0.35;
+  cursor: pointer;
+  transition: opacity 0.15s ease;
+}
+
+.goalscape-chord-hot {
+  opacity: 0.9;
+  stroke-width: 3;
+}
+
+.goalscape-chord-dot {
+  opacity: 0.5;
+}
+
+/* hover 弦线时被联动的对端扇区提亮（比选中态轻一档，别抢焦点） */
+.goalscape-lit {
+  stroke: var(--interactive-accent);
+  stroke-width: 2 !important;
+  filter: drop-shadow(0 0 3px var(--interactive-accent));
+}
+
+/* notes 里链到真实 vault 笔记的小文件卡片：扇区外缘，点击开笔记 */
+.goalscape-vfile {
+  cursor: pointer;
+}
+
+.goalscape-vfile-icon {
+  fill: var(--background-modifier-hover);
+  stroke: var(--text-muted);
+  stroke-width: 1;
+}
+
+.goalscape-vfile-name {
+  fill: var(--text-muted);
+  font-size: 9px;
+  paint-order: stroke;
+  stroke: var(--background-primary);
+  stroke-width: 2.5px;
+  pointer-events: none;
+}
+
 /* 权重拖拽手柄 */
 .goalscape-weight-handle {
   fill: var(--interactive-accent);
@@ -514,6 +560,135 @@
 
 .goalscape-panel-fields .setting-item {
   padding: 4px 0;
+}
+
+/* Notes 标题行：左标题、右 Edit/Done */
+.goalscape-notes-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.goalscape-notes-toggle {
+  background: none;
+  border: none;
+  box-shadow: none;
+  color: var(--text-accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  height: auto;
+}
+
+.goalscape-notes-toggle:hover {
+  color: var(--text-accent-hover);
+  text-decoration: underline;
+}
+
+/* notes 渲染态：和编辑态 textarea 同一家外观，Edit/Done 切换时版式不跳 */
+.goalscape-notes-render {
+  width: 100%;
+  min-height: 60px;
+  background-color: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  word-break: break-word;
+  box-sizing: border-box;
+}
+
+.goalscape-notes-render > :first-child {
+  margin-top: 0;
+}
+
+.goalscape-notes-render > :last-child {
+  margin-bottom: 0;
+}
+
+/* 块间链接 chip：主体按钮跳选、右侧 × 断链（反链 chip 没有 ×） */
+.goalscape-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin: 0 0 10px;
+}
+
+.goalscape-chip {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--background-secondary);
+}
+
+.goalscape-chip-main {
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-normal);
+  font-size: 12px;
+  padding: 3px 7px;
+  height: auto;
+  cursor: pointer;
+  max-width: 150px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.goalscape-chip-main:hover {
+  background: var(--background-modifier-hover);
+}
+
+.goalscape-chip-x {
+  border: none;
+  border-left: 1px solid var(--background-modifier-border);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 3px 6px;
+  height: auto;
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.goalscape-chip-x:hover {
+  color: var(--text-error);
+}
+
+.goalscape-chip-add {
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 3px 8px;
+  height: auto;
+  cursor: pointer;
+}
+
+.goalscape-chip-add:hover {
+  border-style: solid;
+  color: var(--text-normal);
+}
+
+/* links picker 弹窗：一屏半封顶，图大了内部滚而不是把模态框撑出屏幕 */
+.goalscape-pick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+
+.goalscape-pick-btn {
+  text-align: left;
+  width: 100%;
 }
 
 /* 色系选择（只有二级节点出现）下方的色盘：原生取色器 + 预设色块 + Auto */
