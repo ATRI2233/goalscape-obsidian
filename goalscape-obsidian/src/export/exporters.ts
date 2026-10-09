@@ -3,6 +3,7 @@
 
 import { GoalNode, GoalScape } from "../data/types";
 import { DEFAULT_TONE, Tone, branchFills } from "../data/palette";
+import { VIEW_SIZE } from "../geometry/radialGeometry";
 
 /**
  * 序列化后的 SVG 脱离了文档：CSS 规则与 var() 变量都不再存在，
@@ -64,7 +65,10 @@ function withBackground(clone: SVGSVGElement, color: string): SVGSVGElement {
 }
 
 export function exportSvg(svgEl: SVGSVGElement): string {
-  const clone = withBackground(inlineComputedStyles(svgEl), themeBackground(svgEl));
+  const styled = inlineComputedStyles(svgEl);
+  // 导出的是整张图、不是当前视野：界面上放大/平移到哪儿都不该改变文件内容
+  styled.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
+  const clone = withBackground(styled, themeBackground(svgEl));
   clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   clone.setAttribute("width", "1000");
   clone.setAttribute("height", "1000");

@@ -1,6 +1,7 @@
 // src/geometry/radialGeometry.ts
 // 放射图的纯几何与配色：每节点的环带厚度、子级在父扇区里切走多少角度、扇区路径、
-// 标签对比度与截断、极坐标命中测试。render() 与拖拽命中测试共用这一套换算，
+// 标签对比度与截断、极坐标命中测试、视野（滚轮缩放/平移）的窗口数学。
+// render() 与拖拽命中测试共用这一套换算，
 // 避免"角度/半径"公式在两处各写一遍而漂移。
 //
 // 与旧版（同心等宽环 + 子级按同级归一化铺满父级）的三点区别：
@@ -107,6 +108,64 @@ export function toLogicalPoint(svg: SVGSVGElement, clientX: number, clientY: num
   if (!ctm) return { x: CX, y: CY };
   const p = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
   return { x: p.x, y: p.y };
+}
+
+// ──────────────────────────── 视野（缩放 / 平移） ────────────────────────────
+
+/**
+ * 视野就是 viewBox 那个正方形，边长 `size` 用逻辑单位记：size 越小 = 放得越大。
+ * 只记窗口不记倍率，是为了让"滚回最小档"在数学上必然等于整张图 —— size 夹到 VIEW_SIZE 时
+ * 平移余量随之归零，不用另存一个"默认视野"去还原。
+ */
+export interface Viewport {
+  x: number;
+  y: number;
+  size: number;
+}
+
+/** 整图铺满那一档，也是新建视图的起点 */
+export const FULL_VIEW: Viewport = { x: 0, y: 0, size: VIEW_SIZE };
+
+/** 最大放大倍率：8× 时最厚的一档环带（约 130 逻辑单位）占满视野，再大就只是在数像素 */
+export const MAX_ZOOM = 8;
+
+/** 滚轮一格放大的倍率：1.15 → 从 1× 推到 8× 约 16 格，既不会一格看不清也不会点半天没反应 */
+const ZOOM_PER_NOTCH = 1.15;
+
+const clampNum = (v: number, lo: number, hi: number): number => Math.min(Math.max(v, lo), hi);
+
+/** 画布之外没有内容，所以视野窗口不许越出 [0, VIEW_SIZE]：永远看得见图，也丢不了 */
+export function clampView(v: Viewport): Viewport {
+  const size = clampNum(v.size, VIEW_SIZE / MAX_ZOOM, VIEW_SIZE);
+  const max = VIEW_SIZE - size;
+  return { x: clampNum(v.x, 0, max), y: clampNum(v.y, 0, max), size };
+}
+
+/**
+ * 以光标为锚缩放：anchor 是滚轮下那个点的**逻辑坐标**，缩放前后必须还落在同一点上，
+ * 否则放大外层环时正看着的那块会被推出屏幕。notch > 0 为放大，可带小数（一次滚半格）。
+ */
+export function zoomView(
+  v: Viewport, notch: number, anchor: { x: number; y: number }
+): Viewport {
+  const next = clampView({ ...v, size: v.size / Math.pow(ZOOM_PER_NOTCH, notch) });
+  const k = next.size / v.size;
+  return clampView({
+    x: anchor.x - (anchor.x - v.x) * k,
+    y: anchor.y - (anchor.y - v.y) * k,
+    size: next.size,
+  });
+}
+
+/** 内容跟着指针走：指针在逻辑坐标下拖过 (dx, dy)，窗口就往反方向挪同样多远 */
+export function panView(v: Viewport, dx: number, dy: number): Viewport {
+  return clampView({ ...v, x: v.x - dx, y: v.y - dy });
+}
+
+/** 落到 DOM 上的写法：两位小数足够细（1 逻辑单位 ≈ 一个像素的几分之一），又不至于让 viewBox 字符串长到没法读 */
+export function viewBoxOf(v: Viewport): string {
+  const r = (n: number) => n.toFixed(2);
+  return `${r(v.x)} ${r(v.y)} ${r(v.size)} ${r(v.size)}`;
 }
 
 /**

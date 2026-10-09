@@ -1,7 +1,7 @@
 // src/views/radialView.ts
-// Goalscape 放射图视图：单行工具栏（呈现方式 + 图文件 + 筛选）+ SVG 渲染 + 选中态。
+// Goalscape 放射图视图：单行工具栏（呈现方式 + 图文件 + 筛选）+ SVG 渲染 + 选中态 + 视野手势。
 // 增删改一律走扇区右键菜单（radialMenu.ts），工具栏不重复提供入口。
-// 几何/配色在 radialGeometry.ts，两类拖拽在 radialDrag.ts，过滤谓词在 focusFilter.ts
+// 几何/配色/视野数学在 radialGeometry.ts，两类数据拖拽在 radialDrag.ts，过滤谓词在 focusFilter.ts
 // —— 本文件只负责把它们接到 Obsidian 的 ItemView 生命周期上。
 
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
@@ -11,8 +11,9 @@ import { SECTOR_RAMP, branchFills, shadeOf } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
-  SVG_NS, VIEW_SIZE, CX, CY,
+  SVG_NS, CX, CY,
   arcPath, bandScaleOf, bevelArc, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
+  FULL_VIEW, Viewport, panView, toLogicalPoint, viewBoxOf, zoomView,
   SectorShape,
 } from "../geometry/radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
@@ -28,6 +29,9 @@ function scapeName(path: string): string {
 /** 分屏会同时挂两个 svg，逐视图给 defs 里的 id 编号，避免后建的视图引用到先销毁的那个 */
 let viewSeq = 0;
 
+/** 位移超过这个值才认定是平移，否则按"点了空白处清除选中"处理（与 reparent 的阈值同一个道理） */
+const PAN_ACTIVATE_PX = 5;
+
 export class RadialGoalMapView extends ItemView {
   private unsubscribe?: () => void;
   private selectedId: string | null = null;
@@ -36,6 +40,10 @@ export class RadialGoalMapView extends ItemView {
   private filterBar!: FocusFilter;
   private filterCriteria: FilterCriteria = {};
   private nodePositions = new Map<string, SectorShape>();
+  /** 当前视野（viewBox），跨 render 保持；分屏各自一份，互不影响 */
+  private view: Viewport = FULL_VIEW;
+  /** 平移收尾时浏览器补的那次 click 不该清掉选中态 */
+  private panMoved = false;
   /** 分屏会同时挂两个 svg，id 撞了以后 url(#id) 只认文档里第一个 defs，所以逐视图编号 */
   private readonly uid = `goalscape-${++viewSeq}`;
   private gradSeq = 0;
@@ -69,6 +77,14 @@ export class RadialGoalMapView extends ItemView {
 
     const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
     this.rootEl = mainRow.createDiv({ cls: "goalscape-radial-root" });
+    // 手势挂在 rootEl 而不是 svg 上：render() 每次都重建 svg，挂在 svg 上就得每帧重绑，
+    // 而 registerDomEvent 的解绑只在视图销毁时跑一次。滚轮/平移都靠事件冒泡到这里。
+    this.registerDomEvent(this.rootEl, "wheel", (e) => this.onWheel(e), { passive: false });
+    this.registerDomEvent(this.rootEl, "pointerdown", (e) => this.onBackgroundPointerDown(e));
+    // 双击空白处回到整图：视野最小档本来就等于全图，这只是给"滚十几格滚回去"一条捷径
+    this.registerDomEvent(this.rootEl, "dblclick", (e) => {
+      if (e.target instanceof SVGSVGElement) this.setView(FULL_VIEW);
+    });
     const panelEl = mainRow.createDiv({ cls: "goalscape-panel" });
     this.infoPanel = new InfoPanel(panelEl, this.plugin);
     this.infoPanel.show(this.selectedId);
@@ -163,7 +179,7 @@ export class RadialGoalMapView extends ItemView {
     if (!scape) return;
 
     const svg = document.createElementNS(SVG_NS, "svg") as SVGSVGElement;
-    svg.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
+    svg.setAttribute("viewBox", viewBoxOf(this.view));
     svg.addClass("goalscape-radial-svg");
     this.rootEl.appendChild(svg);
 
@@ -304,6 +320,11 @@ export class RadialGoalMapView extends ItemView {
     drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
 
     svg.addEventListener("click", () => {
+      // 平移结束时浏览器还会补一次 click，它不该把选中态清掉；下一次真点击前把标记归零
+      if (this.panMoved) {
+        this.panMoved = false;
+        return;
+      }
       if (this.selectedId) this.clearSelection();
     });
   }
@@ -393,6 +414,59 @@ export class RadialGoalMapView extends ItemView {
       },
     });
     menu.showAtMouseEvent(event);
+  }
+
+  // ──────────────────────────── 视野（滚轮缩放 / 平移） ────────────────────────────
+
+  /** 只改 viewBox：扇区、渐变、标签一概不重建，命中测试拿 getScreenCTM 反算，跟着视野自然对齐 */
+  private setView(v: Viewport): void {
+    this.view = v;
+    const svg = this.liveSvg();
+    if (svg) svg.setAttribute("viewBox", viewBoxOf(v));
+  }
+
+  /**
+   * 滚轮以光标为锚缩放：放大外层环时若朝图中心收，正看着的那一块会被直接推出屏幕。
+   * 一格滚轮折成约 100（行/页模式先换算到同一量纲），单次事件最多吃 3 格，快速甩也不至于一格到底。
+   */
+  private onWheel(e: WheelEvent): void {
+    const svg = this.liveSvg();
+    if (!svg) return;
+    // 不拦下来这一下会被当成面板滚动，ctrl+滚轮还会连带改 Obsidian 的应用缩放
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 300 : 100;
+    const notch = Math.max(-3, Math.min(3, -e.deltaY / unit));
+    if (!notch) return;
+    this.setView(zoomView(this.view, notch, toLogicalPoint(svg, e.clientX, e.clientY)));
+  }
+
+  /**
+   * 平移只接手 svg 空白处：扇区上的 pointerdown 归 reparent 拖拽，两处都接同一个手势会互相抢。
+   * 位移从"按下那一刻的视野"起算、不在上一次结果上累加，所以顶到边界再拖回来不会攒出漂移。
+   */
+  private onBackgroundPointerDown(e: PointerEvent): void {
+    this.panMoved = false;
+    const svg = e.target;
+    if (!(svg instanceof SVGSVGElement) || e.button !== 0) return;
+    const ctm = svg.getScreenCTM();
+    // ctm.a = 逻辑单位→屏幕像素的倍率；平移期间不会缩放也不会重排，所以整段拖拽用同一个倍率
+    if (!ctm?.a) return;
+    const from = { x: e.clientX, y: e.clientY, view: this.view };
+    let moved = false;
+
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.hypot(ev.clientX - from.x, ev.clientY - from.y) <= PAN_ACTIVATE_PX) return;
+      moved = true;
+      this.setView(panView(from.view, (ev.clientX - from.x) / ctm.a, (ev.clientY - from.y) / ctm.a));
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      // 1× 时平移夹成空操作，这种"拖了但画面没动"仍按点击处理，别夺走清除选中
+      this.panMoved = viewBoxOf(from.view) !== viewBoxOf(this.view);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
   }
 
   // ──────────────────────────── 拖拽现场 ────────────────────────────
