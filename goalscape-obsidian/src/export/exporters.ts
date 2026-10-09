@@ -1,7 +1,7 @@
 // src/export/exporters.ts
 // 导出功能：PNG（SVG→Canvas→Blob）、SVG（序列化）、CSV（扁平化节点数据）。
 
-import { GoalNode, GoalScape, flattenTree } from "../data/types";
+import { GoalNode, GoalScape, NoteIndex, flattenTree } from "../data/types";
 import { DEFAULT_TONE, Tone, branchFills } from "../data/palette";
 import { VIEW_SIZE } from "../geometry/radialGeometry";
 import { firstLine } from "../data/notes";
@@ -99,9 +99,13 @@ export async function exportPng(svgEl: SVGSVGElement, scale = 2): Promise<Blob> 
   });
 }
 
-export function exportCsv(scape: GoalScape, tone: Tone = DEFAULT_TONE): string {
+export function exportCsv(
+  scape: GoalScape,
+  tone: Tone = DEFAULT_TONE,
+  notes?: NoteIndex
+): string {
   const rows: string[][] = [
-    ["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle", "Notes", "Links"],
+    ["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle", "Notes", "NoteFile", "Links"],
   ];
   // 导出的是节点在图上实际呈现的那个颜色，而不是"存了这个字段"——
   // 深层节点不存色、浓淡也不由存值决定，但图上确实有颜色
@@ -118,7 +122,8 @@ export function exportCsv(scape: GoalScape, tone: Tone = DEFAULT_TONE): string {
       fills.get(node.id) ?? "",
       String(depth),
       parentTitle,
-      firstLine(node.notes ?? ""),
+      firstLine(notes?.get(node.id)?.text ?? ""),
+      notes?.get(node.id)?.path ?? "",
       linkTitles(node, titles).join("; "),
     ]);
     for (const c of node.children) walk(c, depth + 1, node.title);
@@ -144,15 +149,18 @@ function csvEscape(val: string): string {
   return val;
 }
 
-export function exportMarkdownOutline(scape: GoalScape): string {
+export function exportMarkdownOutline(scape: GoalScape, notes?: NoteIndex): string {
   const lines: string[] = [];
   const titles = titleIndex(scape);
   const walk = (node: GoalNode, depth: number) => {
     const indent = "  ".repeat(depth);
     const prog = node.children.length ? `(auto: ${node.progress ?? 0}%)` : `(${node.progress ?? 0}%)`;
     lines.push(`${indent}- **${node.title}** ${prog} [w:${node.importance}]`);
-    const summary = firstLine(node.notes ?? "");
-    if (summary) lines.push(`${indent}  ${summary}`);
+    const note = notes?.get(node.id);
+    const summary = firstLine(note?.text ?? "");
+    // 导出的大纲是拿去 Obsidian 里看的：有笔记文件就写成 wikilink，摘要当别名，点了能跳过去
+    if (note) lines.push(`${indent}  [[${note.path.replace(/\.md$/, "")}|${summary || "笔记"}]]`);
+    else if (summary) lines.push(`${indent}  ${summary}`);
     const links = linkTitles(node, titles);
     if (links.length) lines.push(`${indent}  → 链接：${links.join("、")}`);
     // 不按 collapsed 过滤：折叠只是放射图的视图状态，导出大纲时据此跳过会静默丢失整棵子树

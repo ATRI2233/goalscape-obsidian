@@ -20,8 +20,8 @@ const INNER_DIRS = ["data/", "export/", "geometry/"];
 /** 逐个点名的框架无关文件；geometry/ 整个目录都按同样要求 */
 const PURE = ["data/types.ts", "data/rollup.ts", "data/crud.ts", "data/templates.ts", "data/palette.ts"];
 
-/** 允许碰 obsidian 的位置：视图层、组合根，以及 goalTree 这个 vault 持久化适配器 */
-const FRAMEWORK_ALLOWED = ["main.ts", "settingsTab.ts", "data/goalTree.ts", "views/"];
+/** 允许碰 obsidian 的位置：视图层、组合根，以及 goalTree / noteFiles 这两个 vault 持久化适配器 */
+const FRAMEWORK_ALLOWED = ["main.ts", "settingsTab.ts", "data/goalTree.ts", "data/noteFiles.ts", "views/"];
 
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => {

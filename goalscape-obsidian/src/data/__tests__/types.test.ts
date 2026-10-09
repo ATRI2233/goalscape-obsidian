@@ -25,13 +25,13 @@ describe("createGoalNode", () => {
       progress: 25,
       tags: ["Now"],
       collapsed: true,
-      fields: { kpi: "revenue" },
+      note: "Goalscapes/x.notes/Career.md",
     });
     assert.equal(node.id, "fixed-id");
     assert.equal(node.importance, 80);
     assert.equal(node.progress, 25);
     assert.equal(node.collapsed, true);
-    assert.deepEqual(node.fields, { kpi: "revenue" });
+    assert.equal(node.note, "Goalscapes/x.notes/Career.md");
   });
 });
 

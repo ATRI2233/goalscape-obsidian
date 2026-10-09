@@ -41,6 +41,8 @@ const SHOT_DIR = path.join(ROOT, "node_modules", ".goalscape-ui");
 const TMP_NAME = "ZZ_GS_UI_REGRESSION";
 const TMP_PATH = `${SCAPE_DIR_NAME}/${TMP_NAME}.goalscape.json`;
 const TMP_CANVAS = `${SCAPE_DIR_NAME}/${TMP_NAME}.canvas`;
+/** 临时图的笔记目录：NoteStore 按 <图名>.notes/ 建，跑完必须一并删掉 */
+const NOTES_DIR = `${SCAPE_DIR_NAME}/${TMP_NAME}.notes`;
 const RADIAL = "goalscape-radial-view";
 const VIEW_TYPES = [RADIAL, "goalscape-list-view", "goalscape-gantt-view"];
 const PL = `app.plugins.plugins[${JSON.stringify(PLUGIN)}]`;
@@ -175,9 +177,14 @@ async function restore() {
       const pl=${PL};
       for(const l of app.workspace.getLeavesOfType('canvas'))
         if(l.view.file?.path===${JSON.stringify(TMP_CANVAS)}) await l.detach();
+      for(const l of app.workspace.getLeavesOfType('markdown'))
+        if(l.view.file?.path?.startsWith(${JSON.stringify(`${NOTES_DIR}/`)})) await l.detach();
       for(const p of [${JSON.stringify(TMP_CANVAS)}, ${JSON.stringify(TMP_PATH)}]){
         const f=app.vault.getAbstractFileByPath(p); if(f) await app.vault.delete(f);
       }
+      // 笔记目录得先掏空再删：vault.delete 对非空目录会 ENOTEMPTY
+      const nd=app.vault.getAbstractFileByPath(${JSON.stringify(NOTES_DIR)});
+      if(nd){ for(const c of [...(nd.children||[])]) await app.vault.delete(c); await app.vault.delete(nd); }
       if(pl.store.path!==${JSON.stringify(start.path)}) await pl.switchGoalscape(${JSON.stringify(start.path)});
       await __gsSettle(400);
       return pl.store.path;})()`);
@@ -1268,6 +1275,27 @@ step("viewport 滚轮以光标为锚缩放 + 空白处平移 + 双击还原", as
 
 // ───────────── notes 融入：面板渲染态 / 块间弦线 / 白板派生卡片 ─────────────
 
+/**
+ * 真鼠标点：走 CDP 的 Input 域，不是页内 dispatchEvent。
+ * 差别不是洁癖 —— 合成 click 会绕过浏览器的按下/抬起命中测试，"处理器在 pointerup 里
+ * 把自己脚下那个元素拆了"这类 bug 在合成事件下永远是绿的（Edit / Add link / chip 跳转
+ * 就因此在实机里全点不动，而回归报 14/14）。凡是验"按钮点得动吗"都必须走这里。
+ */
+async function realClick(sel, nth = 0) {
+  const box = await json(`(()=>{const el=document.querySelectorAll(${JSON.stringify(sel)})[${nth}];
+    if(!el) return null; const b=el.getBoundingClientRect();
+    return b.width?{x:b.left+b.width/2,y:b.top+b.height/2}:null;})()`);
+  if (!box) throw new Error(`realClick 找不到 ${sel}[${nth}]`);
+  for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) {
+    await send("Input.dispatchMouseEvent", {
+      type, x: box.x, y: box.y, button: type === "mouseMoved" ? "none" : "left",
+      clickCount: type === "mouseMoved" ? 0 : 1, pointerType: "mouse",
+    });
+    if (type === "mousePressed") await new Promise((r) => setTimeout(r, 40));
+  }
+  await ev(`__gsSettle(400)`);
+}
+
 /** 选中只能"真点一次扇区"：视图没留公开入口，走命中测试反而是更接近用户的验法。
  *  取 0.3 而非 0.5 的弧中点 —— 选中态的弦线和端点圆点正好落在弧中点上，会拦住这一击 */
 const selectSector = (id) => json(`(async()=>{
@@ -1300,41 +1328,69 @@ const chordState = () => json(`(()=>({
   dots:document.querySelectorAll('svg.goalscape-radial-svg circle.goalscape-chord-dot').length,
   files:[...document.querySelectorAll('svg.goalscape-radial-svg g.goalscape-vfile')].map(g=>g.querySelector('title')?.textContent||''),
   rendered:!!document.querySelector('.goalscape-notes-render'),
+  ta:document.querySelectorAll('.goalscape-panel textarea').length,
+  btn:document.querySelector('.goalscape-notes-toggle')?.textContent||null,
+  fields:document.querySelectorAll('.goalscape-panel-fields').length,
   links:[...document.querySelectorAll('.goalscape-panel .goalscape-chip-main')].map(b=>b.textContent),
   heads:[...document.querySelectorAll('.goalscape-panel h4')].map(h=>h.textContent),
   unresolved:document.querySelectorAll('.goalscape-notes-render a.is-unresolved').length,
   internal:document.querySelectorAll('.goalscape-notes-render a.internal-link').length,
 }))()`);
 
-step("notes 面板渲染、块间弦线与白板派生卡片", async () => {
+step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => {
   await useTmpMap();
   // 链接目标现取 vault 里的一篇真笔记：写死名字的话，"解析得到"这件事就从来没被验过
   const note = await json(`(()=>{const f=app.vault.getMarkdownFiles()
     .find(f=>!f.path.startsWith(${JSON.stringify(`${SCAPE_DIR_NAME}/`)}));
     return f?{name:f.basename,path:f.path}:null;})()`);
   if (!note) { skipped("vault 里没有可链接的笔记，notes 步骤跳过"); return; }
+  const NOTE = `${NOTES_DIR}/Alpha.md`;
 
+  // 树先摆成旧版的形状（正文塞在 JSON 的 notes 里），当场验迁移
   const TREE = {
     id: "g-nroot", title: "Notes Root", importance: 100, tags: [], children: [
       { id: "g-na", title: "Alpha", importance: 60, tags: ["Now"], children: [],
-        notes: `本周跑 5 公里，见 [[${note.name}]]\n第二段不进摘要`, links: ["g-nb"] },
+        notes: [
+          `本周跑 5 公里，见 [[${note.name}]]`,
+          "",
+          "## 训练安排",
+          "- 周一 5km 配速跑",
+          "- 周四 间歇 400m × 6",
+          "",
+          "第二段不进摘要",
+        ].join("\n"),
+        links: ["g-nb"] },
       { id: "g-nb", title: "Bravo", importance: 40, tags: [], children: [] },
     ],
   };
   await setTmpTree(TREE);
+  const migrated = await ev(`${PL}.notes.syncMap()`);
+  const moved = await json(`(async()=>({
+    path:${PL}.store.scape.mainGoal.children[0].note,
+    legacy:${PL}.store.scape.mainGoal.children[0].notes,
+    raw:await app.vault.adapter.read(${JSON.stringify(NOTE)})}))()`);
+  ok("旧版塞在 JSON 里的正文被搬进 .md：树里只剩路径，文件头带 gsId",
+    migrated === 1 && moved.path === NOTE && moved.legacy === undefined
+      && moved.raw.startsWith("---\ngsId: g-na\n---"),
+    JSON.stringify(moved).slice(0, 120));
   await resetCanvas();
 
   const sel = await selectSector("g-na");
   ok("点扇区选中 Alpha", sel.hit === "g-na", JSON.stringify(sel));
   const st = await chordState();
-  ok("notes 走原生 MarkdownRenderer：解析得到的 wikilink 成可点内部链接",
+  ok("笔记正文走原生 MarkdownRenderer：解析得到的 wikilink 成可点内部链接",
     st.rendered && st.internal >= 1 && st.unresolved === 0, JSON.stringify(st));
+  ok("面板没有可写副本：textarea 一个都不该有（编辑去原生编辑器）",
+    st.ta === 0 && st.btn === "Open note", JSON.stringify(st));
+  ok("Custom fields 整节已删：写不进也读不出的死洞不留着",
+    !st.heads.includes("Custom fields") && st.fields === 0, JSON.stringify(st.heads));
   ok("选中时的弦线数 = links + 反链去重后的对端数",
     st.chords.join(",") === "g-nb" && st.dots === 2, JSON.stringify(st));
   ok("解析得到的 vault 笔记在扇区外缘长出小文件卡片",
-    st.files.join(",") === note.name, JSON.stringify(st));
+    st.files.join(",") === note.path, JSON.stringify(st));
   ok("Linked goals chip 用标题而不是 id",
     st.heads.includes("Linked goals") && st.links.includes("Bravo"), JSON.stringify(st));
+  info("笔记面板截图", await shot("notes-panel"));
 
   const back = await selectSector("g-nb");
   const bs = await chordState();
@@ -1343,10 +1399,30 @@ step("notes 面板渲染、块间弦线与白板派生卡片", async () => {
       && bs.chords.join(",") === "g-na", JSON.stringify({ back, ...bs }));
 
   await selectSector("g-na");
-  const edit = await json(`(()=>{document.querySelector('.goalscape-notes-toggle')
-    .dispatchEvent(new MouseEvent('click',{bubbles:true}));
-    return document.querySelector('.goalscape-panel-notes')?.value||null;})()`);
-  ok("Edit 切回 textarea，原文一字不改", (edit || "").includes(`[[${note.name}]]`), String(edit).slice(0, 40));
+  // 真鼠标点"打开笔记"：合成 click 会绕过命中测试，这个按钮正是上一轮"点不动"的案发现场
+  await realClick(".goalscape-notes-toggle");
+  await waitFor(
+    `app.workspace.getLeavesOfType('markdown').some(l=>l.view.file?.path===${JSON.stringify(NOTE)})`,
+    "笔记在原生编辑器里打开"
+  );
+  ok("点按钮把笔记交给 Obsidian 自己的编辑器", true);
+
+  // 回到放射图，在"外部"改那个 .md：watch 去抖重建后，面板预览要跟着变
+  await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
+  await selectSector("g-na");
+  await json(`(async()=>{const f=app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+    await app.vault.modify(f,${JSON.stringify(`---\ngsId: g-na\n---\n\n改过之后的一句话，见 [[${note.name}]]\n`)});
+    return 1;})()`);
+  await waitFor(
+    `document.querySelector('.goalscape-notes-render')?.textContent.includes('改过之后的一句话')`,
+    "外部编辑的笔记正文回到面板预览"
+  );
+  const after = await chordState();
+  ok("改完还是渲染态、没有偷偷长出编辑框", after.ta === 0 && after.rendered === true, JSON.stringify(after));
+
+  await realClick(".goalscape-chip-main", 0);
+  const jumped = await ev(`${PL}.radialViews()[0].selectedId`);
+  ok("真鼠标点 Linked goals chip 跳选到对端", jumped === "g-nb", String(jumped));
 
   // 常态零噪音：没选中任何块时，弦线与文件卡片一概不存在
   const selected = await clearSelection();
@@ -1366,8 +1442,8 @@ step("notes 面板渲染、块间弦线与白板派生卡片", async () => {
       && doc1.edges.some((e) => e.id === "x-g-na-g-nb" && e.label === "🔗"),
     JSON.stringify({ fcard, edge: doc1.edges.find((e) => e.id === "x-g-na-g-nb") }).slice(0, 240));
   const cardA = doc1.nodes.find((n) => n.gsId === "g-na");
-  ok("卡片正文长出 tags 行与 notes 摘要",
-    /#Now/.test(cardA?.text || "") && /本周跑 5 公里/.test(cardA?.text || ""),
+  ok("卡片摘要来自 .md 的第一行，且不再有 #tags 那一行",
+    /改过之后的一句话/.test(cardA?.text || "") && !/#Now/.test(cardA?.text || ""),
     JSON.stringify(cardA?.text));
 
   // 文件卡要 Obsidian 自己的解析器认得才算真长在了白板上（文件写对不代表它接得住 type:file）
@@ -1378,13 +1454,20 @@ step("notes 面板渲染、块间弦线与白板派生卡片", async () => {
     JSON.stringify(live.nodes.map((n) => `${n.id}:${n.type}`)).slice(0, 200));
   await closeCanvasTabs();
 
+  // 笔记文件被用户删掉：这块就是没有笔记，插件不许把它写回来
+  await json(`(async()=>{const f=app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
+    await app.vault.delete(f); return 1;})()`);
+  await waitFor(`${PL}.notes.get('g-na')===undefined`, "删掉笔记文件后索引里这一块空出来");
+  ok("用户删掉笔记文件后插件没有偷偷重建",
+    !(await json(`app.vault.adapter.exists(${JSON.stringify(NOTE)})`)));
+
   const cut = structuredClone(TREE);
   delete cut.children[0].notes;
   delete cut.children[0].links;
   await setTmpTree(cut);
   const doc2 = await waitCanvasDoc(
     (d) => !d.nodes.some((n) => n.type === "file") && !d.edges.some((e) => e.id === "x-g-na-g-nb"),
-    "链接与 notes 摘掉后派生卡消失"
+    "链接与笔记摘掉后派生卡消失"
   );
   ok("链接没了：下一轮镜像把笔记卡和链接边一起收走（不留僵尸）",
     !doc2.nodes.some((n) => n.type === "file") && !doc2.edges.some((e) => e.id.startsWith("x-")),

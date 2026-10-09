@@ -3,8 +3,8 @@
 
 import { App, Plugin, TFile, TFolder, WorkspaceLeaf, Notice, Modal, Setting } from "obsidian";
 import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH, GOALSCAPE_FOLDER, GOALSCAPE_SUFFIX } from "./data/goalTree";
+import { NoteStore } from "./data/noteFiles";
 import { flattenTree } from "./data/types";
-import { parseWikiTargets } from "./data/notes";
 import { RadialGoalMapView } from "./views/radialView";
 import { GoalListView } from "./views/listView";
 import { GanttView } from "./views/ganttView";
@@ -20,7 +20,6 @@ import {
   parseCanvasJson,
   trustedSnapshot,
   type JsonCanvas,
-  type ResolvedNotes,
 } from "./export/canvasSync";
 import { exportSvg, exportPng, exportCsv, exportMarkdownOutline, downloadBlob, downloadText } from "./export/exporters";
 
@@ -34,6 +33,8 @@ const CANVAS_SETTLE_MS = 1000;
 
 export default class GoalscapePlugin extends Plugin {
   store!: GoalTreeStore;
+  /** 块 ↔ 笔记文件的适配器：视图与导出层要的正文/出链都从它的索引里同步取 */
+  notes!: NoteStore;
   /** 子树剪贴板随插件存活，放射图标签页之间共享 */
   readonly clipboard = new SubtreeClipboard();
   /** 设置页那两根滑杆的原始值（0..100），换算见 palette.toneFromSliders */
@@ -63,6 +64,7 @@ export default class GoalscapePlugin extends Plugin {
     this.toneSettings = { ...this.toneSettings, ...(saved?.tone ?? {}) };
     this.canvasAuto = saved?.canvasAuto ?? true;
     this.store = new GoalTreeStore(this, saved?.currentPath || DEFAULT_GOALSCAPE_PATH);
+    this.notes = new NoteStore(this, this.store);
 
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
@@ -103,6 +105,11 @@ export default class GoalscapePlugin extends Plugin {
     // 读档放在视图/命令注册之后：数据出问题只影响图的内容，
     // 不该连带让视图注册不上、整个标签页退化成"插件不再活动"占位页
     await this.store.load();
+    // 先挂监听再建索引：迁移刚写出来的 .md，metadataCache 那一刻往往还没解析完，
+    // 靠 changed 事件补一轮才拿得到链接（顺序反了就是"文件卡片时有时无"）
+    this.notes.watch();
+    // 笔记索引要在开视图之前建好：面板与放射图都是同步读它的
+    await this.notes.syncMap();
     this.watchCanvas();
 
     if (this.app.workspace.layoutReady) {
@@ -152,6 +159,7 @@ export default class GoalscapePlugin extends Plugin {
   async switchGoalscape(path: string): Promise<void> {
     if (path === this.store.path) return;
     await this.store.switchTo(path);
+    await this.notes.syncMap();
     await this.persistData();
     this.refreshMapSelectors();
   }
@@ -313,25 +321,6 @@ export default class GoalscapePlugin extends Plugin {
   }
 
   /**
-   * notes 里的 `[[wikilink]]` → vault 真实路径，按目标 id 归组。
-   * 只有解析成功的才进白板：点不动的幽灵卡片比没有卡片更糟。
-   * 解析要 metadataCache，而 canvasSync 归 export 层、不许 import obsidian（分层守卫），所以停在这里。
-   */
-  private resolveNoteLinks(): ResolvedNotes {
-    const out = new Map<string, string[]>();
-    if (!this.store.scape) return out;
-    for (const n of flattenTree(this.store.scape.mainGoal)) {
-      const paths: string[] = [];
-      for (const t of parseWikiTargets(n.notes ?? "")) {
-        const dest = this.app.metadataCache.getFirstLinkpathDest(t, this.store.path);
-        if (dest && !paths.includes(dest.path)) paths.push(dest.path);
-      }
-      if (paths.length) out.set(n.id, paths);
-    }
-    return out;
-  }
-
-  /**
    * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
    * 自动路径只在"文件已存在 && 没人开着这块白板"时写。
    */
@@ -350,7 +339,7 @@ export default class GoalscapePlugin extends Plugin {
     }
 
     const json = canvasToJson(
-      refreshCanvas(scape, await this.canvasSnapshot(path), this.resolveNoteLinks())
+      refreshCanvas(scape, await this.canvasSnapshot(path), this.notes.notes)
     );
     if (file instanceof TFile) {
       const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
@@ -486,7 +475,7 @@ export default class GoalscapePlugin extends Plugin {
   private exportCsv(): void {
     const scape = this.store.scape;
     if (!scape) return;
-    const csv = exportCsv(scape, this.tone);
+    const csv = exportCsv(scape, this.tone, this.notes.notes);
     downloadText(csv, "goalscape.csv", "text/csv");
     new Notice("CSV exported");
   }
@@ -494,7 +483,7 @@ export default class GoalscapePlugin extends Plugin {
   private exportMarkdown(): void {
     const scape = this.store.scape;
     if (!scape) return;
-    const md = exportMarkdownOutline(scape);
+    const md = exportMarkdownOutline(scape, this.notes.notes);
     downloadText(md, "goalscape-outline.md", "text/markdown");
     new Notice("Markdown outline exported");
   }

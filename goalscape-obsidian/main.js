@@ -27,7 +27,7 @@ __export(main_exports, {
   default: () => GoalscapePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian12 = require("obsidian");
+var import_obsidian13 = require("obsidian");
 
 // src/data/goalTree.ts
 var import_obsidian = require("obsidian");
@@ -46,9 +46,8 @@ function createGoalNode(partial) {
     due: partial.due,
     start: partial.start,
     tags: (_c = partial.tags) != null ? _c : [],
-    notes: partial.notes,
+    note: partial.note,
     links: partial.links,
-    fields: partial.fields,
     collapsed: partial.collapsed,
     children: (_d = partial.children) != null ? _d : []
   };
@@ -98,42 +97,6 @@ function branchColors(root) {
 }
 
 // src/data/notes.ts
-function eachRealLine(md, fn) {
-  let inFence = false;
-  for (const line of md.split(/\r?\n/)) {
-    if (/^\s*(```|~~~)/.test(line)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (!inFence)
-      fn(line);
-  }
-}
-function parseWikiTargets(md) {
-  const out = [];
-  if (!md)
-    return out;
-  eachRealLine(md, (line) => {
-    for (const m of line.matchAll(/(?<!!)\[\[([^\]|#]+?)(?:#[^|]*)?(?:\|[^\]]*)?\]\]/g)) {
-      const t = m[1].trim();
-      if (t && !out.includes(t))
-        out.push(t);
-    }
-  });
-  return out;
-}
-function parseTags(md) {
-  const out = [];
-  if (!md)
-    return out;
-  eachRealLine(md, (line) => {
-    for (const m of line.matchAll(/(^|[\s(])#([\p{L}_][\p{L}\p{N}_/-]*)/gu)) {
-      if (!out.includes(m[2]))
-        out.push(m[2]);
-    }
-  });
-  return out;
-}
 function firstLine(md, max = 60) {
   if (!md)
     return "";
@@ -158,19 +121,6 @@ function backlinks(root, id) {
     var _a;
     return n.id !== id && ((_a = n.links) != null ? _a : []).includes(id);
   });
-}
-function effectiveTags(node, md) {
-  var _a;
-  const seen = new Set(node.tags.map((t) => t.toLowerCase()));
-  const out = [...node.tags];
-  for (const t of parseTags((_a = md != null ? md : node.notes) != null ? _a : "")) {
-    const k = t.toLowerCase();
-    if (seen.has(k))
-      continue;
-    seen.add(k);
-    out.push(t);
-  }
-  return out;
 }
 function pruneLinks(root) {
   const alive = new Set(flattenTree(root).map((n) => n.id));
@@ -306,6 +256,7 @@ var GoalTreeStore = class {
     (_c = node.title) != null ? _c : node.title = "Untitled";
     (_d = node.importance) != null ? _d : node.importance = 50;
     delete node.responsible;
+    delete node.fields;
     if (depth > HUE_OWNER_DEPTH)
       delete node.color;
     if (node.brightness === void 0 || !Number.isFinite(Number(node.brightness))) {
@@ -379,13 +330,295 @@ var GoalTreeStore = class {
       this.listeners.delete(fn);
     };
   }
+  /**
+   * 树没变、只是树外面的东西变了（笔记文件被改/被建/被删）：
+   * 不改数据、不落盘，只让视图重画一遍。跟 mutate 分开，免得白写一次 JSON。
+   */
+  bump() {
+    this.notify();
+  }
   notify() {
     this.listeners.forEach((l) => l());
   }
 };
 
+// src/data/noteFiles.ts
+var import_obsidian2 = require("obsidian");
+var BAD_CHARS = /[*"\\/<>:|?#^[\]]/g;
+var NAME_MAX = 60;
+var WATCH_DEBOUNCE_MS = 400;
+var GS_ID_KEY = "gsId";
+function safeName(title) {
+  const s = title.replace(BAD_CHARS, " ").replace(/\s+/g, " ").trim().slice(0, NAME_MAX).replace(/[.\s]+$/, "");
+  return s || "note";
+}
+function frontmatter(id) {
+  return `---
+${GS_ID_KEY}: ${id}
+---
+
+`;
+}
+var NoteStore = class {
+  constructor(plugin, store) {
+    this.plugin = plugin;
+    this.store = store;
+    this.index = /* @__PURE__ */ new Map();
+    this.timer = null;
+    this.watching = false;
+    /** 自己写文件时屏蔽 vault 事件，免得自己写的东西又触发一轮重读 */
+    this.writing = false;
+  }
+  get app() {
+    return this.plugin.app;
+  }
+  /** 当前索引（纯数据，视图与导出层直接读，同步的） */
+  get notes() {
+    return this.index;
+  }
+  get(id) {
+    return this.index.get(id);
+  }
+  /** 笔记目录跟图文件同级：<图名>.notes/。删图的时候它就在旁边，不会被忘掉 */
+  folderFor(mapPath) {
+    var _a;
+    const parts = mapPath.split("/");
+    const base = ((_a = parts.pop()) != null ? _a : "map").replace(new RegExp(`${escapeRe(GOALSCAPE_SUFFIX)}$`, "i"), "");
+    const dir = parts.join("/");
+    return `${dir ? `${dir}/` : ""}${base}.notes`;
+  }
+  /** 切图 / 启动后跑一次：先把旧版存在 JSON 里的正文搬进文件，再建索引 */
+  async syncMap() {
+    const migrated = await this.migrate();
+    await this.rebuild();
+    return migrated;
+  }
+  /** 全量重建索引；顺带把"文件被改名或挪走"的新路径写回树 */
+  async rebuild() {
+    const scape = this.store.scape;
+    const next = /* @__PURE__ */ new Map();
+    const moved = [];
+    if (scape) {
+      for (const n of flattenTree(scape.mainGoal)) {
+        if (!n.note)
+          continue;
+        let info = await this.readInfo(n.note);
+        if (!info) {
+          const found = this.findByGsId(n.id);
+          if (!found)
+            continue;
+          info = await this.readInfo(found);
+          if (!info)
+            continue;
+          moved.push({ id: n.id, path: found });
+        }
+        next.set(n.id, info);
+      }
+    }
+    this.index = next;
+    if (moved.length) {
+      this.store.mutate((s) => {
+        for (const m of moved) {
+          const found = findNode(s.mainGoal, m.id);
+          if (found)
+            found.node.note = m.path;
+        }
+      });
+    }
+  }
+  /**
+   * 给一个块建笔记文件，返回路径。**不改树** —— 建文件和记路径要一起落盘，
+   * 由调用方走 store.mutate，免得出现"文件建了、JSON 没记住"的半成品状态。
+   */
+  async createFor(node) {
+    const dir = this.folderFor(this.store.path);
+    await this.ensureFolder(dir);
+    const path = this.uniquePath(dir, safeName(node.title), this.takenPaths());
+    await this.writeFile(path, frontmatter(node.id));
+    return path;
+  }
+  /**
+   * 旧版把 Markdown 正文存在 JSON 的 notes 字段里，一次性搬进 .md。
+   * 顺序是"先把文件写成功、再改树"：中途炸了最多是这块还没搬，不会出现两头都没有。
+   * 返回搬了几个（空正文只删字段、不建文件，不算）。
+   */
+  async migrate() {
+    var _a;
+    const scape = this.store.scape;
+    if (!scape)
+      return 0;
+    const legacy = flattenTree(scape.mainGoal).filter((n) => typeof n.notes === "string");
+    if (!legacy.length)
+      return 0;
+    const dir = this.folderFor(this.store.path);
+    await this.ensureFolder(dir);
+    const taken = this.takenPaths();
+    const done = [];
+    let written = 0;
+    for (const n of legacy) {
+      const text = ((_a = n.notes) != null ? _a : "").trim();
+      if (!text) {
+        done.push({ id: n.id, path: "" });
+        continue;
+      }
+      const path = this.uniquePath(dir, safeName(n.title), taken);
+      taken.add(path);
+      await this.writeFile(path, `${frontmatter(n.id)}${text}
+`);
+      done.push({ id: n.id, path });
+      written++;
+    }
+    this.store.mutate((s) => {
+      for (const d of done) {
+        const found = findNode(s.mainGoal, d.id);
+        if (!found)
+          continue;
+        delete found.node.notes;
+        if (d.path)
+          found.node.note = d.path;
+      }
+    });
+    return written;
+  }
+  /** 笔记文件在 Obsidian 里被改 / 改名 / 删掉 → 去抖重建索引 → bump 让视图重画 */
+  watch() {
+    if (this.watching)
+      return;
+    this.watching = true;
+    const vault = this.app.vault;
+    this.plugin.registerEvent(vault.on("modify", (f) => f instanceof import_obsidian2.TFile && this.schedule(f)));
+    this.plugin.registerEvent(vault.on("create", (f) => f instanceof import_obsidian2.TFile && this.schedule(f)));
+    this.plugin.registerEvent(vault.on("delete", (f) => f instanceof import_obsidian2.TFile && this.schedule(f)));
+    this.plugin.registerEvent(
+      vault.on("rename", (f, oldPath) => f instanceof import_obsidian2.TFile && this.schedule(f, oldPath))
+    );
+    this.plugin.registerEvent(
+      this.app.metadataCache.on("changed", (f) => f instanceof import_obsidian2.TFile && this.schedule(f, void 0, true))
+    );
+  }
+  schedule(f, oldPath, ignoreWriting = false) {
+    if (!ignoreWriting && this.writing)
+      return;
+    if (!this.cares(f, oldPath))
+      return;
+    if (this.timer !== null)
+      window.clearTimeout(this.timer);
+    this.timer = window.setTimeout(() => {
+      this.timer = null;
+      void this.rebuild().then(() => this.store.bump());
+    }, WATCH_DEBOUNCE_MS);
+  }
+  /** 只关心自己那些笔记：用户在别的笔记里打字不该让放射图重画一遍 */
+  cares(f, oldPath) {
+    var _a, _b;
+    if (f.extension !== "md")
+      return false;
+    if (oldPath && this.indexHasPath(oldPath))
+      return true;
+    if (this.indexHasPath(f.path))
+      return true;
+    if (f.path.startsWith(`${this.folderFor(this.store.path)}/`))
+      return true;
+    const id = (_b = (_a = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter) == null ? void 0 : _b[GS_ID_KEY];
+    return typeof id === "string" && !!this.store.scape && !!findNode(this.store.scape.mainGoal, id);
+  }
+  indexHasPath(path) {
+    for (const info of this.index.values())
+      if (info.path === path)
+        return true;
+    return false;
+  }
+  takenPaths() {
+    const scape = this.store.scape;
+    const out = /* @__PURE__ */ new Set();
+    if (scape) {
+      for (const n of flattenTree(scape.mainGoal))
+        if (n.note)
+          out.add(n.note);
+    }
+    return out;
+  }
+  /** 文件名撞车就加序号：两个块都叫 "Run" 也不能指到同一个文件上 */
+  uniquePath(dir, name, taken) {
+    for (let i = 1; ; i++) {
+      const p = `${dir}/${i === 1 ? name : `${name} ${i}`}.md`;
+      if (!taken.has(p) && !this.app.vault.getAbstractFileByPath(p))
+        return p;
+    }
+  }
+  async ensureFolder(path) {
+    if (!path || this.app.vault.getAbstractFileByPath(path) instanceof import_obsidian2.TFolder)
+      return;
+    const parent = path.split("/").slice(0, -1).join("/");
+    if (parent)
+      await this.ensureFolder(parent);
+    try {
+      await this.app.vault.createFolder(path);
+    } catch (e) {
+    }
+  }
+  async writeFile(path, text) {
+    this.writing = true;
+    try {
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (f instanceof import_obsidian2.TFile)
+        await this.app.vault.modify(f, text);
+      else
+        await this.app.vault.create(path, text);
+    } finally {
+      window.setTimeout(() => this.writing = false, 500);
+    }
+  }
+  async readInfo(path) {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    if (!(f instanceof import_obsidian2.TFile) || f.extension !== "md")
+      return null;
+    const raw = await this.app.vault.cachedRead(f).catch(() => null);
+    if (raw === null)
+      return null;
+    const cache = this.app.metadataCache.getFileCache(f);
+    return { path, text: stripFrontmatter(raw, cache), links: this.resolvedLinks(f, cache) };
+  }
+  /**
+   * 正文里的 [[wikilink]] → 真实文件路径。走 metadataCache 而不是自己解析文本：
+   * 解析得到才收，指不到的（幽灵链接）不进图 —— 点不动的卡片比没有卡片更糟。
+   * cache.links 不含 ![[嵌入]]，正好符合"嵌入是内容不是关系"这条既有语义。
+   */
+  resolvedLinks(file, cache) {
+    var _a;
+    const out = [];
+    for (const l of (_a = cache == null ? void 0 : cache.links) != null ? _a : []) {
+      const dest = this.app.metadataCache.getFirstLinkpathDest(l.link, file.path);
+      if (dest && dest.path !== file.path && !out.includes(dest.path))
+        out.push(dest.path);
+    }
+    return out;
+  }
+  /** 路径失效时按 frontmatter 里的 gsId 全库找一遍：在 Obsidian 里改名/挪走是常态 */
+  findByGsId(id) {
+    var _a, _b;
+    for (const f of this.app.vault.getMarkdownFiles()) {
+      const fm = (_a = this.app.metadataCache.getFileCache(f)) == null ? void 0 : _a.frontmatter;
+      if (fm && String((_b = fm[GS_ID_KEY]) != null ? _b : "") === id)
+        return f.path;
+    }
+    return null;
+  }
+};
+function stripFrontmatter(raw, cache) {
+  var _a;
+  const pos = cache == null ? void 0 : cache.frontmatterPosition;
+  if (pos && typeof ((_a = pos.end) == null ? void 0 : _a.offset) === "number") {
+    return raw.slice(pos.end.offset).replace(/^\r?\n/, "");
+  }
+  return raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "");
+}
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 // src/views/radialView.ts
-var import_obsidian8 = require("obsidian");
+var import_obsidian9 = require("obsidian");
 
 // src/data/palette.ts
 function toneFromSliders(intensity, contrast) {
@@ -501,7 +734,7 @@ function paletteSwatches(tone = DEFAULT_TONE) {
 }
 
 // src/views/infoPanel.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/data/crud.ts
 function addGoal(scape, refId, position, title = "New Goal") {
@@ -576,8 +809,8 @@ function cloneSubtree(node) {
     start: node.start,
     tags: [...node.tags],
     color: node.color,
-    notes: node.notes,
-    fields: node.fields ? { ...node.fields } : void 0,
+    // note 不跟着复制：两个块指同一个 .md，改一个就是改另一个，而面板上看不出来。
+    // 副本要笔记就自己新建一个文件。
     collapsed: node.collapsed,
     children: node.children.map(cloneSubtree)
   });
@@ -862,7 +1095,7 @@ function progressRim(edge, progress) {
 }
 
 // src/views/promptModal.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 function promptInput(app, title, initial) {
   return new Promise((resolve) => {
     const modal = new PromptModal(app, title, initial, resolve);
@@ -895,7 +1128,7 @@ function promptPick(app, title, options) {
     modal.open();
   });
 }
-var ConfirmModal = class extends import_obsidian2.Modal {
+var ConfirmModal = class extends import_obsidian3.Modal {
   constructor(app, message, okText, onAnswer, onCancel) {
     super(app);
     this.message = message;
@@ -907,7 +1140,7 @@ var ConfirmModal = class extends import_obsidian2.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("p", { text: this.message });
-    new import_obsidian2.Setting(contentEl).addButton(
+    new import_obsidian3.Setting(contentEl).addButton(
       (btn) => btn.setButtonText(this.okText).setCta().onClick(() => {
         this.onAnswer(true);
         this.close();
@@ -924,7 +1157,7 @@ var ConfirmModal = class extends import_obsidian2.Modal {
     this.contentEl.empty();
   }
 };
-var PickModal = class extends import_obsidian2.Modal {
+var PickModal = class extends import_obsidian3.Modal {
   constructor(app, titleText, options, onPick) {
     super(app);
     this.titleText = titleText;
@@ -949,7 +1182,7 @@ var PickModal = class extends import_obsidian2.Modal {
     this.onPick(null);
   }
 };
-var PromptModal = class extends import_obsidian2.Modal {
+var PromptModal = class extends import_obsidian3.Modal {
   constructor(app, titleText, initial, onSubmit) {
     super(app);
     this.titleText = titleText;
@@ -961,7 +1194,7 @@ var PromptModal = class extends import_obsidian2.Modal {
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl("h3", { text: this.titleText });
-    new import_obsidian2.Setting(contentEl).setName("Value").addText((text) => {
+    new import_obsidian3.Setting(contentEl).setName("Value").addText((text) => {
       text.setValue(this.initial);
       text.inputEl.addEventListener("keydown", (e) => {
         if (e.key === "Enter") {
@@ -972,7 +1205,7 @@ var PromptModal = class extends import_obsidian2.Modal {
       });
       text.onChange((v) => this.value = v);
     });
-    new import_obsidian2.Setting(contentEl).addButton(
+    new import_obsidian3.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Confirm").onClick(() => {
         this.close();
         this.onSubmit(this.value);
@@ -1013,10 +1246,10 @@ var InfoPanel = class {
     this.plugin = plugin;
     this.onSelectNode = onSelectNode;
     this.nodeId = null;
-    /** notes 区双态：false = 渲染态（可点链接），true = textarea 编辑。切换选中节点即回到渲染态 */
-    this.notesEditing = false;
     /** 拖动滑杆时跳过外部触发的整面板重建，避免滑杆在拖拽中被重新创建而丢失指针 */
     this.interacting = false;
+    /** 这次按住的过程中改过数据没有：只有改过才需要在松手后补一次渲染 */
+    this.dirtyWhileInteracting = false;
     /**
      * 渲染态下挂进 MarkdownRenderer 的宿主组件。
      * 每次重建预览前先旧建新，Obsidian 靠它管理嵌入子组件的生命周期。
@@ -1032,7 +1265,6 @@ var InfoPanel = class {
   /** 切换选中节点：始终强制重建，并把 notes 打回渲染态 */
   show(nodeId) {
     this.nodeId = nodeId;
-    this.notesEditing = false;
     this.render(true);
   }
   /** 数据变更后的被动刷新：拖拽中跳过，避免打断正在交互的控件 */
@@ -1040,7 +1272,7 @@ var InfoPanel = class {
     this.render(false);
   }
   render(force) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c;
     if (this.interacting && !force)
       return;
     (_a = this.notesHost) == null ? void 0 : _a.unload();
@@ -1064,7 +1296,7 @@ var InfoPanel = class {
     const ownsHue = isMain || found.parent.id === scape.mainGoal.id;
     const isLeaf = node.children.length === 0;
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
-    new import_obsidian3.Setting(this.container).setName("Title").addText((text) => {
+    new import_obsidian4.Setting(this.container).setName("Title").addText((text) => {
       text.setValue(node.title);
       text.inputEl.addEventListener("blur", () => {
         const v = text.getValue().trim();
@@ -1073,7 +1305,7 @@ var InfoPanel = class {
       });
     });
     if (!isMain) {
-      const importance = new import_obsidian3.Setting(this.container).setName("Importance").setDesc(`${Math.round(node.importance)}% of parent arc`).addSlider((slider) => {
+      const importance = new import_obsidian4.Setting(this.container).setName("Importance").setDesc(`${Math.round(node.importance)}% of parent arc`).addSlider((slider) => {
         slider.setLimits(0, 100, 1);
         slider.setValue(Math.round(node.importance));
         slider.setDynamicTooltip();
@@ -1085,12 +1317,12 @@ var InfoPanel = class {
       this.addBandControl(importance, node);
     } else {
       this.addBandControl(
-        new import_obsidian3.Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
+        new import_obsidian4.Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
         node
       );
     }
     if (isLeaf) {
-      new import_obsidian3.Setting(this.container).setName("Progress").setDesc(`${(_b = node.progress) != null ? _b : 0}%`).addSlider((slider) => {
+      new import_obsidian4.Setting(this.container).setName("Progress").setDesc(`${(_b = node.progress) != null ? _b : 0}%`).addSlider((slider) => {
         var _a2;
         slider.setLimits(0, 100, 1);
         slider.setValue((_a2 = node.progress) != null ? _a2 : 0);
@@ -1101,9 +1333,9 @@ var InfoPanel = class {
         });
       });
     } else {
-      new import_obsidian3.Setting(this.container).setName("Progress (auto-rollup)").setDesc(`${(_c = node.progress) != null ? _c : 0}%`);
+      new import_obsidian4.Setting(this.container).setName("Progress (auto-rollup)").setDesc(`${(_c = node.progress) != null ? _c : 0}%`);
     }
-    new import_obsidian3.Setting(this.container).setName("Due date").addText((text) => {
+    new import_obsidian4.Setting(this.container).setName("Due date").addText((text) => {
       var _a2;
       text.inputEl.type = "date";
       text.setValue((_a2 = node.due) != null ? _a2 : "");
@@ -1112,7 +1344,7 @@ var InfoPanel = class {
         this.mutate((s) => this.patch(s, node.id, (n) => n.due = v || void 0));
       });
     });
-    new import_obsidian3.Setting(this.container).setName("Start date").addText((text) => {
+    new import_obsidian4.Setting(this.container).setName("Start date").addText((text) => {
       var _a2;
       text.inputEl.type = "date";
       text.setValue((_a2 = node.start) != null ? _a2 : "");
@@ -1121,7 +1353,7 @@ var InfoPanel = class {
         this.mutate((s) => this.patch(s, node.id, (n) => n.start = v || void 0));
       });
     });
-    new import_obsidian3.Setting(this.container).setName("Tags").setDesc("Comma separated, e.g. Now, Next").addText((text) => {
+    new import_obsidian4.Setting(this.container).setName("Tags").setDesc("Comma separated, e.g. Now, Next").addText((text) => {
       text.setValue(node.tags.join(", "));
       text.inputEl.addEventListener("blur", () => {
         const list = splitCsv(text.getValue());
@@ -1134,48 +1366,6 @@ var InfoPanel = class {
       this.addBrightnessControl(node);
     this.renderNotes(node);
     this.renderLinks(node);
-    this.container.createEl("h4", { text: "Custom fields" });
-    const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
-    const fields = (_d = node.fields) != null ? _d : {};
-    for (const [key, value] of Object.entries(fields)) {
-      new import_obsidian3.Setting(fieldsContainer).setName(key).addText((text) => {
-        text.setValue(value);
-        text.inputEl.addEventListener("blur", () => {
-          const v = text.getValue();
-          this.mutate(
-            (s) => this.patch(s, node.id, (n) => {
-              var _a2;
-              n.fields = { ...(_a2 = n.fields) != null ? _a2 : {}, [key]: v };
-            })
-          );
-        });
-      }).addExtraButton(
-        (btn) => btn.setIcon("trash-2").setTooltip("Remove field").onClick(() => {
-          this.mutate(
-            (s) => this.patch(s, node.id, (n) => {
-              if (!n.fields)
-                return;
-              const rest = { ...n.fields };
-              delete rest[key];
-              n.fields = rest;
-            })
-          );
-        })
-      );
-    }
-    new import_obsidian3.Setting(fieldsContainer).addButton(
-      (btn) => btn.setButtonText("Add custom field").onClick(async () => {
-        const key = await promptInput(this.plugin.app, "New field name", "");
-        if (!key || !key.trim())
-          return;
-        this.mutate(
-          (s) => this.patch(s, node.id, (n) => {
-            var _a2;
-            n.fields = { ...(_a2 = n.fields) != null ? _a2 : {}, [key.trim()]: "" };
-          })
-        );
-      })
-    );
   }
   /**
    * 环带厚度四档，挂在 Importance 行的右边（中心盘没有 Importance 行，给它独立的 Hub size）。
@@ -1194,7 +1384,7 @@ var InfoPanel = class {
         btn.setAttr("aria-pressed", "true");
       }
       btn.setAttr("aria-label", BAND_LABELS[i]);
-      (0, import_obsidian3.setTooltip)(btn, BAND_LABELS[i], { placement: "top" });
+      (0, import_obsidian4.setTooltip)(btn, BAND_LABELS[i], { placement: "top" });
       btn.createEl("i").style.height = `${Math.max(3, Math.round(8 * step))}px`;
       btn.addEventListener("click", () => {
         this.mutate((s) => {
@@ -1215,7 +1405,7 @@ var InfoPanel = class {
    */
   addHueControls(node, isHub) {
     var _a;
-    new import_obsidian3.Setting(this.container).setName(isHub ? "Hub color" : "Branch color").setDesc(isHub ? "Center disc only \xB7 Subgoals keep their own hue" : "Applies to this whole branch \xB7 Empty = default green").addText((text) => {
+    new import_obsidian4.Setting(this.container).setName(isHub ? "Hub color" : "Branch color").setDesc(isHub ? "Center disc only \xB7 Subgoals keep their own hue" : "Applies to this whole branch \xB7 Empty = default green").addText((text) => {
       var _a2;
       text.inputEl.placeholder = "#4ade80";
       text.setValue((_a2 = node.color) != null ? _a2 : "");
@@ -1223,7 +1413,7 @@ var InfoPanel = class {
         var _a3;
         const norm = normalizeHex(text.getValue());
         if (norm === null) {
-          new import_obsidian3.Notice("Color must be empty or a hex value like #4ade80");
+          new import_obsidian4.Notice("Color must be empty or a hex value like #4ade80");
           text.setValue((_a3 = node.color) != null ? _a3 : "");
           return;
         }
@@ -1257,7 +1447,7 @@ var InfoPanel = class {
   }
   /** 三级往内不能选色系，这里换成明度偏移：0 即所属分支的默认色 */
   addBrightnessControl(node) {
-    new import_obsidian3.Setting(this.container).setName("Brightness").setDesc("Hue comes from its branch \xB7 0 = default, -20 darker, +20 lighter").addSlider((slider) => {
+    new import_obsidian4.Setting(this.container).setName("Brightness").setDesc("Hue comes from its branch \xB7 0 = default, -20 darker, +20 lighter").addSlider((slider) => {
       var _a;
       slider.setLimits(-20, 20, 1);
       slider.setValue((_a = node.brightness) != null ? _a : 0);
@@ -1275,54 +1465,76 @@ var InfoPanel = class {
       });
     });
   }
-  /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
+  /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后只在真的改过数据时补一次渲染 */
   trackInteraction(el) {
     el.addEventListener("pointerdown", () => {
       this.interacting = true;
+      this.dirtyWhileInteracting = false;
       const end = () => {
         this.interacting = false;
         window.removeEventListener("pointerup", end);
-        this.render(true);
+        if (this.dirtyWhileInteracting)
+          setTimeout(() => this.render(true), 0);
       };
       window.addEventListener("pointerup", end);
     });
   }
   /**
-   * Notes 双态区：默认渲染态用原生 MarkdownRenderer 出 —— `[[链接]]` 可点、
-   * `#tag` 可点、`![[嵌入]]` 能渲染，悬浮 preview 白拿。点 "Edit" 切回 textarea，
-   * blur 落盘（落盘时机不变，不做自动保存）。sourcePath 传当前图文件路径，
-   * 相对链接才按这张图所在位置解析。
+   * Notes 区：正文只活在这个块的 .md 文件里，面板不再自己造编辑器 ——
+   * 渲染态用原生 MarkdownRenderer（`[[链接]]` 可点、`![[嵌入]]` 能渲染、悬浮 preview 白拿），
+   * 撰写一键交给 Obsidian 自己的编辑器，于是补全、反链面板、全局搜索、关系图谱全是白拿的，
+   * 插件不必去追编辑器那一大套功能。sourcePath 传笔记自己的路径，相对链接才按笔记所在位置解析。
    */
   renderNotes(node) {
-    var _a;
+    const note = this.plugin.notes.get(node.id);
     const head = this.container.createDiv({ cls: "goalscape-panel-label goalscape-notes-head" });
     head.createSpan({ text: "Notes" });
-    const toggle = head.createEl("button", {
+    const btn = head.createEl("button", {
       cls: "goalscape-notes-toggle",
-      text: this.notesEditing ? "Done" : "Edit"
+      text: note ? "Open note" : "New note"
     });
-    this.trackInteraction(toggle);
-    toggle.addEventListener("click", () => {
-      this.notesEditing = !this.notesEditing;
-      this.render(true);
-    });
-    if (this.notesEditing) {
-      const area = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
-      area.value = (_a = node.notes) != null ? _a : "";
-      area.addEventListener("blur", () => {
-        const v = area.value;
-        this.mutate((s) => this.patch(s, node.id, (n) => n.notes = v || void 0));
-      });
-      return;
-    }
+    if (note)
+      btn.title = note.path;
+    this.trackInteraction(btn);
+    btn.addEventListener("click", () => void this.openNote(node));
     const body = this.container.createDiv({ cls: "goalscape-notes-render" });
-    if (!node.notes || !node.notes.trim()) {
-      body.createDiv({ cls: "goalscape-panel-empty", text: "No notes yet." });
+    if (!note) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "No note file yet." });
       return;
     }
-    const host = new import_obsidian3.Component();
+    if (!note.text.trim()) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "Note is empty." });
+      return;
+    }
+    const host = new import_obsidian4.Component();
     this.notesHost = host;
-    void import_obsidian3.MarkdownRenderer.render(this.plugin.app, node.notes, body, this.plugin.store.path, host);
+    void import_obsidian4.MarkdownRenderer.render(this.plugin.app, note.text, body, note.path, host);
+  }
+  /**
+   * 打开这个块的笔记；还没有文件就先建一个再打开。
+   * 建文件只发生在这里（用户点了这一下）和迁移旧数据时 —— 插件绝不主动往 vault 里扔空笔记。
+   */
+  async openNote(node) {
+    var _a, _b;
+    const app = this.plugin.app;
+    let path = (_b = (_a = this.plugin.notes.get(node.id)) == null ? void 0 : _a.path) != null ? _b : node.note;
+    if (!path) {
+      try {
+        path = await this.plugin.notes.createFor(node);
+      } catch (err) {
+        new import_obsidian4.Notice(`Goalscape: \u5EFA\u7B14\u8BB0\u5931\u8D25 ${err.message}`);
+        return;
+      }
+      const created = path;
+      this.mutate((s) => this.patch(s, node.id, (n) => n.note = created));
+      await this.plugin.notes.rebuild();
+      this.plugin.store.bump();
+    }
+    const file = app.vault.getAbstractFileByPath(path);
+    if (file instanceof import_obsidian4.TFile)
+      await app.workspace.getLeaf(false).openFile(file);
+    else
+      new import_obsidian4.Notice(`Goalscape: \u627E\u4E0D\u5230\u7B14\u8BB0\u6587\u4EF6 ${path}`);
   }
   /**
    * 块间链接：Linked goals（本块 links 指向的）+ Referenced by（反向现扫，不存第二份）。
@@ -1361,7 +1573,7 @@ var InfoPanel = class {
       const used = /* @__PURE__ */ new Set([node.id, ...(_a2 = node.links) != null ? _a2 : []]);
       const options = flattenTree(scape.mainGoal).filter((n) => !used.has(n.id)).map((n) => ({ id: n.id, label: n.title }));
       if (!options.length) {
-        new import_obsidian3.Notice("No other goals to link.");
+        new import_obsidian4.Notice("No other goals to link.");
         return;
       }
       const picked = await promptPick(this.plugin.app, "Link to goal", options);
@@ -1399,6 +1611,8 @@ var InfoPanel = class {
     }
   }
   mutate(fn) {
+    if (this.interacting)
+      this.dirtyWhileInteracting = true;
     this.plugin.store.mutate(fn);
   }
   setColor(node, color) {
@@ -1414,7 +1628,7 @@ var InfoPanel = class {
 };
 
 // src/views/focusFilter.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 function isCriteriaEmpty(c) {
   return !c.tag && c.minProgress === void 0 && c.maxProgress === void 0 && !c.color && !c.dueBefore && !c.dueAfter;
 }
@@ -1453,8 +1667,8 @@ var FocusFilter = class {
     this.buttonEl = container.createEl("button", { cls: "goalscape-filter-btn" });
     this.buttonEl.setAttr("aria-label", "Focus filter");
     this.buttonEl.setAttr("aria-expanded", "false");
-    (0, import_obsidian4.setIcon)(this.buttonEl, "list-filter");
-    (0, import_obsidian4.setTooltip)(this.buttonEl, "Focus filter", { placement: "bottom" });
+    (0, import_obsidian5.setIcon)(this.buttonEl, "list-filter");
+    (0, import_obsidian5.setTooltip)(this.buttonEl, "Focus filter", { placement: "bottom" });
     this.panelEl = container.createDiv({ cls: "goalscape-filter-popover" });
     this.panelEl.hide();
     this.buttonEl.addEventListener("click", () => this.toggle());
@@ -1541,7 +1755,7 @@ var FocusFilter = class {
 };
 
 // src/views/radialDrag.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 var WeightDragController = class {
   constructor(store, surface) {
     this.store = store;
@@ -1634,7 +1848,7 @@ var _ReparentDragController = class _ReparentDragController {
           ok = moveGoal(s, drag.nodeId, targetId);
         });
         if (!ok)
-          new import_obsidian5.Notice("Cannot move goal there (cycle or same parent)");
+          new import_obsidian6.Notice("Cannot move goal there (cycle or same parent)");
       }
       this.surface.render();
     };
@@ -1664,7 +1878,7 @@ _ReparentDragController.ACTIVATE_PX = 8;
 var ReparentDragController = _ReparentDragController;
 
 // src/views/radialMenu.ts
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 var SubtreeClipboard = class {
   constructor() {
     this.subtree = null;
@@ -1698,7 +1912,7 @@ async function confirmDeleteGoal(app, node) {
 }
 function buildGoalMenu(deps) {
   const { app, store, clipboard, node, isMain, onDeleted } = deps;
-  const menu = new import_obsidian6.Menu();
+  const menu = new import_obsidian7.Menu();
   if (node.children.length) {
     menu.addItem(
       (item) => item.setTitle(node.collapsed ? "Expand" : "Collapse").setIcon(node.collapsed ? "unfold-vertical" : "fold-vertical").onClick(() => {
@@ -1764,7 +1978,7 @@ function buildGoalMenu(deps) {
           return;
         clipboard.set(extracted, "cut");
         store.mutate((s) => deleteGoal(s, node.id));
-        new import_obsidian6.Notice("Goal cut to clipboard");
+        new import_obsidian7.Notice("Goal cut to clipboard");
       })
     );
     menu.addItem(
@@ -1773,7 +1987,7 @@ function buildGoalMenu(deps) {
         if (!extracted)
           return;
         clipboard.set(extracted, "copy");
-        new import_obsidian6.Notice("Goal copied to clipboard");
+        new import_obsidian7.Notice("Goal copied to clipboard");
       })
     );
   }
@@ -1818,7 +2032,7 @@ var VIEW_OPTIONS = [
 ];
 
 // src/views/viewSwitcher.ts
-var import_obsidian7 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 function createViewSwitcher(container, plugin, leaf, currentType) {
   var _a;
   const group = container.createDiv({ cls: "goalscape-view-switch" });
@@ -1834,8 +2048,8 @@ function createViewSwitcher(container, plugin, leaf, currentType) {
     }
     if (option.type === VIEW_CANVAS)
       btn.toggleClass("is-stale", plugin.canvasStale);
-    (0, import_obsidian7.setIcon)(btn, option.icon);
-    (0, import_obsidian7.setTooltip)(btn, (_a = option.hint) != null ? _a : option.label, { placement: "bottom" });
+    (0, import_obsidian8.setIcon)(btn, option.icon);
+    (0, import_obsidian8.setTooltip)(btn, (_a = option.hint) != null ? _a : option.label, { placement: "bottom" });
     btn.addEventListener("click", () => {
       if (option.type === currentType)
         return;
@@ -1855,7 +2069,7 @@ function scapeName(path) {
 }
 var viewSeq = 0;
 var PAN_ACTIVATE_PX = 5;
-var RadialGoalMapView = class extends import_obsidian8.ItemView {
+var RadialGoalMapView = class extends import_obsidian9.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1946,7 +2160,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.mapButton.empty();
     this.mapButton.createSpan({ cls: "goalscape-map-name", text: scapeName(current) });
     const chevron = this.mapButton.createSpan({ cls: "goalscape-map-chevron" });
-    (0, import_obsidian8.setIcon)(chevron, "chevron-down");
+    (0, import_obsidian9.setIcon)(chevron, "chevron-down");
     this.mapButton.setAttr("title", current);
   }
   showMapMenu(event) {
@@ -1954,7 +2168,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     const paths = this.plugin.listGoalscapes();
     if (!paths.includes(current))
       paths.unshift(current);
-    const menu = new import_obsidian8.Menu();
+    const menu = new import_obsidian9.Menu();
     for (const p of paths) {
       menu.addItem(
         (item) => item.setTitle(scapeName(p)).setIcon("target").setChecked(p === current).onClick(() => void this.plugin.switchGoalscape(p))
@@ -1987,7 +2201,7 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
     this.gradSeq = 0;
     const fills = branchFills(scape.mainGoal, this.plugin.tone);
     const drawNode = (node, depth, startAngle, endAngle, rInner, parentAngles) => {
-      var _a, _b, _c, _d, _e, _f;
+      var _a, _b, _c, _d, _e, _f, _g;
       const span = endAngle - startAngle;
       if (span <= 5e-4)
         return;
@@ -2029,15 +2243,15 @@ var RadialGoalMapView = class extends import_obsidian8.ItemView {
         this.reparentDrag.start(e, node.id);
       });
       const tip = document.createElementNS(SVG_NS, "title");
-      const summary = firstLine((_a = node.notes) != null ? _a : "");
-      tip.textContent = summary ? `${node.title} \xB7 ${(_b = node.progress) != null ? _b : 0}%
-${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
+      const summary = firstLine((_b = (_a = this.plugin.notes.get(node.id)) == null ? void 0 : _a.text) != null ? _b : "");
+      tip.textContent = summary ? `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%
+${summary}` : `${node.title} \xB7 ${(_d = node.progress) != null ? _d : 0}%`;
       path.appendChild(tip);
       map.appendChild(path);
       const bevel = bevelArc(edge);
       if (bevel)
         this.addOverlay(map, bevel, dim, ["goalscape-bevel"]);
-      const rim = progressRim(edge, (_d = node.progress) != null ? _d : 0);
+      const rim = progressRim(edge, (_e = node.progress) != null ? _e : 0);
       if (rim) {
         this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
           stroke: ink.fill,
@@ -2049,10 +2263,10 @@ ${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
         const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
         title.textContent = node.title;
         const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${(_e = node.progress) != null ? _e : 0}%`;
+        pct.textContent = `${(_f = node.progress) != null ? _f : 0}%`;
       } else {
         const rMid = (edge.rInner + edge.rOuter) / 2;
-        const fit = fitLabel(node.title, edge, `${(_f = node.progress) != null ? _f : 0}%`);
+        const fit = fitLabel(node.title, edge, `${(_g = node.progress) != null ? _g : 0}%`);
         if (fit) {
           const lx = CX + Math.cos(midAngle) * rMid;
           const ly = CY + Math.sin(midAngle) * rMid;
@@ -2224,7 +2438,7 @@ ${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
    * 弦线：三次 bezier、两控制点钉在图心（弧线向圆心下垂），描边渐变取两端各自的底色。
    */
   drawLinkDecorations(svg, defs, scape, fills) {
-    var _a, _b, _c, _d;
+    var _a, _b, _c, _d, _e;
     if (!this.selectedId)
       return;
     const found = findNode(scape.mainGoal, this.selectedId);
@@ -2291,12 +2505,13 @@ ${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
         layer.appendChild(dot);
       }
     }
-    const hits = [];
-    for (const t of parseWikiTargets((_d = found.node.notes) != null ? _d : "")) {
-      const f = this.app.metadataCache.getFirstLinkpathDest(t, this.plugin.store.path);
-      if (f)
-        hits.push({ link: t, name: f.basename });
-    }
+    const hits = ((_e = (_d = this.plugin.notes.get(found.node.id)) == null ? void 0 : _d.links) != null ? _e : []).map((p) => {
+      var _a2;
+      return {
+        path: p,
+        name: ((_a2 = p.split("/").pop()) != null ? _a2 : p).replace(/\.md$/i, "")
+      };
+    });
     if (!hits.length)
       return;
     const mid = (mine.startAngle + mine.endAngle) / 2;
@@ -2321,11 +2536,11 @@ ${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
       name.textContent = item.name.length > 12 ? `${item.name.slice(0, 11)}\u2026` : item.name;
       g.appendChild(name);
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = item.link;
+      tip.textContent = item.path;
       g.appendChild(tip);
       g.addEventListener("click", (e) => {
         e.stopPropagation();
-        void this.app.workspace.openLinkText(item.link, this.plugin.store.path, true);
+        void this.app.workspace.openLinkText(item.path, item.path, true);
       });
       svg.appendChild(g);
     });
@@ -2409,8 +2624,8 @@ ${summary}` : `${node.title} \xB7 ${(_c = node.progress) != null ? _c : 0}%`;
 };
 
 // src/views/listView.ts
-var import_obsidian9 = require("obsidian");
-var GoalListView = class extends import_obsidian9.ItemView {
+var import_obsidian10 = require("obsidian");
+var GoalListView = class extends import_obsidian10.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -2536,12 +2751,12 @@ var GoalListView = class extends import_obsidian9.ItemView {
 };
 
 // src/views/ganttView.ts
-var import_obsidian10 = require("obsidian");
+var import_obsidian11 = require("obsidian");
 var DAY_MS = 864e5;
 var BAR_HEIGHT = 22;
 var ROW_GAP = 4;
 var LABEL_WIDTH = 180;
-var GanttView = class extends import_obsidian10.ItemView {
+var GanttView = class extends import_obsidian11.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -2804,8 +3019,8 @@ var TEMPLATES = [
 ];
 
 // src/settingsTab.ts
-var import_obsidian11 = require("obsidian");
-var GoalscapeSettingTab = class extends import_obsidian11.PluginSettingTab {
+var import_obsidian12 = require("obsidian");
+var GoalscapeSettingTab = class extends import_obsidian12.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2814,14 +3029,14 @@ var GoalscapeSettingTab = class extends import_obsidian11.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Goalscape \u989C\u8272\u57FA\u8C03" });
-    new import_obsidian11.Setting(containerEl).setName("Colour intensity").setDesc("\u67D4\u548C \u2190\u2192 \u6D53\u8273\u3002\u6574\u5F20\u56FE\u6240\u6709\u989C\u8272\u7684\u9971\u548C\u5EA6\u4E00\u8D77\u7F29\u653E\uFF0C\u9009\u7684\u989C\u8272\u672C\u8EAB\u4E0D\u53D8\u3002").addSlider(
+    new import_obsidian12.Setting(containerEl).setName("Colour intensity").setDesc("\u67D4\u548C \u2190\u2192 \u6D53\u8273\u3002\u6574\u5F20\u56FE\u6240\u6709\u989C\u8272\u7684\u9971\u548C\u5EA6\u4E00\u8D77\u7F29\u653E\uFF0C\u9009\u7684\u989C\u8272\u672C\u8EAB\u4E0D\u53D8\u3002").addSlider(
       (s) => s.setLimits(0, 100, 1).setValue(this.plugin.toneSettings.intensity).setDynamicTooltip().onChange((v) => this.apply({ intensity: v }))
     );
-    new import_obsidian11.Setting(containerEl).setName("Level contrast").setDesc("\u5C42\u6B21\u5E73\u7F13 \u2190\u2192 \u5C42\u6B21\u5206\u660E\u3002\u63A7\u5236\u5F80\u5916\u4E00\u5708\u6BD4\u5185\u5708\u4EAE\u591A\u5C11\uFF0C\u8DDF\u989C\u8272\u672C\u8EAB\u65E0\u5173\u3002").addSlider(
+    new import_obsidian12.Setting(containerEl).setName("Level contrast").setDesc("\u5C42\u6B21\u5E73\u7F13 \u2190\u2192 \u5C42\u6B21\u5206\u660E\u3002\u63A7\u5236\u5F80\u5916\u4E00\u5708\u6BD4\u5185\u5708\u4EAE\u591A\u5C11\uFF0C\u8DDF\u989C\u8272\u672C\u8EAB\u65E0\u5173\u3002").addSlider(
       (s) => s.setLimits(0, 100, 1).setValue(this.plugin.toneSettings.contrast).setDynamicTooltip().onChange((v) => this.apply({ contrast: v }))
     );
     containerEl.createEl("h2", { text: "\u767D\u677F (.canvas)" });
-    new import_obsidian11.Setting(containerEl).setName("\u81EA\u52A8\u66F4\u65B0\u767D\u677F").setDesc(
+    new import_obsidian12.Setting(containerEl).setName("\u81EA\u52A8\u66F4\u65B0\u767D\u677F").setDesc(
       "\u6539\u5B8C\u76EE\u6807\u5C31\u81EA\u52A8\u628A\u540C\u540D .canvas \u5237\u65B0\uFF0C\u4E0D\u7528\u624B\u70B9\u5BFC\u51FA\u3002\u767D\u677F\u6807\u7B7E\u9875\u5F00\u7740\u65F6\u4F1A\u5148\u7B49\u5F85\uFF08\u8FD9\u65F6\u786C\u5199\u4F1A\u628A\u4F60\u5728\u770B\u7684\u5185\u5BB9\u76D6\u6389\uFF09\uFF0C\u5C0F\u5706\u70B9\u8868\u793A\u8FD8\u6B20\u4E00\u6B21\u66F4\u65B0\uFF0C\u5173\u6389\u6807\u7B7E\u9875\u5C31\u8865\u4E0A\u3002\u767D\u677F\u6587\u4EF6\u4E0D\u5B58\u5728\u65F6\u4E0D\u4F1A\u51ED\u7A7A\u521B\u5EFA\u3002"
     ).addToggle((t) => t.setValue(this.plugin.canvasAuto).onChange((v) => this.plugin.setCanvasAuto(v)));
   }
@@ -2876,35 +3091,32 @@ var FILE_OUT = 300;
 var FILE_SIDE_STEP = 170;
 var FILE_W = 260;
 var FILE_H = 120;
-function cardLines(node) {
+function cardLines(node, note) {
   var _a, _b;
   const lines = [
     `**${node.title}**`,
     `\u5360\u7236\u7EA7 ${node.importance}% \xB7 \u8FDB\u5EA6 ${(_a = node.progress) != null ? _a : 0}%`
   ];
-  const tags = effectiveTags(node);
-  if (tags.length)
-    lines.push(tags.map((t) => `#${t}`).join(" "));
-  const summary = firstLine((_b = node.notes) != null ? _b : "");
+  const summary = firstLine((_b = note == null ? void 0 : note.text) != null ? _b : "");
   if (summary)
     lines.push(summary);
   return lines;
 }
-function buildCanvas(scape, resolved) {
+function buildCanvas(scape, notes) {
   const nodes = [];
   const edges = [];
   const parentOf = /* @__PURE__ */ new Map();
   const R = 600;
   const live = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
   function walk(node, depth, startAngle, endAngle, rInner, parentId) {
-    var _a, _b, _c;
+    var _a, _b, _c, _d;
     const mid = (startAngle + endAngle) / 2;
     const rOuter = rInner + bandScaleOf(node) * R;
     const radius = depth === 0 ? 0 : (rInner + rOuter) / 2;
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
-    const lines = cardLines(node);
+    const lines = cardLines(node, notes == null ? void 0 : notes.get(id));
     nodes.push({
       id,
       type: "text",
@@ -2922,7 +3134,7 @@ function buildCanvas(scape, resolved) {
       edges.push({ id: generatedEdgeId(id), fromNode: parentId, toNode: id });
       parentOf.set(id, parentId);
     }
-    const files = resolved == null ? void 0 : resolved.get(id);
+    const files = (_b = notes == null ? void 0 : notes.get(id)) == null ? void 0 : _b.links;
     if (files == null ? void 0 : files.length) {
       const len = Math.hypot(x, y);
       const ux = len > 1 ? x / len : 1;
@@ -2951,7 +3163,7 @@ function buildCanvas(scape, resolved) {
         parentOf.set(fid, id);
       });
     }
-    for (const to of (_b = node.links) != null ? _b : []) {
+    for (const to of (_c = node.links) != null ? _c : []) {
       if (!live.has(to))
         continue;
       edges.push({
@@ -2959,7 +3171,7 @@ function buildCanvas(scape, resolved) {
         fromNode: id,
         toNode: to,
         label: "\u{1F517}",
-        color: progressToPreset((_c = node.progress) != null ? _c : 0)
+        color: progressToPreset((_d = node.progress) != null ? _d : 0)
       });
     }
     const shares = childShares(node);
@@ -3036,9 +3248,9 @@ function placeNewCard(card, parent, occupied) {
 function isGeneratedEdge(id) {
   return /^(e|x|n)-/.test(id);
 }
-function refreshCanvas(scape, existing, resolved) {
+function refreshCanvas(scape, existing, notes) {
   var _a;
-  const { doc: fresh, parentOf } = buildCanvas(scape, resolved);
+  const { doc: fresh, parentOf } = buildCanvas(scape, notes);
   if (!existing)
     return fresh;
   const liveIds = new Set(flattenTree(scape.mainGoal).map((n) => n.id));
@@ -3179,14 +3391,14 @@ async function exportPng(svgEl, scale = 2) {
     canvas.toBlob((b) => b ? resolve(b) : reject(new Error("toBlob failed")), "image/png");
   });
 }
-function exportCsv(scape, tone = DEFAULT_TONE) {
+function exportCsv(scape, tone = DEFAULT_TONE, notes) {
   const rows = [
-    ["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle", "Notes", "Links"]
+    ["Title", "Importance", "Progress", "Due", "Start", "Tags", "Color", "Depth", "ParentTitle", "Notes", "NoteFile", "Links"]
   ];
   const fills = branchFills(scape.mainGoal, tone);
   const titles = titleIndex(scape);
   const walk = (node, depth, parentTitle) => {
-    var _a, _b, _c, _d, _e;
+    var _a, _b, _c, _d, _e, _f, _g, _h;
     rows.push([
       node.title,
       String(node.importance),
@@ -3197,7 +3409,8 @@ function exportCsv(scape, tone = DEFAULT_TONE) {
       (_d = fills.get(node.id)) != null ? _d : "",
       String(depth),
       parentTitle,
-      firstLine((_e = node.notes) != null ? _e : ""),
+      firstLine((_f = (_e = notes == null ? void 0 : notes.get(node.id)) == null ? void 0 : _e.text) != null ? _f : ""),
+      (_h = (_g = notes == null ? void 0 : notes.get(node.id)) == null ? void 0 : _g.path) != null ? _h : "",
       linkTitles(node, titles).join("; ")
     ]);
     for (const c of node.children)
@@ -3219,7 +3432,7 @@ function csvEscape(val) {
   }
   return val;
 }
-function exportMarkdownOutline(scape) {
+function exportMarkdownOutline(scape, notes) {
   const lines = [];
   const titles = titleIndex(scape);
   const walk = (node, depth) => {
@@ -3227,8 +3440,11 @@ function exportMarkdownOutline(scape) {
     const indent = "  ".repeat(depth);
     const prog = node.children.length ? `(auto: ${(_a = node.progress) != null ? _a : 0}%)` : `(${(_b = node.progress) != null ? _b : 0}%)`;
     lines.push(`${indent}- **${node.title}** ${prog} [w:${node.importance}]`);
-    const summary = firstLine((_c = node.notes) != null ? _c : "");
-    if (summary)
+    const note = notes == null ? void 0 : notes.get(node.id);
+    const summary = firstLine((_c = note == null ? void 0 : note.text) != null ? _c : "");
+    if (note)
+      lines.push(`${indent}  [[${note.path.replace(/\.md$/, "")}|${summary || "\u7B14\u8BB0"}]]`);
+    else if (summary)
       lines.push(`${indent}  ${summary}`);
     const links = linkTitles(node, titles);
     if (links.length)
@@ -3258,7 +3474,7 @@ var CANVAS_DEBOUNCE_MS = 800;
 var CANVAS_WRITE_RETRY = 3;
 var CANVAS_WRITE_SETTLE_MS = 150;
 var CANVAS_SETTLE_MS = 1e3;
-var GoalscapePlugin = class extends import_obsidian12.Plugin {
+var GoalscapePlugin = class extends import_obsidian13.Plugin {
   constructor() {
     super(...arguments);
     /** 子树剪贴板随插件存活，放射图标签页之间共享 */
@@ -3284,6 +3500,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     this.toneSettings = { ...this.toneSettings, ...(_a = saved == null ? void 0 : saved.tone) != null ? _a : {} };
     this.canvasAuto = (_b = saved == null ? void 0 : saved.canvasAuto) != null ? _b : true;
     this.store = new GoalTreeStore(this, (saved == null ? void 0 : saved.currentPath) || DEFAULT_GOALSCAPE_PATH);
+    this.notes = new NoteStore(this, this.store);
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
     this.registerView(VIEW_GANTT, (leaf) => new GanttView(leaf, this));
@@ -3304,7 +3521,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     this.addCommand({ id: "apply-template", name: "Apply template (replace current goals)", callback: () => this.showTemplateModal() });
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu, file) => {
-        if (!(file instanceof import_obsidian12.TFolder))
+        if (!(file instanceof import_obsidian13.TFolder))
           return;
         menu.addItem(
           (item) => item.setTitle("New goalscape").setIcon("target").onClick(() => void this.promptNewGoalscape())
@@ -3312,6 +3529,8 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       })
     );
     await this.store.load();
+    this.notes.watch();
+    await this.notes.syncMap();
     this.watchCanvas();
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);
@@ -3341,7 +3560,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
   async openSourceFile() {
     const file = this.store.file;
     if (!file) {
-      new import_obsidian12.Notice("Goalscape source file not found");
+      new import_obsidian13.Notice("Goalscape source file not found");
       return;
     }
     const leaf = this.app.workspace.getLeaf("tab");
@@ -3356,6 +3575,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     if (path === this.store.path)
       return;
     await this.store.switchTo(path);
+    await this.notes.syncMap();
     await this.persistData();
     this.refreshMapSelectors();
   }
@@ -3367,7 +3587,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     const safe = name.replace(/[\\/:*?"<>|]/g, "").trim() || "Goalscape";
     const path = `${GOALSCAPE_FOLDER}/${safe}${GOALSCAPE_SUFFIX}`;
     if (await this.app.vault.adapter.exists(path)) {
-      new import_obsidian12.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
+      new import_obsidian13.Notice(`\u5DF2\u5B58\u5728\u540C\u540D goalscape\uFF1A${safe}`);
       await this.switchGoalscape(path);
       return;
     }
@@ -3493,30 +3713,8 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
   /** 白板快照：内存优先（实测它领先磁盘几十秒），但只有真加载出卡片才算可信，否则退回磁盘 */
   async canvasSnapshot(canvasPath) {
     const leaf = this.canvasOpenLeaves(canvasPath)[0];
-    const disk = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile ? parseCanvasJson(await this.app.vault.adapter.read(canvasPath).catch(() => "")) : null;
+    const disk = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian13.TFile ? parseCanvasJson(await this.app.vault.adapter.read(canvasPath).catch(() => "")) : null;
     return trustedSnapshot(this.liveCanvasDoc(leaf), disk);
-  }
-  /**
-   * notes 里的 `[[wikilink]]` → vault 真实路径，按目标 id 归组。
-   * 只有解析成功的才进白板：点不动的幽灵卡片比没有卡片更糟。
-   * 解析要 metadataCache，而 canvasSync 归 export 层、不许 import obsidian（分层守卫），所以停在这里。
-   */
-  resolveNoteLinks() {
-    var _a;
-    const out = /* @__PURE__ */ new Map();
-    if (!this.store.scape)
-      return out;
-    for (const n of flattenTree(this.store.scape.mainGoal)) {
-      const paths = [];
-      for (const t of parseWikiTargets((_a = n.notes) != null ? _a : "")) {
-        const dest = this.app.metadataCache.getFirstLinkpathDest(t, this.store.path);
-        if (dest && !paths.includes(dest.path))
-          paths.push(dest.path);
-      }
-      if (paths.length)
-        out.set(n.id, paths);
-    }
-    return out;
   }
   /**
    * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
@@ -3528,7 +3726,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       return;
     const path = this.canvasPathFor();
     const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian12.TFile) && !explicit)
+    if (!(file instanceof import_obsidian13.TFile) && !explicit)
       return;
     const open = this.canvasOpenLeaves(path);
     if (!explicit && open.length) {
@@ -3537,15 +3735,15 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       return;
     }
     const json = canvasToJson(
-      refreshCanvas(scape, await this.canvasSnapshot(path), this.resolveNoteLinks())
+      refreshCanvas(scape, await this.canvasSnapshot(path), this.notes.notes)
     );
-    if (file instanceof import_obsidian12.TFile) {
+    if (file instanceof import_obsidian13.TFile) {
       const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
       if (disk === json.trim()) {
         this.canvasPending = null;
         this.paintCanvasBadges();
         if (explicit) {
-          new import_obsidian12.Notice(`\u767D\u677F\u5DF2\u662F\u6700\u65B0\uFF1A${path}`);
+          new import_obsidian13.Notice(`\u767D\u677F\u5DF2\u662F\u6700\u65B0\uFF1A${path}`);
           await this.openCanvasFile(path);
         }
         return;
@@ -3565,7 +3763,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     this.paintCanvasBadges();
     if (!explicit)
       return;
-    new import_obsidian12.Notice(written ? `\u767D\u677F\u5DF2\u66F4\u65B0\uFF1A${path}` : `\u767D\u677F\u5199\u5165\u5931\u8D25\uFF1A${path}`);
+    new import_obsidian13.Notice(written ? `\u767D\u677F\u5DF2\u66F4\u65B0\uFF1A${path}` : `\u767D\u677F\u5199\u5165\u5931\u8D25\uFF1A${path}`);
     await this.openCanvasFile(path);
   }
   /**
@@ -3576,7 +3774,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
     for (let i = 0; i < CANVAS_WRITE_RETRY; i++) {
       const f = this.app.vault.getAbstractFileByPath(path);
       try {
-        if (f instanceof import_obsidian12.TFile)
+        if (f instanceof import_obsidian13.TFile)
           await this.app.vault.modify(f, json);
         else
           await this.app.vault.create(path, json);
@@ -3612,7 +3810,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
    */
   async openCanvas() {
     const canvasPath = this.canvasPathFor();
-    const exists = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian12.TFile;
+    const exists = this.app.vault.getAbstractFileByPath(canvasPath) instanceof import_obsidian13.TFile;
     if (exists) {
       const open = this.canvasOpenLeaves(canvasPath);
       if (open.length) {
@@ -3627,8 +3825,8 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
   }
   async openCanvasFile(canvasPath) {
     const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (!(file instanceof import_obsidian12.TFile)) {
-      new import_obsidian12.Notice(`Canvas file not found: ${canvasPath}`);
+    if (!(file instanceof import_obsidian13.TFile)) {
+      new import_obsidian13.Notice(`Canvas file not found: ${canvasPath}`);
       return;
     }
     const opened = this.app.workspace.getLeavesOfType("canvas").find((leaf2) => {
@@ -3646,7 +3844,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
   getRadialSvg() {
     const view = this.radialViews()[0];
     if (!view) {
-      new import_obsidian12.Notice("Open the radial view first");
+      new import_obsidian13.Notice("Open the radial view first");
       return null;
     }
     return view.getSvg();
@@ -3657,7 +3855,7 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       return;
     const blob = await exportPng(svg);
     downloadBlob(blob, "goalscape.png");
-    new import_obsidian12.Notice("PNG exported");
+    new import_obsidian13.Notice("PNG exported");
   }
   exportSvg() {
     const svg = this.getRadialSvg();
@@ -3665,30 +3863,30 @@ var GoalscapePlugin = class extends import_obsidian12.Plugin {
       return;
     const str = exportSvg(svg);
     downloadText(str, "goalscape.svg", "image/svg+xml");
-    new import_obsidian12.Notice("SVG exported");
+    new import_obsidian13.Notice("SVG exported");
   }
   exportCsv() {
     const scape = this.store.scape;
     if (!scape)
       return;
-    const csv = exportCsv(scape, this.tone);
+    const csv = exportCsv(scape, this.tone, this.notes.notes);
     downloadText(csv, "goalscape.csv", "text/csv");
-    new import_obsidian12.Notice("CSV exported");
+    new import_obsidian13.Notice("CSV exported");
   }
   exportMarkdown() {
     const scape = this.store.scape;
     if (!scape)
       return;
-    const md = exportMarkdownOutline(scape);
+    const md = exportMarkdownOutline(scape, this.notes.notes);
     downloadText(md, "goalscape-outline.md", "text/markdown");
-    new import_obsidian12.Notice("Markdown outline exported");
+    new import_obsidian13.Notice("Markdown outline exported");
   }
   // ──────────────────────────── 模板 ────────────────────────────
   showTemplateModal() {
     new TemplateModal(this.app, this).open();
   }
 };
-var TemplateModal = class extends import_obsidian12.Modal {
+var TemplateModal = class extends import_obsidian13.Modal {
   constructor(app, plugin) {
     super(app);
     this.plugin = plugin;
@@ -3699,7 +3897,7 @@ var TemplateModal = class extends import_obsidian12.Modal {
     contentEl.createEl("h3", { text: "Choose a template" });
     contentEl.createEl("p", { text: "This will replace your current goal tree. This cannot be undone.", cls: "goalscape-template-warning" });
     for (const t of TEMPLATES) {
-      new import_obsidian12.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
+      new import_obsidian13.Setting(contentEl).setName(t.name).setDesc(t.description).addButton(
         (btn) => btn.setButtonText("Apply").onClick(() => {
           this.plugin.store.mutate((s) => {
             const template = t.build();
@@ -3710,11 +3908,11 @@ var TemplateModal = class extends import_obsidian12.Modal {
             view.clearSelection();
           }
           this.close();
-          new import_obsidian12.Notice(`Template "${t.name}" applied`);
+          new import_obsidian13.Notice(`Template "${t.name}" applied`);
         })
       );
     }
-    new import_obsidian12.Setting(contentEl).addButton(
+    new import_obsidian13.Setting(contentEl).addButton(
       (btn) => btn.setButtonText("Cancel").onClick(() => this.close())
     );
   }

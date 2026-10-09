@@ -17,14 +17,22 @@ export interface GoalNode {
   due?: string; // ISO date
   start?: string; // Gantt 用
   tags: string[]; // 含 "Now"/"Next" 等
-  notes?: string; // Markdown
+  /**
+   * 这个块的笔记文件（vault 路径）。**正文只活在那个 .md 里，JSON 不存第二份** ——
+   * 两份可写副本必然要同步，同步就会打架，而数据层没有 undo，输掉的那一份找不回来。
+   * 编辑＝在 Obsidian 里打开这个文件，于是 `[[` 补全、嵌入、反链面板、全局搜索、
+   * 关系图谱全都是白拿的，插件自己不必再造一个编辑器。
+   * 文件 frontmatter 里带 gsId：用户在 Obsidian 里把它改名或挪走之后还能按 id 找回来。
+   */
+  note?: string;
+  /** @deprecated 旧版把 Markdown 正文直接存在 JSON 里；读档后由 NoteStore 迁移成文件并删掉 */
+  notes?: string;
   /**
    * 块间链接：**显式存目标节点 id**，不用 `[[标题]]` 模糊匹配 ——
    * goal 不是 vault 文件，标题撞名时歧义不可判定。
    * 有意的单向设计：A→B 不代表 B→A，反向由 backlinks() 现扫，不存两份。
    */
   links?: string[];
-  fields?: Record<string, string>; // 自定义字段
   collapsed?: boolean;
   children: GoalNode[];
 }
@@ -34,6 +42,19 @@ export interface GoalScape {
   mainGoal: GoalNode;
   colorMeanings?: Record<string, string>; // 颜色 → 含义标签
 }
+
+/**
+ * 一个块的笔记在 vault 里的样子。由 NoteStore 读文件 + metadataCache 填好，
+ * 内层（导出 / 几何 / 数据）只吃这份纯数据 —— 分层守卫不允许它们 import obsidian。
+ */
+export interface NoteInfo {
+  path: string; // 笔记文件路径
+  text: string; // 正文，已剥掉 frontmatter
+  links: string[]; // 正文里解析成功的 [[wikilink]] 目标路径；嵌入不算，指不到的不算
+}
+
+/** goalId → 笔记。没有笔记文件的块不出现在里面 */
+export type NoteIndex = Map<string, NoteInfo>;
 
 export function createGoalNode(partial: Partial<GoalNode> & { title: string }): GoalNode {
   return {
@@ -47,9 +68,8 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     due: partial.due,
     start: partial.start,
     tags: partial.tags ?? [],
-    notes: partial.notes,
+    note: partial.note,
     links: partial.links,
-    fields: partial.fields,
     collapsed: partial.collapsed,
     children: partial.children ?? [],
   };

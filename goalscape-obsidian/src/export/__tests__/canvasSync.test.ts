@@ -18,7 +18,8 @@ import {
   fileEdgeId,
   fileNodeId,
 } from "../canvasSync";
-import type { CanvasNode, JsonCanvas, ResolvedNotes } from "../canvasSync";
+import type { CanvasNode, JsonCanvas } from "../canvasSync";
+import type { NoteIndex } from "../../data/types";
 
 function makeScape(): GoalScape {
   return {
@@ -199,7 +200,16 @@ describe("镜像：树变了之后白板上不留脏东西", () => {
   });
 });
 
-describe("镜像：notes 派生出的链接边与笔记卡片", () => {
+describe("镜像：笔记派生出的链接边与文件卡片", () => {
+  /** 笔记索引的最小构造：镜像只吃 text 与 links，两者都是 NoteStore 读文件后填进来的 */
+  const notes = (m: Record<string, { links?: string[]; text?: string }>): NoteIndex =>
+    new Map(
+      Object.entries(m).map(([id, v]) => [
+        id,
+        { path: `Goalscapes/x.notes/${id}.md`, text: v.text ?? "", links: v.links ?? [] },
+      ])
+    );
+
   /** 用户自己从目录栏拖进白板的文件卡：没有 gsFile，不属于树，动不得 */
   const userFile = (id: string, extra: Partial<CanvasNode> = {}): CanvasNode => ({
     id,
@@ -212,16 +222,18 @@ describe("镜像：notes 派生出的链接边与笔记卡片", () => {
     ...extra,
   });
 
-  it("卡片正文追加 tags 行与 notes 摘要，高度跟着行数走", () => {
+  it("卡片正文只追加一行笔记摘要，高度跟着行数走", () => {
     const scape = makeScape();
-    const n = findGoal(scape.mainGoal, "h1")!;
-    n.tags = ["Now"];
-    n.notes = "今天跑 5 公里，见 [[跑步]]\n```\n#fence 里的不算\n```";
-    const c = byId(toCanvas(scape), "h1");
-    assert.match(c.text ?? "", /#Now/);
+    findGoal(scape.mainGoal, "h1")!.tags = ["Now"];
+    const fence = ["今天跑 5 公里，见 [[跑步]]", "```", "#fence 里的不算", "```"].join("\n");
+    const idx = notes({ h1: { text: fence } });
+    const c = byId(toCanvas(scape, idx), "h1");
     assert.match(c.text ?? "", /今天跑 5 公里，见 跑步/, "摘要把 wikilink 收成显示文本");
-    assert.ok(!/fence/.test(c.text ?? ""), "代码块里的 #tag 不该被当真标签");
-    assert.equal(c.height, 100 + 24 * 2);
+    assert.ok(!/fence/.test(c.text ?? ""), "代码块里的内容不该被当成摘要");
+    // 标签不上卡片：颜色已经编码了进度，#tag 在白板上既不能筛也不能点，只会把卡片撑高
+    assert.ok(!/#Now/.test(c.text ?? ""));
+    assert.equal(c.height, 100 + 24, "标题 + 数值 + 摘要，只比裸卡多一行");
+    assert.equal(byId(toCanvas(scape), "h1").height, 100, "没笔记就还是两行");
   });
 
   it("links 生成带 label 的链接边；树里没这个 id 就不生成", () => {
@@ -234,7 +246,7 @@ describe("镜像：notes 派生出的链接边与笔记卡片", () => {
   });
 
   it("解析到的笔记生成 file 卡片与连线，且不带 gsId", () => {
-    const resolved: ResolvedNotes = new Map([["h1", ["笔记/跑步.md"]]]);
+    const resolved = notes({ h1: { links: ["笔记/跑步.md"] } });
     const c = toCanvas(makeScape(), resolved);
     const f = byId(c, fileNodeId("h1", "笔记/跑步.md"));
     assert.deepEqual([f.type, f.file, f.gsFile], ["file", "笔记/跑步.md", "笔记/跑步.md"]);
@@ -245,7 +257,7 @@ describe("镜像：notes 派生出的链接边与笔记卡片", () => {
 
   it("拖动过的文件卡位置留住；链接没了，卡片和线一起消失", () => {
     const scape = makeScape();
-    const resolved: ResolvedNotes = new Map([["h1", ["a.md"]]]);
+    const resolved = notes({ h1: { links: ["a.md"] } });
     const fid = fileNodeId("h1", "a.md");
     const first = refreshCanvas(scape, null, resolved);
     const moved = { ...byId(first, fid), x: 4242, y: -646 };
@@ -281,7 +293,7 @@ describe("镜像：notes 派生出的链接边与笔记卡片", () => {
 
   it("源卡片被拖远之后新出现的文件卡落在源卡片旁边", () => {
     const scape = makeScape();
-    const resolved: ResolvedNotes = new Map([["h1", ["b.md"]]]);
+    const resolved = notes({ h1: { links: ["b.md"] } });
     const existing: JsonCanvas = {
       nodes: toCanvas(scape).nodes.map((n) => ({ ...n, x: n.x + 5000, y: n.y + 3000 })),
       edges: [],
@@ -297,10 +309,7 @@ describe("镜像：notes 派生出的链接边与笔记卡片", () => {
 
   it("带派生卡片的镜像同样幂等", () => {
     const scape = makeScape();
-    const resolved: ResolvedNotes = new Map([
-      ["h1", ["a.md", "b.md"]],
-      ["career", ["c.md"]],
-    ]);
+    const resolved = notes({ h1: { links: ["a.md", "b.md"] }, career: { links: ["c.md"] } });
     const once = refreshCanvas(scape, toCanvas(scape, resolved), resolved);
     const twice = refreshCanvas(scape, once, resolved);
     assert.equal(canvasToJson(twice), canvasToJson(once));

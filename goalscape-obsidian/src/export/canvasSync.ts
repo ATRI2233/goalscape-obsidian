@@ -4,9 +4,9 @@
 // 文字/颜色/父子结构一律由树派生 —— 一个东西只能有一个主人，两边都能改就两边都会丢
 // （白板→数据 的反向回写已整块删除，理由见文件末尾的注释）。
 
-import { GoalNode, GoalScape, flattenTree } from "../data/types";
+import { GoalNode, GoalScape, NoteIndex, NoteInfo, flattenTree } from "../data/types";
 import { bandScaleOf, childShares } from "../geometry/radialGeometry";
-import { effectiveTags, firstLine } from "../data/notes";
+import { firstLine } from "../data/notes";
 
 /**
  * Obsidian 会把未知键收进节点的 unknownData 并在保存时原样吐回（实测），
@@ -66,12 +66,6 @@ function hashStr(s: string): string {
   return (h >>> 0).toString(36);
 }
 
-/**
- * 目标 id → notes 里解析成功的 vault 路径（按出现顺序、已去重）。
- * 解析要靠 metadataCache，而本文件不许 import obsidian（分层守卫），所以由调用方算好传进来。
- */
-export type ResolvedNotes = Map<string, string[]>;
-
 const PROGRESS_COLORS: Record<number, string> = {
   0: "1", // red
   1: "2", // orange
@@ -101,20 +95,22 @@ interface Built {
   parentOf: Map<string, string>;
 }
 
-/** 卡片正文：标题 + 数值行，有 tags / notes 摘要再各追加一行 */
-function cardLines(node: GoalNode): string[] {
+/**
+ * 卡片正文：标题 + 数值行，有笔记再追加一行摘要。
+ * 只追加摘要这一行 —— 白板上能看见"这块到底在讲什么"就够了；
+ * 标签在这儿是纯噪音（卡片颜色已经编码进度，标签既不能筛也不能点），只会把卡片撑高。
+ */
+function cardLines(node: GoalNode, note?: NoteInfo): string[] {
   const lines = [
     `**${node.title}**`,
     `占父级 ${node.importance}% · 进度 ${node.progress ?? 0}%`,
   ];
-  const tags = effectiveTags(node);
-  if (tags.length) lines.push(tags.map((t) => `#${t}`).join(" "));
-  const summary = firstLine(node.notes ?? "");
+  const summary = firstLine(note?.text ?? "");
   if (summary) lines.push(summary);
   return lines;
 }
 
-function buildCanvas(scape: GoalScape, resolved?: ResolvedNotes): Built {
+function buildCanvas(scape: GoalScape, notes?: NoteIndex): Built {
   const nodes: CanvasNode[] = [];
   const edges: CanvasEdge[] = [];
   const parentOf = new Map<string, string>();
@@ -137,7 +133,7 @@ function buildCanvas(scape: GoalScape, resolved?: ResolvedNotes): Built {
     const x = Math.cos(mid) * radius;
     const y = Math.sin(mid) * radius;
     const id = node.id;
-    const lines = cardLines(node);
+    const lines = cardLines(node, notes?.get(id));
 
     // JSON Canvas 里 x/y 是卡片的中心，不是左上角（Obsidian 按中心解释这个数）
     nodes.push({
@@ -158,7 +154,8 @@ function buildCanvas(scape: GoalScape, resolved?: ResolvedNotes): Built {
       parentOf.set(id, parentId);
     }
 
-    const files = resolved?.get(id);
+    // 笔记里链到的 vault 文件长成 file 卡：解析不到的（幽灵链接）根本不在 links 里
+    const files = notes?.get(id)?.links;
     if (files?.length) {
       // 径向外侧、沿切线并排：文件卡贴在属于自己的那张卡外面一圈，而不是散落全图
       const len = Math.hypot(x, y);
@@ -215,8 +212,8 @@ function buildCanvas(scape: GoalScape, resolved?: ResolvedNotes): Built {
   return { doc: { nodes, edges }, parentOf };
 }
 
-export function toCanvas(scape: GoalScape, resolved?: ResolvedNotes): JsonCanvas {
-  return buildCanvas(scape, resolved).doc;
+export function toCanvas(scape: GoalScape, notes?: NoteIndex): JsonCanvas {
+  return buildCanvas(scape, notes).doc;
 }
 
 export function canvasToJson(canvas: JsonCanvas): string {
@@ -321,9 +318,9 @@ function isGeneratedEdge(id: string): boolean {
 export function refreshCanvas(
   scape: GoalScape,
   existing: JsonCanvas | null,
-  resolved?: ResolvedNotes
+  notes?: NoteIndex
 ): JsonCanvas {
-  const { doc: fresh, parentOf } = buildCanvas(scape, resolved);
+  const { doc: fresh, parentOf } = buildCanvas(scape, notes);
   if (!existing) return fresh;
 
   const liveIds = new Set(flattenTree(scape.mainGoal).map((n) => n.id));

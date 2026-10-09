@@ -1,17 +1,17 @@
 // src/views/infoPanel.ts
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
-// Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes（渲染态 + textarea 编辑）/
-// Linked goals / Referenced by / 自定义字段。
+// Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes（渲染预览 + 一键交给原生编辑器）/
+// Linked goals / Referenced by。
 // 所有改动统一走 store.mutate。
 
-import { Component, MarkdownRenderer, Setting, Notice, setTooltip } from "obsidian";
+import { Component, MarkdownRenderer, Setting, Notice, TFile, setTooltip } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
 import { backlinks } from "../data/notes";
 import { paletteSwatches } from "../data/palette";
 import { renameGoal, adjustImportance } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "../geometry/radialGeometry";
-import { promptInput, promptPick } from "./promptModal";
+import { promptPick } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
 const BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
@@ -41,10 +41,10 @@ function normalizeHex(raw: string): string | null {
 
 export class InfoPanel {
   private nodeId: string | null = null;
-  /** notes 区双态：false = 渲染态（可点链接），true = textarea 编辑。切换选中节点即回到渲染态 */
-  private notesEditing = false;
   /** 拖动滑杆时跳过外部触发的整面板重建，避免滑杆在拖拽中被重新创建而丢失指针 */
   private interacting = false;
+  /** 这次按住的过程中改过数据没有：只有改过才需要在松手后补一次渲染 */
+  private dirtyWhileInteracting = false;
   /**
    * 渲染态下挂进 MarkdownRenderer 的宿主组件。
    * 每次重建预览前先旧建新，Obsidian 靠它管理嵌入子组件的生命周期。
@@ -67,7 +67,6 @@ export class InfoPanel {
   /** 切换选中节点：始终强制重建，并把 notes 打回渲染态 */
   show(nodeId: string | null): void {
     this.nodeId = nodeId;
-    this.notesEditing = false;
     this.render(true);
   }
 
@@ -187,51 +186,6 @@ export class InfoPanel {
 
     this.renderNotes(node);
     this.renderLinks(node);
-
-    this.container.createEl("h4", { text: "Custom fields" });
-    const fieldsContainer = this.container.createDiv({ cls: "goalscape-panel-fields" });
-    const fields = node.fields ?? {};
-    for (const [key, value] of Object.entries(fields)) {
-      new Setting(fieldsContainer)
-        .setName(key)
-        .addText((text) => {
-          text.setValue(value);
-          text.inputEl.addEventListener("blur", () => {
-            const v = text.getValue();
-            this.mutate((s) =>
-              this.patch(s, node.id, (n) => {
-                n.fields = { ...(n.fields ?? {}), [key]: v };
-              })
-            );
-          });
-        })
-        .addExtraButton((btn) =>
-          btn
-            .setIcon("trash-2")
-            .setTooltip("Remove field")
-            .onClick(() => {
-              this.mutate((s) =>
-                this.patch(s, node.id, (n) => {
-                  if (!n.fields) return;
-                  const rest = { ...n.fields };
-                  delete rest[key];
-                  n.fields = rest;
-                })
-              );
-            })
-        );
-    }
-    new Setting(fieldsContainer).addButton((btn) =>
-      btn.setButtonText("Add custom field").onClick(async () => {
-        const key = await promptInput(this.plugin.app, "New field name", "");
-        if (!key || !key.trim()) return;
-        this.mutate((s) =>
-          this.patch(s, node.id, (n) => {
-            n.fields = { ...(n.fields ?? {}), [key.trim()]: "" };
-          })
-        );
-      })
-    );
   }
 
   /**
@@ -342,59 +296,83 @@ export class InfoPanel {
       });
   }
 
-  /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后立即补一次完整渲染同步最终状态 */
+  /** 拖拽期间屏蔽外部 refresh() 触发的重建，释放后只在真的改过数据时补一次渲染 */
   private trackInteraction(el: HTMLElement): void {
     // window 上的 pointerup 监听必须随拖拽建立、随释放拆除。
     // 早先每次 render 都无条件挂一个常驻监听：面板每改一次值就重建一次，
     // 监听越积越多，之后在应用里点任何地方都会重建整个面板（滚动位置被弹回顶部）。
     el.addEventListener("pointerdown", () => {
       this.interacting = true;
+      this.dirtyWhileInteracting = false;
       const end = () => {
         this.interacting = false;
         window.removeEventListener("pointerup", end);
-        this.render(true);
+        // 两个条件都是被真鼠标点出来的：
+        // 1) 只有拖拽期间真改过数据才需要补渲染。滑杆要，按钮不要 —— 按钮的 click
+        //    处理器自己会渲染。
+        // 2) 补渲染必须推迟一个宏任务。click 在 pointerup 之后才派发，同步重建会把
+        //    用户正点着的那个元素拆掉，按下/抬起目标不一致 Chrome 就不再派发 click，
+        //    按钮看着"点不动"（Edit / Add link / chip 跳转全中过这个招）。
+        if (this.dirtyWhileInteracting) setTimeout(() => this.render(true), 0);
       };
       window.addEventListener("pointerup", end);
     });
   }
 
   /**
-   * Notes 双态区：默认渲染态用原生 MarkdownRenderer 出 —— `[[链接]]` 可点、
-   * `#tag` 可点、`![[嵌入]]` 能渲染，悬浮 preview 白拿。点 "Edit" 切回 textarea，
-   * blur 落盘（落盘时机不变，不做自动保存）。sourcePath 传当前图文件路径，
-   * 相对链接才按这张图所在位置解析。
+   * Notes 区：正文只活在这个块的 .md 文件里，面板不再自己造编辑器 ——
+   * 渲染态用原生 MarkdownRenderer（`[[链接]]` 可点、`![[嵌入]]` 能渲染、悬浮 preview 白拿），
+   * 撰写一键交给 Obsidian 自己的编辑器，于是补全、反链面板、全局搜索、关系图谱全是白拿的，
+   * 插件不必去追编辑器那一大套功能。sourcePath 传笔记自己的路径，相对链接才按笔记所在位置解析。
    */
   private renderNotes(node: GoalNode): void {
+    const note = this.plugin.notes.get(node.id);
     const head = this.container.createDiv({ cls: "goalscape-panel-label goalscape-notes-head" });
     head.createSpan({ text: "Notes" });
-    const toggle = head.createEl("button", {
+    const btn = head.createEl("button", {
       cls: "goalscape-notes-toggle",
-      text: this.notesEditing ? "Done" : "Edit",
+      text: note ? "Open note" : "New note",
     });
-    this.trackInteraction(toggle);
-    toggle.addEventListener("click", () => {
-      this.notesEditing = !this.notesEditing;
-      this.render(true);
-    });
-
-    if (this.notesEditing) {
-      const area = this.container.createEl("textarea", { cls: "goalscape-panel-notes" });
-      area.value = node.notes ?? "";
-      area.addEventListener("blur", () => {
-        const v = area.value;
-        this.mutate((s) => this.patch(s, node.id, (n) => (n.notes = v || undefined)));
-      });
-      return;
-    }
+    if (note) btn.title = note.path;
+    this.trackInteraction(btn);
+    btn.addEventListener("click", () => void this.openNote(node));
 
     const body = this.container.createDiv({ cls: "goalscape-notes-render" });
-    if (!node.notes || !node.notes.trim()) {
-      body.createDiv({ cls: "goalscape-panel-empty", text: "No notes yet." });
+    if (!note) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "No note file yet." });
+      return;
+    }
+    if (!note.text.trim()) {
+      body.createDiv({ cls: "goalscape-panel-empty", text: "Note is empty." });
       return;
     }
     const host = new Component();
     this.notesHost = host;
-    void MarkdownRenderer.render(this.plugin.app, node.notes, body, this.plugin.store.path, host);
+    void MarkdownRenderer.render(this.plugin.app, note.text, body, note.path, host);
+  }
+
+  /**
+   * 打开这个块的笔记；还没有文件就先建一个再打开。
+   * 建文件只发生在这里（用户点了这一下）和迁移旧数据时 —— 插件绝不主动往 vault 里扔空笔记。
+   */
+  private async openNote(node: GoalNode): Promise<void> {
+    const app = this.plugin.app;
+    let path = this.plugin.notes.get(node.id)?.path ?? node.note;
+    if (!path) {
+      try {
+        path = await this.plugin.notes.createFor(node);
+      } catch (err) {
+        new Notice(`Goalscape: 建笔记失败 ${(err as Error).message}`);
+        return;
+      }
+      const created = path;
+      this.mutate((s) => this.patch(s, node.id, (n) => (n.note = created)));
+      await this.plugin.notes.rebuild();
+      this.plugin.store.bump();
+    }
+    const file = app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) await app.workspace.getLeaf(false).openFile(file);
+    else new Notice(`Goalscape: 找不到笔记文件 ${path}`);
   }
 
   /**
@@ -468,6 +446,7 @@ export class InfoPanel {
   }
 
   private mutate(fn: (s: GoalScape) => void): void {
+    if (this.interacting) this.dirtyWhileInteracting = true;
     this.plugin.store.mutate(fn);
   }
 

@@ -100,8 +100,8 @@ function cloneSubtree(node: GoalNode): GoalNode {
     start: node.start,
     tags: [...node.tags],
     color: node.color,
-    notes: node.notes,
-    fields: node.fields ? { ...node.fields } : undefined,
+    // note 不跟着复制：两个块指同一个 .md，改一个就是改另一个，而面板上看不出来。
+    // 副本要笔记就自己新建一个文件。
     collapsed: node.collapsed,
     children: node.children.map(cloneSubtree),
   });

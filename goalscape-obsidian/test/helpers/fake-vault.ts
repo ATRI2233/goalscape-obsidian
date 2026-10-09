@@ -1,14 +1,16 @@
-// 内存版 vault / DataAdapter，给 GoalTreeStore 单测用。
+// 内存版 vault / DataAdapter / metadataCache，给 GoalTreeStore 与 NoteStore 单测用。
 // 刻意对齐 Obsidian 的真实行为（而不是写得"更方便"），因为被测的几个回归点就发生在这上面：
 // - createFolder 撞已存在目录会抛 "Folder already exists."
 // - adapter.write 会派生一次 modify 事件
 // - 启动早期 vault 索引未就绪时 getAbstractFileByPath 会误报 null（用 staleIndex 模拟）
+// - metadataCache 只解析真会用到的那点：开头的 --- frontmatter（单层标量）与正文里的 [[wikilink]]；
+//   ![[嵌入]] 不算链接、指不到的目标解析不出来 —— 这两条正是被测代码依赖的语义
 
 import { Notice, TFile, TFolder } from "../mocks/obsidian";
 import type { Plugin } from "obsidian";
 import { GoalTreeStore, DEFAULT_GOALSCAPE_PATH } from "../../src/data/goalTree";
 
-type Handler = (file: TFile) => void;
+type Handler = (file: TFile, oldPath?: string) => void;
 
 /** 插件弹的用户提示（Notice），断言"该报的错报了、该静默的静默" */
 export function notices(): string[] {
@@ -68,8 +70,86 @@ export class FakeVault {
     return { cleanup: () => this.handlers.set(name, list.filter((c) => c !== cb)) };
   }
 
-  private emit(name: string, file: TFile): void {
-    (this.handlers.get(name) ?? []).slice().forEach((cb) => cb(file));
+  private emit(name: string, file: TFile, oldPath?: string): void {
+    (this.handlers.get(name) ?? []).slice().forEach((cb) => cb(file, oldPath));
+  }
+
+  /** 插件建文件（NoteStore 建笔记走这条） */
+  async create(path: string, text: string): Promise<TFile> {
+    if (this.files.has(path)) throw new Error("File already exists.");
+    const f = new TFile(path);
+    this.files.set(path, f);
+    this.contents.set(path, text);
+    this.emit("create", f);
+    return f;
+  }
+
+  async modify(f: TFile, text: string): Promise<void> {
+    if (!this.files.has(f.path)) throw new Error("ENOENT");
+    this.contents.set(f.path, text);
+    this.emit("modify", f);
+  }
+
+  async delete(f: TFile): Promise<void> {
+    this.remove(f.path);
+  }
+
+  async rename(f: TFile, newPath: string): Promise<void> {
+    const old = f.path;
+    const text = this.contents.get(old) ?? "";
+    this.contents.delete(old);
+    this.files.delete(old);
+    const moved = new TFile(newPath);
+    this.files.set(newPath, moved);
+    this.contents.set(newPath, text);
+    this.emit("rename", moved, old);
+  }
+
+  /** 读的是缓存那份，和真实 vault 一样：文件不在就抛 */
+  async cachedRead(f: TFile): Promise<string> {
+    const c = this.contents.get(f.path);
+    if (c === undefined) throw new Error(`ENOENT: no such file, '${f.path}'`);
+    return c;
+  }
+
+  getMarkdownFiles(): TFile[] {
+    return [...this.files.values()].filter((f) => f.extension === "md");
+  }
+
+  metadataCache = {
+    getFileCache: (f: TFile) => {
+      const c = parseCache(this.contents.get(f.path) ?? "");
+      // 真实 Obsidian 里"文件已落盘、缓存还没解析完"是常态：那一刻 links 是空的
+      if (this.coldCache.has(f.path)) c.links = [];
+      return c;
+    },
+    getFirstLinkpathDest: (link: string) => this.resolveLink(link),
+    on: (name: string, cb: Handler) => {
+      const list = this.cacheHandlers.get(name) ?? [];
+      list.push(cb);
+      this.cacheHandlers.set(name, list);
+      return { cleanup: () => this.cacheHandlers.set(name, list.filter((c) => c !== cb)) };
+    },
+  };
+
+  /** 模拟冷缓存：列在这里的路径 getFileCache 只给 frontmatter、不给 links */
+  readonly coldCache = new Set<string>();
+  private cacheHandlers = new Map<string, Handler[]>();
+
+  /** Obsidian 解析完一个文件后发的 metadataCache:changed */
+  emitCacheChanged(path: string): void {
+    const f = this.files.get(path);
+    if (!f) return;
+    (this.cacheHandlers.get("changed") ?? []).slice().forEach((cb) => cb(f));
+  }
+
+  /** 按整路径（带不带 .md 都认）或 basename 解析；解析不到就是幽灵链接，返回 null */
+  private resolveLink(link: string): TFile | null {
+    for (const f of this.files.values()) {
+      if (f.path === link || f.path === `${link}.md`) return f;
+    }
+    for (const f of this.files.values()) if (f.basename === link) return f;
+    return null;
   }
 
   getAbstractFileByPath(path: string): TFile | TFolder | null {
@@ -87,6 +167,8 @@ export class FakeVault {
 export interface FakeEnvironment {
   vault: FakeVault;
   store: GoalTreeStore;
+  /** 造 NoteStore 之类的下游部件时要用（它只认 plugin.app / plugin.registerEvent） */
+  plugin: Plugin;
   /** 注册进 plugin.registerEvent 的引用条数，用于断言外部监听只注册一次 */
   registeredEvents: unknown[];
 }
@@ -100,10 +182,15 @@ export function createEnvironment(
   Object.entries(seed).forEach(([p, content]) => vault.seed(p, content));
   const registeredEvents: unknown[] = [];
   const plugin = {
-    app: { vault },
+    app: { vault, metadataCache: vault.metadataCache },
     registerEvent: (ref: unknown) => registeredEvents.push(ref),
   } as unknown as Plugin;
-  return { vault, store: new GoalTreeStore(plugin, path), registeredEvents };
+  return {
+    vault,
+    store: new GoalTreeStore(plugin, path),
+    plugin,
+    registeredEvents,
+  };
 }
 
 /** mutate() 里的 save() 是 fire-and-forget，断言落盘前先让微任务跑完 */
@@ -114,4 +201,33 @@ export async function flush(): Promise<void> {
 /** 外部修改的去抖窗口是 300ms */
 export async function settle(ms = 400): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+interface FakeCache {
+  frontmatter?: Record<string, string>;
+  frontmatterPosition?: { end: { offset: number } };
+  links: Array<{ link: string }>;
+}
+
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/;
+const WIKILINK_RE = /(?<!!)\[\[([^\]|#]+?)(?:#[^|]*)?(?:\|[^\]]*)?\]\]/g;
+
+function parseCache(raw: string): FakeCache {
+  const out: FakeCache = { links: [] };
+  let body = raw;
+  const fm = FRONTMATTER_RE.exec(raw);
+  if (fm) {
+    out.frontmatter = {};
+    for (const line of fm[1].split(/\r?\n/)) {
+      const kv = /^([\w-]+):\s*(.*)$/.exec(line);
+      if (kv) out.frontmatter[kv[1]] = kv[2].trim();
+    }
+    out.frontmatterPosition = { end: { offset: fm[0].length } };
+    body = raw.slice(fm[0].length);
+  }
+  for (const m of body.matchAll(WIKILINK_RE)) {
+    const t = m[1].trim();
+    if (t && !out.links.some((x) => x.link === t)) out.links.push({ link: t });
+  }
+  return out;
 }

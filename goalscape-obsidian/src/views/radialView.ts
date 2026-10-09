@@ -7,7 +7,7 @@
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
 import type GoalscapePlugin from "../main";
 import { GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
-import { backlinks, firstLine, parseWikiTargets } from "../data/notes";
+import { backlinks, firstLine } from "../data/notes";
 import { SECTOR_RAMP, branchFills, shadeOf } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
@@ -254,7 +254,7 @@ export class RadialGoalMapView extends ItemView {
       // 原生 <title> 挂在扇区上：标签被截断、或者弧长太干脆没画字的格子，悬停也认得出是谁
       // （.goalscape-label 是 pointer-events:none，挂在文字上永远不会触发）
       const tip = document.createElementNS(SVG_NS, "title");
-      const summary = firstLine(node.notes ?? "");
+      const summary = firstLine(this.plugin.notes.get(node.id)?.text ?? "");
       tip.textContent = summary
         ? `${node.title} · ${node.progress ?? 0}%\n${summary}`
         : `${node.title} · ${node.progress ?? 0}%`;
@@ -543,12 +543,12 @@ export class RadialGoalMapView extends ItemView {
       }
     }
 
-    // vault 文件卡片：notes 里解析得到真实文件的才画（未解析的不制造幽灵）
-    const hits: { link: string; name: string }[] = [];
-    for (const t of parseWikiTargets(found.node.notes ?? "")) {
-      const f = this.app.metadataCache.getFirstLinkpathDest(t, this.plugin.store.path);
-      if (f) hits.push({ link: t, name: f.basename });
-    }
+    // vault 文件卡片：笔记里解析得到真实文件的才画（未解析的不制造幽灵）。
+    // 解析在 NoteStore 里做完了，这一层拿到的已经是 vault 路径。
+    const hits = (this.plugin.notes.get(found.node.id)?.links ?? []).map((p) => ({
+      path: p,
+      name: (p.split("/").pop() ?? p).replace(/\.md$/i, ""),
+    }));
     if (!hits.length) return;
     const mid = (mine.startAngle + mine.endAngle) / 2;
     // 顶格那一环的卡片可能被 viewBox 裁掉，半径钳在画布内、宁可贴着环缝
@@ -573,11 +573,11 @@ export class RadialGoalMapView extends ItemView {
       name.textContent = item.name.length > 12 ? `${item.name.slice(0, 11)}…` : item.name;
       g.appendChild(name);
       const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = item.link;
+      tip.textContent = item.path;
       g.appendChild(tip);
       g.addEventListener("click", (e) => {
         e.stopPropagation();
-        void this.app.workspace.openLinkText(item.link, this.plugin.store.path, true);
+        void this.app.workspace.openLinkText(item.path, item.path, true);
       });
       svg.appendChild(g);
     });

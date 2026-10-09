@@ -546,55 +546,55 @@
   margin: 8px 0 4px 0;
 }
 
-.goalscape-panel-notes {
-  width: 100%;
-  min-height: 80px;
-  resize: vertical;
-  background-color: var(--background-primary-alt);
-  color: var(--text-normal);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  padding: 6px;
-  font-family: inherit;
-}
-
-.goalscape-panel-fields .setting-item {
-  padding: 4px 0;
-}
-
-/* Notes 标题行：左标题、右 Edit/Done */
+/* Notes 标题行：左标题、右"打开笔记" */
 .goalscape-notes-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+  margin-top: 14px;
 }
 
+.goalscape-notes-head .goalscape-panel-label {
+  margin: 0;
+}
+
+/* 安静的胶囊按钮：面板里它是唯一一个动作入口，够认出来就行，不该跟扇区抢注意力 */
 .goalscape-notes-toggle {
+  flex: none;
   background: none;
-  border: none;
   box-shadow: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 999px;
   color: var(--text-accent);
   cursor: pointer;
-  font-size: 12px;
-  padding: 0 2px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  padding: 5px 10px;
   height: auto;
 }
 
 .goalscape-notes-toggle:hover {
+  background-color: var(--background-modifier-hover);
+  border-color: var(--background-modifier-border-hover);
   color: var(--text-accent-hover);
-  text-decoration: underline;
+  text-decoration: none;
 }
 
-/* notes 渲染态：和编辑态 textarea 同一家外观，Edit/Done 切换时版式不跳 */
+/*
+ * 笔记预览：不是输入框，所以不给边框和底色 —— 一道顶部发丝线把它跟上面的属性分开就够。
+ * 限高滚动：一篇长笔记不该把 Linked goals 顶出面板。
+ */
 .goalscape-notes-render {
   width: 100%;
-  min-height: 60px;
-  background-color: var(--background-primary-alt);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  padding: 6px 8px;
+  max-height: 38vh;
+  overflow-y: auto;
+  margin-top: 6px;
+  padding: 10px 0 2px;
+  border-top: 1px solid var(--background-modifier-border);
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.6;
   word-break: break-word;
   box-sizing: border-box;
 }
@@ -605,6 +605,38 @@
 
 .goalscape-notes-render > :last-child {
   margin-bottom: 0;
+}
+
+/* 笔记里的标题按正文的比例缩下来：面板宽 300px，一个 h1 就能把版式撑爆 */
+.goalscape-notes-render h1,
+.goalscape-notes-render h2,
+.goalscape-notes-render h3,
+.goalscape-notes-render h4,
+.goalscape-notes-render h5,
+.goalscape-notes-render h6 {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 10px 0 4px;
+}
+
+.goalscape-notes-render p,
+.goalscape-notes-render ul,
+.goalscape-notes-render ol {
+  margin: 0 0 6px;
+}
+
+.goalscape-notes-render ul,
+.goalscape-notes-render ol {
+  padding-inline-start: 18px;
+}
+
+.goalscape-notes-render img {
+  max-width: 100%;
+}
+
+.goalscape-notes-render .goalscape-panel-empty {
+  padding: 2px 0;
+  font-size: 12px;
 }
 
 /* 块间链接 chip：主体按钮跳选、右侧 × 断链（反链 chip 没有 ×） */

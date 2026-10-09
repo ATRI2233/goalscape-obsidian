@@ -14,7 +14,7 @@ export const GOALSCAPE_SUFFIX = ".goalscape.json";
 export const DEFAULT_GOALSCAPE_PATH = `${GOALSCAPE_FOLDER}/life${GOALSCAPE_SUFFIX}`;
 
 /** 已废弃字段：旧 JSON 里仍带着它，读档时清掉，落盘后自然消失 */
-type LegacyNode = GoalNode & { responsible?: unknown };
+type LegacyNode = GoalNode & { responsible?: unknown; fields?: unknown };
 
 /** Phase 1 默认结构：中心 Main Goal + 三段 L1 子目标 */
 export function createDefaultScape(): GoalScape {
@@ -116,6 +116,8 @@ export class GoalTreeStore {
     node.title ??= "Untitled";
     node.importance ??= 50;
     delete (node as LegacyNode).responsible;
+    // Custom fields 是个只写不读的死洞（放射图/白板/导出全都不看它），字段随功能一起删掉
+    delete (node as LegacyNode).fields;
     // 旧数据里深层节点可能存过 color：读档时一律清掉（中心盘和二级节点各自持有）。
     // 留着就是"文件里有值、图上不生效"的第三种状态，也正是父子颜色不同步的来源
     if (depth > HUE_OWNER_DEPTH) delete node.color;
@@ -189,6 +191,14 @@ export class GoalTreeStore {
     return () => {
       this.listeners.delete(fn);
     };
+  }
+
+  /**
+   * 树没变、只是树外面的东西变了（笔记文件被改/被建/被删）：
+   * 不改数据、不落盘，只让视图重画一遍。跟 mutate 分开，免得白写一次 JSON。
+   */
+  bump(): void {
+    this.notify();
   }
 
   private notify(): void {

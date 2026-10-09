@@ -252,6 +252,21 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
     还没赋值，一个标签页都没摘掉（实测 `openTabs:2`）→ 先等它挂上文件再摘。
 - 未跑：全量实机回归（用户当时只批了 notes 那几步）、真实系统保存框。
 
+### Notes 存储形状翻案：md 文件是唯一真相（2026-10-09 晚）
+用户实机用了一轮，五条意见里三条是设计翻案："为什么不是真 md 文件映射"、"编辑界面丑"、"custom fields 有什么用"。
+拍板：**每块一个真 .md**（`<图名>.notes/` 下，frontmatter 记 `gsId` 供改名后找回），JSON 只存路径；面板删掉 textarea，
+只留渲染预览 + 一个 "Open note" 把撰写交给原生编辑器；**不做双向同步**（两份可写副本必打架，数据层无 undo）。
+Custom fields 与白板卡片的 `#tags` 行一起删（都验过是只写不读的死洞）。
+- 新文件 `data/noteFiles.ts`（内层第二个允许碰 obsidian 的）：建目录 / 防重名 / 写 frontmatter / 按 gsId 全库找回 /
+  一次性迁移旧 `notes` / 盯 vault 事件。红线：**绝不替用户建笔记文件**，只有面板点击与迁移会写。
+- 坑：刚写完的 .md `metadataCache` 往往还没解析完，那一刻读 `links` 是空的 → 扇区文件卡片时有时无（实机十次撞一次）。
+  补一条不受 `writing` 屏蔽的 `metadataCache.on("changed")` 监听让索引自己追一轮；`watch()` 因此要排在 `syncMap()` 之前。
+- 坑：面板在 `pointerup` 里同步重建会拆掉用户正点着的按钮 → Chrome 不再派发 `click`（Edit / Add link / chip 全点不动）。
+  补渲染改成"拖拽期间真改过数据才做、且推迟一个宏任务"；回归新增 `realClick()` 走 CDP 真鼠标——合成 click 在这类 bug 上永远假绿。
+- 实测：单测 172/172（noteFiles 18 条、fake-vault 补了 metadataCache 与冷缓存模拟）；`npm run check` 全绿，
+  实机 117/117（notes 步骤 20 项，含迁移、外部编辑回预览、删文件不重建、白板摘要取文件首行）。
+  用户真库里那一条旧 notes 已无损搬进 `Goalscapes/life.notes/健康1.md`（跑测前备份在 `D:\tmp\GS_BACKUP_*`）。
+
 ## 剩余未实测
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
@@ -268,8 +283,8 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
 - 白板镜像里"用户改过布局/加了便签"是**脚本直接写 `.canvas` 模拟的**，没请真人在 Obsidian 里拖一遍再看：
   真手拖还会带出组节点、复制卡片、`fromSide` 等东西，Stage A 只验过单键保留。
 - Canvas 段那个橙点只在暗色主题看过截图，亮色没单独看（颜色用 `--color-orange` + `--background-secondary` 描边，理论上自适应）。
-- notes 那四阶段之后**只跑了新增的 `notes` 实机步骤**（14 项全绿），全量回归没跑：白板卡片多了 tags/摘要两行、
-  高度按行数长、`text` 变长，这些对既有 `mirror`/`canvas 段` 步骤的影响只在单测层面验过。
+- notes 四阶段那轮只跑了新增步骤；翻案这轮（2026-10-09 晚）**全量实机回归已跑**（117/117），
+  白板卡片高度按行数长、`text` 变长对既有 `mirror`/`canvas 段` 步骤的影响在实机层面也验过了。
 - 分层守卫那次改动（`findInScape` → `findNode` 的 4 个写入点：list 折叠/勾选/进度滑杆、gantt 叶子进度拖拽）
   只过了 `tsc` + 单测，**没跑实机回归**——`npm run check` 会把 `main.js` 部署进 vault 并要求真实 Obsidian 在最前台。
 
@@ -279,7 +294,7 @@ pathspec 不匹配而失败**（只提交了 rename），以及并发会话正�
 2. Focus Filter 加"高亮匹配项列表"侧栏、Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
 3. 白板方向已收口成单向镜像（自动更新 + 待更新小点 + 设置开关），**回写不再做**：白板改父子/顺序既危险又不可撤销，
    理由记在 `CANVAS-WRITEBACK.md` 第 3 节。要动结构就在放射图/列表里动。
-4. Notes 融入 Obsidian（轻量版，用户拍板"md 格式 + 可跳转"即够，不拆笔记文件不做补全）：**四阶段已全做完**
-   （面板渲染态 + `links`/反链 → 放射图选中弦线与文件卡片 → 白板链接边与 file 节点 → Markdown/CSV 带摘要与链接），
-   操作书 `NOTES-INTEGRATION.md` 里的"明确不做"清单仍然有效；下一步是**看着改**（用户："先开始做吧,做好了再看着改"）。
+4. Notes 融入 Obsidian 走了两轮：先按操作书做完四阶段轻量集成，当晚用户实机反馈后翻案成 **md 文件唯一真相**
+   （面板只读预览 + 原生编辑器撰写，不做双向同步；Custom fields 与白板 `#tags` 行删除）。
+   `NOTES-INTEGRATION.md` 已按翻案改写；下一步仍是**看着改**（用户："先开始做吧,做好了再看着改"）。
 5. 上面"剩余未实测"里等用户点头的几项：留白版模板、层级明度阶梯、色盘降饱和、Focus Filter 色块可读性。

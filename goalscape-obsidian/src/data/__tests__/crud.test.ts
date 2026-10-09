@@ -46,8 +46,7 @@ function makeScape(): GoalScape {
                   title: "H1a",
                   importance: 100,
                   tags: ["Now"],
-                  fields: { kpi: "v" },
-                  notes: "note",
+                  note: "Goalscapes/x.notes/H1a.md",
                   color: "#123456",
                 }),
               ],
@@ -290,12 +289,13 @@ describe("extractSubtree / pasteSubtree", () => {
 
     renameGoal(scape, "h1", "MUTATED");
     node(scape, "h1a").tags.push("Later");
-    node(scape, "h1a").fields!.kpi = "changed";
+    node(scape, "h1a").note = "Goalscapes/x.notes/changed.md";
 
     assert.equal(node(scape, "h1").title, "MUTATED");
     assert.equal(clip.children[0].title, "H1", "快照不能是活引用");
     assert.deepEqual(clip.children[0].children[0].tags, ["Now"]);
-    assert.deepEqual(clip.children[0].children[0].fields, { kpi: "v" });
+    // 笔记指针不跟着复制：两个块指同一个 .md，改一个就是改另一个，而面板上看不出来
+    assert.equal(clip.children[0].children[0].note, undefined);
     assert.notEqual(clip.children[0].children[0].tags, node(scape, "h1a").tags);
   });
 
