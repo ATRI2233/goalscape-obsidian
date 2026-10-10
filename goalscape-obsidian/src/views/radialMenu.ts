@@ -5,7 +5,7 @@
 import { App, Menu, Notice } from "obsidian";
 import { GoalNode, findNode, flattenTree } from "../data/types";
 import type { GoalTreeStore } from "../data/goalTree";
-import { addGoal, deleteGoal, renameGoal, extractSubtree, pasteSubtree } from "../data/crud";
+import { addGoal, deleteGoal, renameGoal, extractSubtree, pasteSubtree, toggleCollapsed } from "../data/crud";
 import { promptInput, confirmAction } from "./promptModal";
 
 export type ClipboardMode = "copy" | "cut";
@@ -67,10 +67,7 @@ export function buildGoalMenu(deps: GoalMenuDeps): Menu {
       item.setTitle(node.collapsed ? "Expand" : "Collapse")
         .setIcon(node.collapsed ? "unfold-vertical" : "fold-vertical")
         .onClick(() => {
-          store.mutate((s) => {
-            const target = findNode(s.mainGoal, node.id);
-            if (target) target.node.collapsed = !target.node.collapsed;
-          });
+          store.mutate((s) => toggleCollapsed(s, node.id));
         })
     );
   }

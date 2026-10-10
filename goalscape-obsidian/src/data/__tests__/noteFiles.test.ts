@@ -5,6 +5,7 @@
 
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
+import type { TFile } from "obsidian";
 import { DEFAULT_GOALSCAPE_PATH } from "../goalTree";
 import { GS_ID_KEY, NoteStore } from "../noteFiles";
 import { findNode } from "../types";
@@ -148,7 +149,7 @@ describe("migrate：旧版存在 JSON 里的正文搬进 .md", () => {
 });
 
 describe("rebuild：把文件压成纯数据 NoteIndex", () => {
-  it("text 剥掉 frontmatter（不剥的话 gsId 会变成摘要第一行），links 只收解析得到的非嵌入目标", async () => {
+  it("text 剥掉 frontmatter（不剥的话 gsId 会变成摘要第一行），refs 只收解析得到的非嵌入目标", async () => {
     const body = ["今天跑 5 公里，见 [[跑步日志]]", "![[附图]]", "[[查无此人]]"].join("\n");
     const { notes } = await setup(
       [{ id: "a", title: "Run", note: `${DIR}/Run.md` }],
@@ -161,7 +162,38 @@ describe("rebuild：把文件压成纯数据 NoteIndex", () => {
     const info = notes.get("a")!;
     assert.equal(info.text.split("\n")[0], "今天跑 5 公里，见 [[跑步日志]]");
     assert.ok(!info.text.includes(GS_ID_KEY));
-    assert.deepEqual(info.links, ["跑步日志.md"], "嵌入不算关系，指不到的幽灵链接不进图");
+    assert.deepEqual(
+      info.refs,
+      [{ path: "跑步日志.md", anchor: "", goalId: null }],
+      "嵌入不算关系，指不到的幽灵链接不进图，不属于任何块的笔记 goalId 为 null"
+    );
+  });
+
+  it("锚点原样留着，指向别的块的笔记就认得出那个块", async () => {
+    const { notes } = await setup(
+      [
+        { id: "a", title: "Run", note: `${DIR}/Run.md` },
+        { id: "b", title: "Sleep", note: `${DIR}/Sleep.md` },
+      ],
+      {
+        [`${DIR}/Run.md`]: `---\n${GS_ID_KEY}: a\n---\n\n见 [[Sleep#^计划]] 与 [[Sleep#睡眠]]`,
+        [`${DIR}/Sleep.md`]: `---\n${GS_ID_KEY}: b\n---\n\n睡够 8 小时`,
+      }
+    );
+    await notes.syncMap();
+    assert.deepEqual(notes.get("a")?.refs, [
+      { path: `${DIR}/Sleep.md`, anchor: "#^计划", goalId: "b" },
+      { path: `${DIR}/Sleep.md`, anchor: "#睡眠", goalId: "b" },
+    ]);
+    assert.deepEqual(notes.get("b")?.refs, [], "没写链接就是没关系，不靠猜");
+  });
+
+  it("笔记链自己的另一节不算块间关系（自链会让弦线画成一个自环）", async () => {
+    const { notes } = await setup([{ id: "a", title: "Run", note: `${DIR}/Run.md` }], {
+      [`${DIR}/Run.md`]: `---\n${GS_ID_KEY}: a\n---\n\n见 [[Run#计划]]`,
+    });
+    await notes.syncMap();
+    assert.deepEqual(notes.get("a")?.refs, []);
   });
 
   it("文件被用户删掉＝这块没有笔记，不追着重建", async () => {
@@ -249,12 +281,16 @@ describe("watch：只有自己的笔记被改才重画", () => {
     vault.coldCache.add(`${DIR}/Run.md`);
     notes.watch();
     await notes.syncMap();
-    assert.deepEqual(notes.get("a")?.links, [], "冷缓存下这一轮确实读不到链接");
+    assert.deepEqual(notes.get("a")?.refs, [], "冷缓存下这一轮确实读不到链接");
 
     vault.coldCache.delete(`${DIR}/Run.md`);
     vault.emitCacheChanged(`${DIR}/Run.md`);
     await settle(700);
-    assert.deepEqual(notes.get("a")?.links, ["跑步日志.md"], "解析完必须自己追上，不能等用户再动一下");
+    assert.deepEqual(
+      notes.get("a")?.refs.map((r) => r.path),
+      ["跑步日志.md"],
+      "解析完必须自己追上，不能等用户再动一下"
+    );
   });
 
   it("watch() 重复调用不重复注册监听", async () => {
@@ -267,3 +303,48 @@ describe("watch：只有自己的笔记被改才重画", () => {
     assert.equal(after - before, 5, "vault 的 modify/create/delete/rename 各一条 + metadataCache changed");
   });
 });
+
+describe("ownerOf：这篇笔记是谁的笔记（笔记→块那条命令的唯一依据）", () => {
+  // 运行时 "obsidian" 就是 test/mocks 那份，同一个 TFile 类；类型对不上只是编译期的事
+  const file = (vault: { files: Map<string, unknown> }, path: string): TFile =>
+    vault.files.get(path) as unknown as TFile;
+
+  it("当前图的索引里路径对得上就认，不读正文", async () => {
+    const { vault, notes } = await setup([{ id: "a", title: "Run", note: `${DIR}/Run.md` }], {
+      [`${DIR}/Run.md`]: `---\n${GS_ID_KEY}: a\n---\n\n正文`,
+    });
+    await notes.syncMap();
+    assert.deepEqual(notes.ownerOf(file(vault, `${DIR}/Run.md`)), { scapePath: MAP, goalId: "a" });
+  });
+
+  it("用户手写进笔记目录、树里没记路径的：按 frontmatter 的 gsId 认回当前这张图", async () => {
+    const { vault, notes } = await setup([{ id: "a", title: "Run" }], {
+      [`${DIR}/手写的.md`]: `---\n${GS_ID_KEY}: a\n---\n\n自己起的文件名`,
+    });
+    await notes.syncMap();
+    assert.deepEqual(notes.ownerOf(file(vault, `${DIR}/手写的.md`)), { scapePath: MAP, goalId: "a" });
+  });
+
+  it("开着的是别的图的笔记：目录名反推出图路径，交给命令去切图", async () => {
+    const { vault, notes } = await setup([{ id: "a", title: "Run" }], {
+      "Goalscapes/2026/work.notes/计划.md": `---\n${GS_ID_KEY}: w7\n---\n\n正文`,
+    });
+    await notes.syncMap();
+    assert.deepEqual(notes.ownerOf(file(vault, "Goalscapes/2026/work.notes/计划.md")), {
+      scapePath: "Goalscapes/2026/work.goalscape.json",
+      goalId: "w7",
+    });
+  });
+
+  it("普通笔记一律 null：认不出归属就不制造跳不过去的入口", async () => {
+    const { vault, notes } = await setup([{ id: "a", title: "Run" }], {
+      "日记/2026-10-09.md": "今天没跑步",
+      // gsId 指向的块早没了：留着旧 frontmatter 的笔记不该把命令勾起来
+      "散落的.md": `---\n${GS_ID_KEY}: ghost\n---\n\n正文`,
+    });
+    await notes.syncMap();
+    assert.equal(notes.ownerOf(file(vault, "日记/2026-10-09.md")), null);
+    assert.equal(notes.ownerOf(file(vault, "散落的.md")), null);
+  });
+});
+

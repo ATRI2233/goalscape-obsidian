@@ -41,10 +41,17 @@ npm test           # 数据层单测（Node 内置 node:test，零新依赖）
 npm run test:ui    # 真实 Obsidian 界面回归
 ```
 
-`test:ui` 的前提：Obsidian 以 `--remote-debugging-port=9333` 启动、窗口在最前台，脚本会把插件
-disable/enable 一次，别在手正编辑时跑。它自带现场快照与还原，只往 vault 写 `ZZ_*` 临时图。
+两个脚本都要知道你的 vault 在哪，路径不写死在仓库里，由环境变量给。Windows 设一次即可（重开终端生效）：
 
-部署：仓库根的 `install-plugin.bat` 把 `main.js` / `manifest.json` / `styles.css` 复制进 vault 的
+```bash
+setx GS_VAULT "D:/path/to/your-vault"
+```
+
+`test:ui` 的前提：`GS_VAULT` 已设、Obsidian 以 `--remote-debugging-port=9333` 启动、窗口在最前台，脚本会把插件
+disable/enable 一次，别在手正编辑时跑。它自带现场快照与还原，只往 vault 写 `ZZ_*` 临时图。
+`npm run check` 在没设 `GS_VAULT` 时把部署那一步记为 SKIP，构建与单测照样给结论。
+
+部署：仓库根的 `install-plugin.bat` 把 `main.js` / `manifest.json` / `styles.css` 复制进 `%GS_VAULT%` 的
 `.obsidian/plugins/goalscape-obsidian/`。**正在运行的 Obsidian 不会热加载**，要 disable/enable 插件才生效。
 
 ## 已知边界

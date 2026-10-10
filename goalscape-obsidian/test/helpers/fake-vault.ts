@@ -210,7 +210,9 @@ interface FakeCache {
 }
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n)?/;
-const WIKILINK_RE = /(?<!!)\[\[([^\]|#]+?)(?:#[^|]*)?(?:\|[^\]]*)?\]\]/g;
+// 真实 metadataCache 的 link 字段带子路径（`笔记#小节` / `笔记#^块`），别名被剥进 displayText：
+// 锚点是"跳到对方笔记的某一节"的唯一载体，仿制时不能丢
+const WIKILINK_RE = /(?<!!)\[\[([^\]|#]+)((?:#[^\]|]*)?)(?:\|[^\]]*)?\]\]/g;
 
 function parseCache(raw: string): FakeCache {
   const out: FakeCache = { links: [] };
@@ -227,7 +229,8 @@ function parseCache(raw: string): FakeCache {
   }
   for (const m of body.matchAll(WIKILINK_RE)) {
     const t = m[1].trim();
-    if (t && !out.links.some((x) => x.link === t)) out.links.push({ link: t });
+    const link = `${t}${m[2]}`;
+    if (t && !out.links.some((x) => x.link === link)) out.links.push({ link });
   }
   return out;
 }

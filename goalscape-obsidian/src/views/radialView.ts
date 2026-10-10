@@ -1,24 +1,26 @@
 // src/views/radialView.ts
-// Goalscape 放射图视图：单行工具栏（呈现方式 + 图文件 + 筛选）+ SVG 渲染 + 选中态 + 视野手势。
+// Goalscape 放射图视图：单行工具栏（呈现方式 + 图文件 + 筛选）+ 渲染编排 + 选中态 + 视野手势。
 // 增删改一律走扇区右键菜单（radialMenu.ts），工具栏不重复提供入口。
-// 几何/配色/视野数学在 radialGeometry.ts，两类数据拖拽在 radialDrag.ts，过滤谓词在 focusFilter.ts
-// —— 本文件只负责把它们接到 Obsidian 的 ItemView 生命周期上。
+// 几何/配色/视野数学在 radialGeometry.ts，扇区画法在 sectorLayer.ts，选中态的弦线在 linkLayer.ts，
+// 两类数据拖拽在 radialDrag.ts，过滤谓词在 focusFilter.ts —— 本文件只负责把它们接到 Obsidian 的 ItemView 生命周期上。
 
 import { ItemView, Menu, WorkspaceLeaf, setIcon } from "obsidian";
-import type GoalscapePlugin from "../main";
-import { GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
-import { backlinks, firstLine } from "../data/notes";
-import { SECTOR_RAMP, branchFills, shadeOf } from "../data/palette";
+import type { GoalscapeHost } from "./host";
+import { GoalNode, GoalScape, NoteInfo, NoteRef, findNode, flattenTree } from "../data/types";
+import { setCollapsed } from "../data/crud";
+import { firstLine } from "../data/notes";
+import { branchFills } from "../data/palette";
 import { InfoPanel } from "./infoPanel";
 import { FocusFilter, FilterCriteria, collectMatchingIds } from "./focusFilter";
 import {
-  SVG_NS, CX, CY, VIEW_SIZE,
-  arcPath, bandScaleOf, bevelArc, childShares, fitLabel, labelInk, progressRim, radialUnit, sectorEdges,
+  SVG_NS,
   FULL_VIEW, Viewport, panView, toLogicalPoint, viewBoxOf, zoomView,
   SectorShape,
 } from "../geometry/radialGeometry";
 import { DragSurface, ReparentDragController, WeightDragController } from "./radialDrag";
 import { buildGoalMenu } from "./radialMenu";
+import { drawSectors } from "./sectorLayer";
+import { drawLinkDecorations } from "./linkLayer";
 import { VIEW_RADIAL } from "./viewTypes";
 import { createViewSwitcher } from "./viewSwitcher";
 
@@ -33,10 +35,17 @@ let viewSeq = 0;
 /** 位移超过这个值才认定是平移，否则按"点了空白处清除选中"处理（与 reparent 的阈值同一个道理） */
 const PAN_ACTIVATE_PX = 5;
 
+// 选中态的笔记卡不画在 svg 里，而是钉在视图右缘的 HTML 浮层上（见 renderNoteDock）：
+// 钉边才不挡图、才能同时开好几张，而文字换行/滚动/关闭按钮这些活 HTML 干起来是白拿的。
+
 export class RadialGoalMapView extends ItemView {
   private unsubscribe?: () => void;
   private selectedId: string | null = null;
   private rootEl!: HTMLElement;
+  /** 右缘笔记浮层的宿主（钉住的那一列） */
+  private noteDock!: HTMLElement;
+  /** 钉住的块 id，按打开顺序；× 关掉一张，换图全清 */
+  private pinned: string[] = [];
   private infoPanel!: InfoPanel;
   private filterBar!: FocusFilter;
   private filterCriteria: FilterCriteria = {};
@@ -51,7 +60,7 @@ export class RadialGoalMapView extends ItemView {
   private weightDrag!: WeightDragController;
   private reparentDrag!: ReparentDragController;
 
-  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapePlugin) {
+  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapeHost) {
     super(leaf);
   }
 
@@ -77,7 +86,11 @@ export class RadialGoalMapView extends ItemView {
     });
 
     const mainRow = this.contentEl.createDiv({ cls: "goalscape-main-row" });
-    this.rootEl = mainRow.createDiv({ cls: "goalscape-radial-root" });
+    // 浮层要盖在图上、又不能跟着 svg 一起被 render() 重建，所以给它单独一层 wrapper；
+    // rootEl 仍是 svg 的宿主，手势监听与 liveSvg() 的查找路径都不变
+    const mapWrap = mainRow.createDiv({ cls: "goalscape-map-wrap" });
+    this.rootEl = mapWrap.createDiv({ cls: "goalscape-radial-root" });
+    this.noteDock = mapWrap.createDiv({ cls: "goalscape-note-dock" });
     // 手势挂在 rootEl 而不是 svg 上：render() 每次都重建 svg，挂在 svg 上就得每帧重绑，
     // 而 registerDomEvent 的解绑只在视图销毁时跑一次。滚轮/平移都靠事件冒泡到这里。
     this.registerDomEvent(this.rootEl, "wheel", (e) => this.onWheel(e), { passive: false });
@@ -115,6 +128,14 @@ export class RadialGoalMapView extends ItemView {
 
   clearSelection(): void {
     this.select(null);
+  }
+
+  /** "跳到所属块"用：展开祖先折叠后选中。返回 false = 这张树里没有这个块，调用方给反馈 */
+  revealGoal(id: string): boolean {
+    const scape = this.plugin.store.scape;
+    if (!scape || !findNode(scape.mainGoal, id)) return false;
+    this.selectRevealing(id);
+    return true;
   }
 
   // ──────────────────────────── 工具栏 ────────────────────────────
@@ -178,6 +199,9 @@ export class RadialGoalMapView extends ItemView {
     const scape = this.plugin.store.scape;
     this.rootEl.empty();
     this.nodePositions.clear();
+    // 浮层不在 svg 里，所以 rootEl.empty() 不会带走它 —— 每轮渲染自己重画一遍，
+    // 于是块被删掉、笔记文件被删掉、正文被改，卡片都跟着这一轮更新
+    this.renderNoteDock();
     if (!scape) return;
 
     const svg = document.createElementNS(SVG_NS, "svg") as SVGSVGElement;
@@ -195,137 +219,41 @@ export class RadialGoalMapView extends ItemView {
     map.addClass("goalscape-map");
     svg.appendChild(map);
 
-    // 一档厚度对应多少半径：让"累计最厚的那条链"恰好铺到 MAX_R，
-    // 于是各分支按自己的 bandScale 长到不同半径，谁也不越出 viewBox
-    const unit = radialUnit(scape.mainGoal);
-    const matchingIds = collectMatchingIds(scape, this.filterCriteria);
     // 底色只有一个来源：色相沿父链继承、浓淡由层级锁定，整条分支天然同色，父节点改色子节点不需要跟着改
-    this.gradSeq = 0;
     const fills = branchFills(scape.mainGoal, this.plugin.tone);
+    this.gradSeq = 0;
 
-    const drawNode = (
-      node: GoalNode,
-      depth: number,
-      startAngle: number,
-      endAngle: number,
-      rInner: number,
-      parentAngles: { startAngle: number; endAngle: number } | null
-    ) => {
-      const span = endAngle - startAngle;
-      if (span <= 0.0005) return;
-      const rOuter = rInner + bandScaleOf(node) * unit;
-      const shape: SectorShape = { rInner, rOuter, startAngle, endAngle, depth };
-      this.nodePositions.set(node.id, shape);
-
-      const edge = sectorEdges(shape);
-      const color = fills.get(node.id)!;
-      const ink = labelInk(color);
-      const dim = !!matchingIds && !matchingIds.has(node.id);
-      const d = arcPath(CX, CY, edge.rInner, edge.rOuter, edge.a0, edge.a1);
-
-      const path = document.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", d);
-      path.setAttribute("fill", this.sectorFill(defs, color, edge));
-      // 扁平的那个中间色留在属性上：fill 是个 url(#…) 之后，调试和回归断言都得能一眼看出这块是谁家的色
-      path.setAttribute("data-color", color);
-      path.setAttribute("stroke", "var(--background-primary)");
-      path.setAttribute("stroke-width", "1");
-      path.setAttribute("data-id", node.id);
-      if (node.id === this.selectedId) path.addClass("goalscape-selected");
-      if (node.collapsed && node.children.length) path.addClass("goalscape-collapsed");
-      if (dim) path.addClass("goalscape-dimmed");
-
-      path.addEventListener("click", (e) => {
-        // 挡住冒泡，否则 svg 空白处的"点击清除选中"会把刚选中的节点又清掉。
-        // 外环扇区的选中来自 reparent 的 pointerup；中心盘不参与拖拽，只能在这里选中。
-        e.stopPropagation();
-        if (depth === 0) this.select(node.id);
-      });
-      path.addEventListener("contextmenu", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        this.select(node.id);
-        this.showContextMenu(e as MouseEvent, node);
-      });
-      path.addEventListener("pointerdown", (e) => {
-        if (depth === 0) return;
-        this.reparentDrag.start(e as PointerEvent, node.id);
-      });
-      // 原生 <title> 挂在扇区上：标签被截断、或者弧长太干脆没画字的格子，悬停也认得出是谁
-      // （.goalscape-label 是 pointer-events:none，挂在文字上永远不会触发）
-      const tip = document.createElementNS(SVG_NS, "title");
-      const summary = firstLine(this.plugin.notes.get(node.id)?.text ?? "");
-      tip.textContent = summary
-        ? `${node.title} · ${node.progress ?? 0}%\n${summary}`
-        : `${node.title} · ${node.progress ?? 0}%`;
-      path.appendChild(tip);
-      map.appendChild(path);
-
-      // 外缘倒角：一道极细的亮边把轮廓勾出来（颜色在 CSS 里，暗底用亮边、亮底用暗边）
-      const bevel = bevelArc(edge);
-      if (bevel) this.addOverlay(map, bevel, dim, ["goalscape-bevel"]);
-
-      // 进度画在外缘：只画"走完的那一段"，没走到的地方一律不留痕迹（画轨道会糊成一条黑边）
-      const rim = progressRim(edge, node.progress ?? 0);
-      if (rim) {
-        this.addOverlay(map, rim.d, dim, ["goalscape-rim"], {
-          stroke: ink.fill, "stroke-dasharray": rim.dash,
-        });
-      }
-
-      const midAngle = (startAngle + endAngle) / 2;
-      if (depth === 0) {
-        // 根节点：标题水平居中于 hub，下方显示整体进度
-        const title = this.addText(svg, CX, CY - 8, ink, ["goalscape-label", "goalscape-label-root"]);
-        title.textContent = node.title;
-        const pct = this.addText(svg, CX, CY + 16, ink, ["goalscape-label", "goalscape-label-root-pct"]);
-        pct.textContent = `${node.progress ?? 0}%`;
-      } else {
-        const rMid = (edge.rInner + edge.rOuter) / 2;
-        // 顺环还是沿半径，由 fitLabel 按"哪边写得下更多字"定，这里只管落笔
-        const fit = fitLabel(node.title, edge, `${node.progress ?? 0}%`);
-        if (fit) {
-          const lx = CX + Math.cos(midAngle) * rMid;
-          const ly = CY + Math.sin(midAngle) * rMid;
-          const label = this.addText(svg, lx, ly, ink, ["goalscape-label"]);
-          // 回归要拿"这条文字属于哪个扇区"对回环带半径，光看文案对不上（截断过的不一样）
-          label.setAttribute("data-id", node.id);
-          label.setAttribute("data-mode", fit.mode);
-          // CSS 里那档 14px 是基准，压小的字号只能内联盖过它
-          label.style.setProperty("font-size", `${fit.fontSize}px`);
-          label.setAttribute("transform", `rotate(${fit.angle.toFixed(2)} ${lx} ${ly})`);
-          label.textContent = fit.text;
-        }
-      }
-
-      if (node.id === this.selectedId && depth > 0) {
-        const handle = document.createElementNS(SVG_NS, "circle");
-        handle.setAttribute("cx", String(CX + Math.cos(midAngle) * edge.rOuter));
-        handle.setAttribute("cy", String(CY + Math.sin(midAngle) * edge.rOuter));
-        handle.setAttribute("r", "9");
-        handle.addClass("goalscape-weight-handle");
-        handle.addEventListener("pointerdown", (e) => {
-          const p = parentAngles ?? { startAngle, endAngle };
-          this.weightDrag.start(e as PointerEvent, node.id, startAngle, p.startAngle, p.endAngle);
-        });
-        svg.appendChild(handle);
-      }
-
-      if (node.collapsed) return;
-      const shares = childShares(node);
-      let cursor = startAngle;
-      node.children.forEach((c, i) => {
-        // 子级只吃 shares[i] 这一份，父扇区剩下的角度就是留白
-        const cSpan = shares[i] * span;
-        drawNode(c, depth + 1, cursor, cursor + cSpan, rOuter, { startAngle, endAngle });
-        cursor += cSpan;
-      });
-    };
-
-    drawNode(scape.mainGoal, 0, -Math.PI / 2, Math.PI * 1.5, 0, null);
+    drawSectors({
+      uid: this.uid,
+      svg,
+      defs,
+      map,
+      scape,
+      fills,
+      matchingIds: collectMatchingIds(scape, this.filterCriteria),
+      nodePositions: this.nodePositions,
+      selectedId: this.selectedId,
+      noteSummary: (id) => firstLine(this.plugin.notes.get(id)?.text ?? ""),
+      select: (id) => this.select(id),
+      openMenu: (e, node) => this.showContextMenu(e, node),
+      startReparent: (e, id) => this.reparentDrag.start(e, id),
+      startWeight: (e, node, self, parent) =>
+        this.weightDrag.start(e, node.id, self.startAngle, parent.startAngle, parent.endAngle),
+    });
 
     // 链接装饰层：只有选中才存在，画在 map 之外（不跟扇区吃同一份投影）
-    this.drawLinkDecorations(svg, defs, scape, fills);
+    drawLinkDecorations({
+      svg,
+      defs,
+      scape,
+      fills,
+      selectedId: this.selectedId,
+      nodePositions: this.nodePositions,
+      noteIndex: this.plugin.notes.notes,
+      nextGradientId: () => `${this.uid}-c${++this.gradSeq}`,
+      lightSector: (id, on) => this.litSector(id, on),
+      reveal: (id) => this.selectRevealing(id),
+    });
 
     svg.addEventListener("click", () => {
       // 平移结束时浏览器还会补一次 click，它不该把选中态清掉；下一次真点击前把标记归零
@@ -357,53 +285,11 @@ export class RadialGoalMapView extends ItemView {
     return el;
   }
 
-  /**
-   * 扇区之上的一条装饰路径（光源叠层 / 进度条）：不参与命中测试，
-   * 筛选未命中时跟着所属扇区一起变淡。stroke 走属性、不走类，
-   * 因为颜色逐扇区不同，而类规则会盖掉同名属性（见 addText）。
-   */
-  private addOverlay(
-    map: SVGGElement, d: string, dim: boolean, classes: string[], attrs: Record<string, string> = {}
-  ): void {
-    const el = document.createElementNS(SVG_NS, "path");
-    el.setAttribute("d", d);
-    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-    el.addClass(...classes);
-    if (dim) el.addClass("goalscape-dimmed");
-    map.appendChild(el);
-  }
-
-  /**
-   * 每个块自己"从内边缘到外边缘由深到浅"：同一个色相、同一个饱和度，只把明度各偏一半跨度。
-   * 渐变按全图坐标算，但半径取**本块的外径**、深色那一端停在**本块的内径**上 ——
-   * 于是厚块薄块都是"整块走完这一档跨度"，而不是薄块只蹭到全图渐变的一小条（那正是之前看不出质感的原因）。
-   */
-  private sectorFill(defs: SVGDefsElement, color: string, edge: { rInner: number; rOuter: number }): string {
-    const id = `${this.uid}-g${++this.gradSeq}`;
-    const grad = document.createElementNS(SVG_NS, "radialGradient") as SVGRadialGradientElement;
-    grad.id = id;
-    grad.setAttribute("gradientUnits", "userSpaceOnUse");
-    grad.setAttribute("cx", String(CX));
-    grad.setAttribute("cy", String(CY));
-    grad.setAttribute("r", String(edge.rOuter));
-    const dark = shadeOf(color, -SECTOR_RAMP / 2);
-    const light = shadeOf(color, SECTOR_RAMP / 2);
-    const stop = (offset: string, c: string): void => {
-      const s = document.createElementNS(SVG_NS, "stop");
-      s.setAttribute("offset", offset);
-      s.setAttribute("stop-color", c);
-      grad.appendChild(s);
-    };
-    // 0 到内径那一段用同一个深色垫着：中心盘之外没有像素会用到它，但缺了它内缘会被插值成中间色
-    stop("0", dark);
-    stop(String(Math.max(0, edge.rInner / edge.rOuter)), dark);
-    stop("1", light);
-    defs.appendChild(grad);
-    return `url(#${id})`;
-  }
-
   private select(id: string | null): void {
     this.selectedId = id;
+    // 点一次就把这块的笔记卡钉到右缘：之后换选中、点空白都不收回，只有 × 收回，
+    // 于是可以同时对着读好几块的笔记（用户要的"点击一次保持打开"）
+    if (id) this.pin(id);
     this.render();
     this.infoPanel.show(id);
   }
@@ -416,14 +302,15 @@ export class RadialGoalMapView extends ItemView {
   private selectRevealing(id: string): void {
     const scape = this.plugin.store.scape;
     if (!scape || !findNode(scape.mainGoal, id)) return;
-    const collapsed: GoalNode[] = [];
+    const collapsedIds: string[] = [];
     let parent = findNode(scape.mainGoal, id)?.parent ?? null;
     while (parent) {
-      if (parent.collapsed) collapsed.push(parent);
+      if (parent.collapsed) collapsedIds.push(parent.id);
       parent = findNode(scape.mainGoal, parent.id)?.parent ?? null;
     }
-    // mutate 拿到的就是这棵树本身，攥着的节点引用直接可改；没人折叠就整个跳过落盘
-    if (collapsed.length) this.plugin.store.mutate(() => collapsed.forEach((n) => delete n.collapsed));
+    // 没人折叠就整个跳过落盘（mutate 会写 JSON 并 notify）
+    if (collapsedIds.length)
+      this.plugin.store.mutate((s) => collapsedIds.forEach((cid) => setCollapsed(s, cid, false)));
     this.select(id);
   }
 
@@ -443,14 +330,7 @@ export class RadialGoalMapView extends ItemView {
     menu.showAtMouseEvent(event);
   }
 
-  // ──────────────────────────── 链接装饰层（仅选中时） ────────────────────────────
-
-  /** 扇区弧中点（环带半径中值）：弦线端点的锚 */
-  private sectorMid(shape: SectorShape): { x: number; y: number } {
-    const mid = (shape.startAngle + shape.endAngle) / 2;
-    const r = (shape.rInner + shape.rOuter) / 2;
-    return { x: CX + Math.cos(mid) * r, y: CY + Math.sin(mid) * r };
-  }
+  // ──────────────────────────── 扇区联动高亮 ────────────────────────────
 
   /** 把对端扇区"点亮"（弦线 hover 的联动高亮） */
   private litSector(id: string, on: boolean): void {
@@ -460,127 +340,107 @@ export class RadialGoalMapView extends ItemView {
     else el.removeClass("goalscape-lit");
   }
 
+  // ──────────────────────────── 右缘笔记浮层（可钉多张） ────────────────────────────
+
+  /** 钉一块。没笔记文件的块不钉 —— 卡片是笔记的镜子，不是装饰（红线同 noteFiles） */
+  private pin(id: string): void {
+    if (!this.plugin.notes.get(id) || this.pinned.includes(id)) return;
+    this.pinned.push(id);
+  }
+
+  /** 供 main.ts 在换图/套模板后调用：那些 id 属于上一张图，留着就是隔空指认 */
+  clearPinnedNotes(): void {
+    this.pinned = [];
+    this.renderNoteDock();
+  }
+
   /**
-   * 零噪音规矩：不选中时图面和本功能出现之前完全一样。
-   * 出链与反链都画 —— links 数据结构里对端选中时画不到自己，backlinks 补上"谁引用我"，
-   * 和信息面板的 Referenced by 同语义。目标在折叠分支里没被画出来就跳过，
-   * 为一个看不见的端点改动别处的折叠状态不值得。
-   * 弦线：三次 bezier、两控制点钉在图心（弧线向圆心下垂），描边渐变取两端各自的底色。
+   * 浮层重画。认不出的 id（块删了 / 笔记文件删了 / 换图）当场从 pinned 里掉出去，
+   * 所以删除那几条路径不必再各自挂一遍清理。
    */
-  private drawLinkDecorations(
-    svg: SVGSVGElement,
-    defs: SVGDefsElement,
-    scape: GoalScape,
-    fills: Map<string, string>
-  ): void {
-    if (!this.selectedId) return;
-    const found = findNode(scape.mainGoal, this.selectedId);
-    const mine = found ? this.nodePositions.get(found.node.id) : undefined;
-    if (!found || !mine) return;
+  private renderNoteDock(): void {
+    const scape = this.plugin.store.scape;
+    this.pinned = this.pinned.filter(
+      (id) => !!scape && !!findNode(scape.mainGoal, id) && !!this.plugin.notes.get(id)
+    );
+    const dock = this.noteDock;
+    dock.empty();
+    // 有卡钉着就让图自己缩一格：浮层"贴边"的意义是不挡图，压在最宽的右半环上就成了挡图
+    dock.parentElement?.toggleClass("has-note-dock", this.pinned.length > 0);
+    for (const id of this.pinned) {
+      const found = findNode(scape!.mainGoal, id)!;
+      dock.appendChild(this.noteCardEl(found.node, this.plugin.notes.get(id)!, scape!));
+    }
+  }
 
-    const p1 = this.sectorMid(mine);
-    const partners = Array.from(
-      new Set([
-        ...(found.node.links ?? []),
-        ...backlinks(scape.mainGoal, found.node.id).map((n) => n.id),
-      ])
-    ).filter((id) => id !== found.node.id);
+  /**
+   * 一张钉住的卡：块标题 + 正文摘要 + 它链出去的那些笔记（带锚点，逐行可点）+ 文件名。
+   * 点卡片开自己的笔记，点某一行开对方那一节，× 只收这一张。
+   */
+  private noteCardEl(node: GoalNode, info: NoteInfo, scape: GoalScape): HTMLElement {
+    const card = createDiv({ cls: "goalscape-note-card", attr: { "data-goal": node.id } });
+    card.addEventListener("click", () => this.openNote(info.path, ""));
+    card.addEventListener("pointerenter", () => this.litSector(node.id, true));
+    card.addEventListener("pointerleave", () => this.litSector(node.id, false));
 
-    const layer = document.createElementNS(SVG_NS, "g");
-    layer.addClass("goalscape-chord-layer");
-    svg.appendChild(layer);
+    const head = card.createDiv({ cls: "goalscape-note-card-head" });
+    const icon = head.createDiv({ cls: "goalscape-note-card-icon" });
+    setIcon(icon, "file-text");
+    head.createDiv({ cls: "goalscape-note-card-title", text: node.title });
+    const close = head.createEl("button", {
+      cls: "goalscape-note-card-close",
+      attr: { "aria-label": "Close this note card", title: "关闭" },
+    });
+    setIcon(close, "x");
+    // × 不能被卡片自己的 click 一起接走，否则关一张顺带把编辑器弹出来
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      this.pinned = this.pinned.filter((id) => id !== node.id);
+      this.renderNoteDock();
+    });
 
-    for (const otherId of partners) {
-      const shape = this.nodePositions.get(otherId);
-      if (!shape) continue;
-      const p2 = this.sectorMid(shape);
-      const c1 = fills.get(found.node.id) ?? "#94a3b8";
-      const c2 = fills.get(otherId) ?? "#94a3b8";
+    const body = this.excerpt(info.text);
+    card.createDiv({
+      cls: `goalscape-note-card-body${body ? "" : " is-empty"}`,
+      text: body || "（还没有正文）",
+    });
 
-      const gid = `${this.uid}-c${++this.gradSeq}`;
-      const grad = document.createElementNS(SVG_NS, "linearGradient");
-      grad.id = gid;
-      grad.setAttribute("gradientUnits", "userSpaceOnUse");
-      grad.setAttribute("x1", String(p1.x));
-      grad.setAttribute("y1", String(p1.y));
-      grad.setAttribute("x2", String(p2.x));
-      grad.setAttribute("y2", String(p2.y));
-      for (const [offset, color] of [["0", c1], ["1", c2]] as const) {
-        const stop = document.createElementNS(SVG_NS, "stop");
-        stop.setAttribute("offset", offset);
-        stop.setAttribute("stop-color", color);
-        grad.appendChild(stop);
-      }
-      defs.appendChild(grad);
-
-      const chord = document.createElementNS(SVG_NS, "path");
-      chord.setAttribute("d", `M ${p1.x} ${p1.y} C ${CX} ${CY} ${CX} ${CY} ${p2.x} ${p2.y}`);
-      chord.setAttribute("stroke", `url(#${gid})`);
-      chord.setAttribute("data-chord", otherId);
-      chord.addClass("goalscape-chord");
-      chord.addEventListener("pointerenter", () => {
-        chord.addClass("goalscape-chord-hot");
-        this.litSector(otherId, true);
-      });
-      chord.addEventListener("pointerleave", () => {
-        chord.removeClass("goalscape-chord-hot");
-        this.litSector(otherId, false);
-      });
-      chord.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.selectRevealing(otherId);
-      });
-      layer.appendChild(chord);
-
-      for (const [p, color] of [[p1, c1], [p2, c2]] as const) {
-        const dot = document.createElementNS(SVG_NS, "circle");
-        dot.setAttribute("cx", String(p.x));
-        dot.setAttribute("cy", String(p.y));
-        dot.setAttribute("r", "4");
-        dot.setAttribute("fill", color);
-        dot.addClass("goalscape-chord-dot");
-        layer.appendChild(dot);
+    if (info.refs.length) {
+      const list = card.createDiv({ cls: "goalscape-note-card-links" });
+      for (const r of info.refs) {
+        const row = list.createDiv({ cls: "goalscape-note-card-link" });
+        row.createSpan({ cls: "goalscape-note-card-arrow", text: "→" });
+        row.createSpan({ cls: "goalscape-note-card-link-title", text: this.refTitle(r, scape) });
+        if (r.anchor) row.createSpan({ cls: "goalscape-note-card-anchor", text: r.anchor });
+        row.setAttr("title", `${r.path}${r.anchor}`);
+        row.addEventListener("click", (e) => {
+          e.stopPropagation();
+          this.openNote(r.path, r.anchor);
+        });
       }
     }
+    card.createDiv({ cls: "goalscape-note-card-file", text: info.path.split("/").pop() ?? info.path });
+    return card;
+  }
 
-    // vault 文件卡片：笔记里解析得到真实文件的才画（未解析的不制造幽灵）。
-    // 解析在 NoteStore 里做完了，这一层拿到的已经是 vault 路径。
-    const hits = (this.plugin.notes.get(found.node.id)?.links ?? []).map((p) => ({
-      path: p,
-      name: (p.split("/").pop() ?? p).replace(/\.md$/i, ""),
-    }));
-    if (!hits.length) return;
-    const mid = (mine.startAngle + mine.endAngle) / 2;
-    // 顶格那一环的卡片可能被 viewBox 裁掉，半径钳在画布内、宁可贴着环缝
-    const rCard = Math.min(mine.rOuter + 26, VIEW_SIZE / 2 - 16);
-    const step = Math.min(0.4, 40 / rCard);
-    hits.forEach((item, i) => {
-      const ang = mid + (i - (hits.length - 1) / 2) * step;
-      const x = CX + Math.cos(ang) * rCard;
-      const y = CY + Math.sin(ang) * rCard;
-      const g = document.createElementNS(SVG_NS, "g");
-      g.setAttribute("transform", `translate(${x - 5} ${y - 7})`);
-      g.addClass("goalscape-vfile");
-      const icon = document.createElementNS(SVG_NS, "path");
-      icon.setAttribute("d", "M0 0 H7 L10 3 V14 H0 Z M7 0 V3 H10");
-      icon.addClass("goalscape-vfile-icon");
-      g.appendChild(icon);
-      const name = document.createElementNS(SVG_NS, "text");
-      name.setAttribute("x", "5");
-      name.setAttribute("y", "24");
-      name.setAttribute("text-anchor", "middle");
-      name.addClass("goalscape-vfile-name");
-      name.textContent = item.name.length > 12 ? `${item.name.slice(0, 11)}…` : item.name;
-      g.appendChild(name);
-      const tip = document.createElementNS(SVG_NS, "title");
-      tip.textContent = item.path;
-      g.appendChild(tip);
-      g.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void this.app.workspace.openLinkText(item.path, item.path, true);
-      });
-      svg.appendChild(g);
-    });
+  /** 摘要只留字面意思：[[目标|别名]] 折成别名、标题行的井号去掉，多行截断交给 CSS */
+  private excerpt(text: string): string {
+    return text
+      .replace(/\[\[[^\]|]*\|([^\]]+)\]\]/g, "$1")
+      .replace(/\[\[([^\]]+)\]\]/g, "$1")
+      .replace(/^#{1,6} +/gm, "")
+      .trim();
+  }
+
+  /** 对端是别的块就写那块标题（内部 id 不上图），普通笔记写文件名 */
+  private refTitle(r: NoteRef, scape: GoalScape): string {
+    return (r.goalId ? findNode(scape.mainGoal, r.goalId)?.node.title : undefined)
+      ?? (r.path.split("/").pop() ?? r.path).replace(/\.md$/i, "");
+  }
+
+  /** 锚点交给 Obsidian 解析：跳到那一节/那一块靠的是它自己的 `#小节` / `#^块` 语法 */
+  private openNote(path: string, anchor: string): void {
+    void this.app.workspace.openLinkText(`${path}${anchor}`, path, true);
   }
 
   // ──────────────────────────── 视野（滚轮缩放 / 平移） ────────────────────────────

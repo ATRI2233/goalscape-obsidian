@@ -3,7 +3,6 @@
 // 由 store 统一负责进度汇总、落盘与视图通知。
 
 import { GoalScape, GoalNode, createGoalNode, findNode } from "./types";
-import { pruneLinks } from "./notes";
 
 export type AddPosition = "child" | "sibling";
 
@@ -33,14 +32,39 @@ export function deleteGoal(scape: GoalScape, id: string): boolean {
   if (!found?.parent) return false;
   const idx = found.parent.children.findIndex((c) => c.id === id);
   if (idx >= 0) found.parent.children.splice(idx, 1);
-  // 被删子树可能别人正链接着它：立刻全树清扫，别让死 id 活到下一次读档
-  pruneLinks(scape.mainGoal);
   return true;
 }
 
 export function renameGoal(scape: GoalScape, id: string, title: string): void {
   const found = findNode(scape.mainGoal, id);
   if (found) found.node.title = title;
+}
+
+/**
+ * 折叠与明度偏移都按"缺席即默认"存：collapsed 缺省是展开，brightness 缺省是 0（沿用分支色）。
+ * 写 false / 0 会在 JSON 里堆一片和缺省等效的字段，也把"到底谁被折叠了"变成逐字段比对的活。
+ * 视图层要改这两个字段只能从这里进。
+ */
+export function setCollapsed(scape: GoalScape, id: string, collapsed: boolean): void {
+  const found = findNode(scape.mainGoal, id);
+  if (!found) return;
+  if (collapsed) found.node.collapsed = true;
+  else delete found.node.collapsed;
+}
+
+export function toggleCollapsed(scape: GoalScape, id: string): void {
+  const found = findNode(scape.mainGoal, id);
+  if (!found) return;
+  setCollapsed(scape, id, !found.node.collapsed);
+}
+
+/** 偏移量落在 -20..20：滑杆之外还有别的入口（白板回写、手改 JSON），越界的值会让配色跳出阶梯 */
+export function setBrightness(scape: GoalScape, id: string, offset: number): void {
+  const found = findNode(scape.mainGoal, id);
+  if (!found) return;
+  const v = Math.max(-20, Math.min(20, Math.round(offset)));
+  if (v === 0) delete found.node.brightness;
+  else found.node.brightness = v;
 }
 
 /**

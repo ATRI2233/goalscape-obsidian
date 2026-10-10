@@ -33,7 +33,14 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CDP = process.env.GS_CDP || "http://127.0.0.1:9333";
-const VAULT = process.env.GS_VAULT || "D:/all codes projeck/ob库--个人记录";
+// 这一步非要有 vault 不可：临时图 ZZ_* 就建在它的 Goalscapes/ 下，路径不写死在仓库里
+const VAULT = process.env.GS_VAULT;
+if (!VAULT) {
+  console.error(
+    '缺少 GS_VAULT：指向那个已装本插件的 Obsidian vault。一次性设置：setx GS_VAULT "D:/path/to/your-vault"（重开终端生效）'
+  );
+  process.exit(1);
+}
 const PLUGIN = "goalscape-obsidian";
 const SCAPE_DIR_NAME = "Goalscapes";
 const SCAPE_DIR = path.join(VAULT, SCAPE_DIR_NAME);
@@ -565,9 +572,23 @@ step("mirror 自动镜像：不用点命令也更新，手工布局与便签都�
   await useTmpMap();
   await setTmpTree(GRID);
   await resetCanvas();
+  const delAt = Date.now();
   await new Promise((r) => setTimeout(r, 1300)); // 防抖 800ms 过了一整轮
+  const canvasState = await json(`(async()=>{
+    const p=${JSON.stringify(TMP_CANVAS)};
+    const ex=await app.vault.adapter.exists(p);
+    const f=app.vault.getAbstractFileByPath(p);
+    return JSON.stringify({
+      exists: ex,
+      bytes: f && f.stat ? f.stat.size : null,
+      sinceDeleteMs: Date.now() - ${delAt},
+      head: ex ? (await app.vault.adapter.read(p)).slice(0, 70) : null,
+      auto: ${PL}.canvas?.auto ?? null,
+      stale: ${PL}.canvas?.stale ?? null,
+      tabs: app.workspace.getLeavesOfType("canvas").length,
+    });})()`);
   ok("白板文件还不存在时，改树不会凭空往 vault 里扔文件",
-    !(await json(`app.vault.adapter.exists(${JSON.stringify(TMP_CANVAS)})`)));
+    JSON.parse(canvasState).exists === false, canvasState);
 
   await gsCommand("export-canvas");
   const first = await waitCanvasDoc((d) => d.nodes.length === 4, "首次导出四张卡片");
@@ -1297,8 +1318,11 @@ async function realClick(sel, nth = 0) {
 }
 
 /** 选中只能"真点一次扇区"：视图没留公开入口，走命中测试反而是更接近用户的验法。
- *  取 0.3 而非 0.5 的弧中点 —— 选中态的弦线和端点圆点正好落在弧中点上，会拦住这一击 */
+ *  取 0.3 而非 0.5 的弧中点 —— 选中态的弦线和端点圆点正好落在弧中点上，会拦住这一击。
+ *  钉住的笔记浮层盖在图的右缘，会替扇区接下这一击；点之前先把它摘掉，点完立刻还原 */
 const selectSector = (id) => json(`(async()=>{
+  const dock=document.querySelector('.goalscape-note-dock');
+  if(dock) dock.style.display='none';
   const v=${PL}.radialViews()[0];
   const sh=v.nodePositions.get(${JSON.stringify(id)});
   if(!sh) return {ok:0};
@@ -1309,6 +1333,7 @@ const selectSector = (id) => json(`(async()=>{
   el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerId:31,isPrimary:true,clientX:p.x,clientY:p.y}));
   el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerId:31,isPrimary:true,clientX:p.x,clientY:p.y}));
   await __gsSettle(400);
+  if(dock) dock.style.display='';
   return {ok:1,hit:el?.getAttribute?.('data-id')||String(el?.tagName)};})()`);
 
 /** 点图外的空角：清除选中（零噪音那条判据的起点） */
@@ -1326,7 +1351,7 @@ const clearSelection = () => json(`(async()=>{
 const chordState = () => json(`(()=>({
   chords:[...document.querySelectorAll('svg.goalscape-radial-svg path.goalscape-chord')].map(c=>c.getAttribute('data-chord')),
   dots:document.querySelectorAll('svg.goalscape-radial-svg circle.goalscape-chord-dot').length,
-  files:[...document.querySelectorAll('svg.goalscape-radial-svg g.goalscape-vfile')].map(g=>g.querySelector('title')?.textContent||''),
+  svgCards:document.querySelectorAll('svg.goalscape-radial-svg .goalscape-note-card').length,
   rendered:!!document.querySelector('.goalscape-notes-render'),
   ta:document.querySelectorAll('.goalscape-panel textarea').length,
   btn:document.querySelector('.goalscape-notes-toggle')?.textContent||null,
@@ -1337,7 +1362,27 @@ const chordState = () => json(`(()=>({
   internal:document.querySelectorAll('.goalscape-notes-render a.internal-link').length,
 }))()`);
 
-step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => {
+/**
+ * 右缘笔记浮层。gapRight 量的是卡片右缘到"图 + 浮层"那层 wrapper 右缘的距离：
+ * 贴边这条判据要的是它恒等于一个常数，跟选中哪个扇区无关（粘在块边上就会跟着角度跑）。
+ */
+const dockState = () => json(`(()=>{
+  const wrap=document.querySelector('.goalscape-map-wrap').getBoundingClientRect();
+  return [...document.querySelectorAll('.goalscape-note-dock .goalscape-note-card')].map(c=>{
+    const b=c.getBoundingClientRect(), q=(s)=>c.querySelector(s)?.textContent??null;
+    return{
+      goal:c.getAttribute('data-goal'),
+      title:q('.goalscape-note-card-title'),
+      body:q('.goalscape-note-card-body'),
+      file:q('.goalscape-note-card-file'),
+      links:[...c.querySelectorAll('.goalscape-note-card-link')].map(r=>r.textContent),
+      close:c.querySelectorAll('.goalscape-note-card-close').length,
+      gapRight:Math.round(wrap.right-b.right),
+      top:Math.round(b.top),left:Math.round(b.left),
+      visible:b.width>60&&b.height>40,
+    };});})()`);
+
+step("notes：md 文件是唯一真相，笔记卡钉在视图右缘、可同时钉多张", async () => {
   await useTmpMap();
   // 链接目标现取 vault 里的一篇真笔记：写死名字的话，"解析得到"这件事就从来没被验过
   const note = await json(`(()=>{const f=app.vault.getMarkdownFiles()
@@ -1345,22 +1390,24 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
     return f?{name:f.basename,path:f.path}:null;})()`);
   if (!note) { skipped("vault 里没有可链接的笔记，notes 步骤跳过"); return; }
   const NOTE = `${NOTES_DIR}/Alpha.md`;
+  const BRAVO = `${NOTES_DIR}/Bravo.md`;
 
-  // 树先摆成旧版的形状（正文塞在 JSON 的 notes 里），当场验迁移
+  // 树先摆成旧版的形状（正文塞在 JSON 的 notes 里），当场验迁移。
+  // 块间关系不写在 JSON 里：它只能是 Alpha 正文那条 [[Bravo#计划]]，锚点还得原样传下去
   const TREE = {
     id: "g-nroot", title: "Notes Root", importance: 100, tags: [], children: [
       { id: "g-na", title: "Alpha", importance: 60, tags: ["Now"], children: [],
         notes: [
-          `本周跑 5 公里，见 [[${note.name}]]`,
+          `本周跑 5 公里，见 [[${note.name}]]，安排见 [[Bravo#计划]]`,
           "",
           "## 训练安排",
           "- 周一 5km 配速跑",
           "- 周四 间歇 400m × 6",
           "",
           "第二段不进摘要",
-        ].join("\n"),
-        links: ["g-nb"] },
-      { id: "g-nb", title: "Bravo", importance: 40, tags: [], children: [] },
+        ].join("\n") },
+      { id: "g-nb", title: "Bravo", importance: 40, tags: [], children: [],
+        notes: ["## 计划", "- 睡够 8 小时", "- 十一点前躺下"].join("\n") },
     ],
   };
   await setTmpTree(TREE);
@@ -1370,10 +1417,21 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
     legacy:${PL}.store.scape.mainGoal.children[0].notes,
     raw:await app.vault.adapter.read(${JSON.stringify(NOTE)})}))()`);
   ok("旧版塞在 JSON 里的正文被搬进 .md：树里只剩路径，文件头带 gsId",
-    migrated === 1 && moved.path === NOTE && moved.legacy === undefined
+    migrated === 2 && moved.path === NOTE && moved.legacy === undefined
       && moved.raw.startsWith("---\ngsId: g-na\n---"),
     JSON.stringify(moved).slice(0, 120));
+  // 刚写出来的两个 .md 缓存还没解析完：关系必须自己追上，不能等用户再动一下
+  await waitFor(
+    `${PL}.notes.get('g-na')?.refs?.some(r=>r.goalId==='g-nb'&&r.anchor==='#计划')`,
+    "笔记互引被解析成带锚点的块间关系"
+  );
+  ok("普通 vault 笔记的引用 goalId 为 null（是内容不是块间关系）",
+    await ev(`${PL}.notes.get('g-na').refs.some(r=>r.path===${JSON.stringify(note.path)}&&r.goalId===null)`));
   await resetCanvas();
+
+  // 常态零噪音：没选中、一张都没钉的时候，浮层必须是空的（卡片是笔记的镜子，不是装饰）
+  const quiet = await dockState();
+  ok("一个都没点过时浮层零噪音", quiet.length === 0, JSON.stringify(quiet));
 
   const sel = await selectSector("g-na");
   ok("点扇区选中 Alpha", sel.hit === "g-na", JSON.stringify(sel));
@@ -1384,21 +1442,90 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
     st.ta === 0 && st.btn === "Open note", JSON.stringify(st));
   ok("Custom fields 整节已删：写不进也读不出的死洞不留着",
     !st.heads.includes("Custom fields") && st.fields === 0, JSON.stringify(st.heads));
-  ok("选中时的弦线数 = links + 反链去重后的对端数",
+  ok("选中时的弦线只画笔记互引出来的那一条",
     st.chords.join(",") === "g-nb" && st.dots === 2, JSON.stringify(st));
-  ok("解析得到的 vault 笔记在扇区外缘长出小文件卡片",
-    st.files.join(",") === note.path, JSON.stringify(st));
-  ok("Linked goals chip 用标题而不是 id",
-    st.heads.includes("Linked goals") && st.links.includes("Bravo"), JSON.stringify(st));
+
+  // 卡片从 svg 里的"粘在扇区外侧"改成 HTML 浮层"钉在视图右缘"，两条判据各管一半
+  const d1 = await dockState();
+  ok("点一次就钉住一张卡，画在 svg 里那版彻底没了",
+    d1.length === 1 && d1[0].goal === "g-na" && d1[0].visible && st.svgCards === 0,
+    JSON.stringify(d1));
+  ok("卡片贴视图右缘：离右边缘只剩浮层自己的内边距，且每张都有一个 × ",
+    d1[0].gapRight >= 0 && d1[0].gapRight <= 40 && d1[0].close === 1, JSON.stringify(d1[0]));
+  ok("卡片内容够多：块标题 + 正文摘要 + 链到的每一行 + 笔记文件名",
+    d1[0].title === "Alpha" && /本周跑 5 公里/.test(d1[0].body || "")
+      && !/\[\[|(^|\n)#/.test(d1[0].body || "") && d1[0].file === "Alpha.md" && d1[0].links.length === 2,
+    JSON.stringify(d1[0].body));
+  ok("链到的那一行写标题 + 锚点，内部 id 一个都不露",
+    d1[0].links.some((t) => /Bravo#计划/.test(t))
+      && !`${d1[0].title}${d1[0].links.join("")}`.includes("g-n"),
+    JSON.stringify(d1[0].links));
+  const bravoRow = d1[0].links.findIndex((t) => t.includes("Bravo"));
+  ok("References chip 用标题 + 锚点，不是内部 id",
+    st.heads.includes("References") && st.links.includes("Bravo#计划"), JSON.stringify(st.links));
   info("笔记面板截图", await shot("notes-panel"));
+
+  // 选中态的笔记卡是这轮新加的观感，亮色下"白卡+黑投影"最容易糊成一团 → 两主题都留一张
+  const altTheme = start.theme === "obsidian" ? "moonstone" : "obsidian";
+  // changeTheme 会弹一条 "Changed theme" 通知，它正压在扇区上方：不清掉的话下一次真点落在通知上
+  const noToast = () => ev(`document.querySelectorAll('.notice,.menu,.tooltip').forEach(n=>n.remove())`);
+  await ev(`app.changeTheme(${JSON.stringify(altTheme)})`);
+  await new Promise((r) => setTimeout(r, 800));
+  await noToast();
+  info("笔记面板截图（另一主题）", await shot("notes-panel-alt"));
+  await ev(`app.changeTheme(${JSON.stringify(start.theme)})`);
+  await new Promise((r) => setTimeout(r, 800));
+  await noToast();
+
+  // 真鼠标点浮层里那一行链接：卡片是选中态唯一的"笔记出口"，点不动就等于没做
+  await realClick('.goalscape-note-card[data-goal="g-na"] .goalscape-note-card-link', bravoRow);
+  await waitFor(
+    `app.workspace.getLeavesOfType('markdown').some(l=>l.view.file?.path===${JSON.stringify(BRAVO)})`,
+    "点卡片里的链接行把对端笔记打开"
+  );
+  ok("点带锚点的链接行跳到对方块的笔记（锚点交给 Obsidian 解析）", true);
+
+  // 光标此刻正在 Bravo 的笔记里：命令要答得出"这篇笔记是谁的笔记"（反链面板答不了这个）
+  await gsCommand("reveal-owning-block");
+  await waitFor(`${PL}.radialViews()[0]?.selectedId==='g-nb'`, "命令把这篇笔记的所属块选中");
+  ok("笔记里跑「跳到所属块」：放射图被带到前面并选中它自己的块", true);
+
+  // "点击一次保持打开"：选中跳到 Bravo 之后 Alpha 那张不该跟着消失，而是并排多一张
+  const d2 = await dockState();
+  ok("再选一块是加一张卡不是换一张卡（可同时钉多张，按打开顺序）",
+    d2.map((c) => c.goal).join(",") === "g-na,g-nb" && d2.every((c) => c.visible),
+    JSON.stringify(d2.map((c) => [c.goal, c.gapRight])));
+  ok("钉住的卡只认视图右缘：换选中块时上一张的位置一格都没动",
+    d2[0].top === d1[0].top && d2[0].left === d1[0].left, JSON.stringify({ was: d1[0], now: d2[0] }));
+  info("两张卡并排（图已让边）", await shot("notes-dock-two"));
+  // 让边这条判据量的是"画出来的那张图"（.goalscape-map 的实际轮廓），不是 svg 的方框
+  const fit = await json(`(()=>{const m=document.querySelector('.goalscape-map').getBoundingClientRect();
+    const c=document.querySelector('.goalscape-note-dock .goalscape-note-card').getBoundingClientRect();
+    return{gap:Math.round(c.left-m.right)};})()`);
+  ok("图真的让出了边：卡片左缘落在最外圈扇区右边之外", fit.gap >= 0, JSON.stringify(fit));
 
   const back = await selectSector("g-nb");
   const bs = await chordState();
-  ok("反链现扫得到引用方（A→B 之后选中 B 看得见 A）",
-    back.hit === "g-nb" && bs.heads.includes("Referenced by") && bs.links.includes("Alpha")
+  ok("反链现扫得到引用方（A→B 之后选中 B 看得见 A，锚点落在 B 自己的笔记里）",
+    back.hit === "g-nb" && bs.heads.includes("Referenced by") && bs.links.includes("Alpha#计划")
       && bs.chords.join(",") === "g-na", JSON.stringify({ back, ...bs }));
 
-  await selectSector("g-na");
+  await realClick(".goalscape-panel .goalscape-chip-main", 0);
+  const jumped = await ev(`${PL}.radialViews()[0].selectedId`);
+  ok("真鼠标点 Referenced by chip 跳选到引用方", jumped === "g-na", String(jumped));
+
+  // References chip 那一头也得真点得动（上一轮"点不动"就发生在这排按钮上）。
+  // 先把编辑器标签摘干净，否则"打开了"跟上一次点的区分不出来
+  await ev(`app.workspace.getLeavesOfType('markdown').forEach(l=>l.detach())`);
+  await realClick(".goalscape-panel .goalscape-chip-main", 0);
+  await waitFor(
+    `app.workspace.getLeavesOfType('markdown').some(l=>l.view.file?.path===${JSON.stringify(BRAVO)})`,
+    "References chip 打开对方块的笔记"
+  );
+  ok("真鼠标点 References chip 跳到对方笔记（锚点由 Obsidian 解析）", true);
+
+  // chip 点下去之后被打开的笔记抢走了可见标签页，放射图此刻宽度为 0，真点必然落空
+  await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
   // 真鼠标点"打开笔记"：合成 click 会绕过命中测试，这个按钮正是上一轮"点不动"的案发现场
   await realClick(".goalscape-notes-toggle");
   await waitFor(
@@ -1411,7 +1538,7 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
   await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
   await selectSector("g-na");
   await json(`(async()=>{const f=app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
-    await app.vault.modify(f,${JSON.stringify(`---\ngsId: g-na\n---\n\n改过之后的一句话，见 [[${note.name}]]\n`)});
+    await app.vault.modify(f,${JSON.stringify(`---\ngsId: g-na\n---\n\n改过之后的一句话，见 [[${note.name}]] 与 [[Bravo#计划]]\n`)});
     return 1;})()`);
   await waitFor(
     `document.querySelector('.goalscape-notes-render')?.textContent.includes('改过之后的一句话')`,
@@ -1419,28 +1546,52 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
   );
   const after = await chordState();
   ok("改完还是渲染态、没有偷偷长出编辑框", after.ta === 0 && after.rendered === true, JSON.stringify(after));
+  ok("关系跟着正文变：改完的笔记里那条互引还在图上",
+    after.chords.join(",") === "g-nb", JSON.stringify(after.chords));
+  const d3 = await dockState();
+  ok("外部改过正文后钉着的那张卡换成新摘要（卡片是镜子，不是按下那一刻的快照）",
+    d3[0]?.goal === "g-na" && /改过之后的一句话/.test(d3[0].body || ""), JSON.stringify(d3[0]));
 
-  await realClick(".goalscape-chip-main", 0);
-  const jumped = await ev(`${PL}.radialViews()[0].selectedId`);
-  ok("真鼠标点 Linked goals chip 跳选到对端", jumped === "g-nb", String(jumped));
-
-  // 常态零噪音：没选中任何块时，弦线与文件卡片一概不存在
+  // 取消选中：弦线这类"选中才画"的东西收走，但用户主动钉住的卡留着 —— 这就是"点一次保持打开"
   const selected = await clearSelection();
   const noise = await chordState();
-  ok("取消选中后图面上零新增元素",
-    selected === 0 && !noise.chords.length && !noise.dots && !noise.files.length,
-    JSON.stringify({ selected, ...noise }));
+  const d4 = await dockState();
+  ok("取消选中后图面回到干净：没有选中扇区、没有弦线、没有端点圆点",
+    selected === 0 && !noise.chords.length && noise.dots === 0, JSON.stringify({ selected, ...noise }));
+  ok("取消选中不清空钉住的笔记卡",
+    d4.map((c) => c.goal).join(",") === "g-na,g-nb", JSON.stringify(d4.map((c) => c.goal)));
+
+  // × 只收自己那一张
+  await realClick('.goalscape-note-card[data-goal="g-na"] .goalscape-note-card-close');
+  const d5 = await dockState();
+  ok("点 × 关掉那一张，另一张不受影响",
+    d5.map((c) => c.goal).join(",") === "g-nb", JSON.stringify(d5.map((c) => c.goal)));
+  await realClick('.goalscape-note-card[data-goal="g-nb"] .goalscape-note-card-close');
+  ok("关到最后一张时浮层整个消失（常态零噪音）", (await dockState()).length === 0);
 
   await gsCommand("export-canvas");
   const doc1 = await waitCanvasDoc(
-    (d) => d.nodes.some((n) => n.type === "file") && d.edges.some((e) => e.id === "x-g-na-g-nb"),
+    (d) => d.edges.some((e) => e.id.startsWith(`n-g-na-`)) && d.edges.some((e) => e.id === "x-g-na-g-nb"),
     "白板长出笔记卡与链接边"
   );
-  const fcard = doc1.nodes.find((n) => n.type === "file");
-  ok("白板：链接边是 x-<from>-<to> 且带 label，笔记卡带 gsFile 而不是 gsId",
-    fcard?.gsFile === note.path && fcard?.gsId === undefined
-      && doc1.edges.some((e) => e.id === "x-g-na-g-nb" && e.label === "🔗"),
-    JSON.stringify({ fcard, edge: doc1.edges.find((e) => e.id === "x-g-na-g-nb") }).slice(0, 240));
+  const filesOf = (d, id) =>
+    d.nodes.filter((n) => n.type === "file" && n.id.startsWith(`f-${id}-`)).map((n) => n.gsFile);
+  ok("白板里笔记有影子：这块自己的笔记就算正文空着也镜像成一张 file 卡",
+    filesOf(doc1, "g-na")[0] === NOTE && filesOf(doc1, "g-nb")[0] === BRAVO,
+    JSON.stringify({ a: filesOf(doc1, "g-na"), b: filesOf(doc1, "g-nb") }));
+  ok("自己的笔记排第一张，笔记里链到的普通文件接着排",
+    filesOf(doc1, "g-na").join(",") === [NOTE, note.path].join(","), JSON.stringify(filesOf(doc1, "g-na")));
+  // 文件卡与它的边共用同一段后缀（f-<块>-<hash> / n-<块>-<hash>），照后缀配对比在测试里重算 hash 稳
+  const suffixOf = (s) => s.split("-").slice(1).join("-");
+  ok("file 卡各带一条 n- 边连回自己的目标卡、且都不带 gsId（它们不是目标卡，不许抢认领）",
+    doc1.nodes.filter((n) => n.type === "file").every((f) => {
+      const e = doc1.edges.find((x) => x.id.startsWith("n-") && suffixOf(x.id) === suffixOf(f.id));
+      return e && e.toNode === f.id;
+    }) && doc1.nodes.filter((n) => n.type === "file").every((n) => n.gsId === undefined),
+    JSON.stringify(doc1.edges.filter((e) => e.id.startsWith("n-")).map((e) => e.id)));
+  ok("块间链接边是 x-<from>-<to> 且带 🔗",
+    doc1.edges.some((e) => e.id === "x-g-na-g-nb" && e.label === "🔗"),
+    JSON.stringify(doc1.edges.find((e) => e.id === "x-g-na-g-nb")));
   const cardA = doc1.nodes.find((n) => n.gsId === "g-na");
   ok("卡片摘要来自 .md 的第一行，且不再有 #tags 那一行",
     /改过之后的一句话/.test(cardA?.text || "") && !/#Now/.test(cardA?.text || ""),
@@ -1454,17 +1605,31 @@ step("notes：md 文件是唯一真相，面板只渲染不编辑", async () => 
     JSON.stringify(live.nodes.map((n) => `${n.id}:${n.type}`)).slice(0, 200));
   await closeCanvasTabs();
 
+  // 重新钉一张：接下来验的是"笔记文件没了，钉着的卡要自己掉出去"（卡片是笔记的镜子，不是快照）
+  await ev(`app.workspace.revealLeaf(app.workspace.getLeavesOfType(${JSON.stringify(RADIAL)})[0])`);
+  await selectSector("g-na");
+  ok("关掉过的块再点一次能重新钉上", (await dockState()).map((c) => c.goal).join(",") === "g-na",
+    JSON.stringify(await dockState()));
+
   // 笔记文件被用户删掉：这块就是没有笔记，插件不许把它写回来
   await json(`(async()=>{const f=app.vault.getAbstractFileByPath(${JSON.stringify(NOTE)});
     await app.vault.delete(f); return 1;})()`);
   await waitFor(`${PL}.notes.get('g-na')===undefined`, "删掉笔记文件后索引里这一块空出来");
   ok("用户删掉笔记文件后插件没有偷偷重建",
     !(await json(`app.vault.adapter.exists(${JSON.stringify(NOTE)})`)));
+  await waitFor(
+    `document.querySelectorAll('.goalscape-note-dock .goalscape-note-card').length===0`,
+    "笔记文件删了，钉着的那张卡自己掉出浮层"
+  );
+  ok("笔记文件没了，钉着的卡不留在图上指认一篇不存在的笔记", true);
 
   const cut = structuredClone(TREE);
   delete cut.children[0].notes;
-  delete cut.children[0].links;
+  delete cut.children[1].notes;
   await setTmpTree(cut);
+  // 界面上没有"把笔记从块上摘下来"这个动作，抹掉 note 路径只有手改 JSON 一条路；
+  // 索引只在开图/换图/文件事件时重建，这里就照用户真会走的那条路补一次
+  await ev(`${PL}.notes.syncMap()`);
   const doc2 = await waitCanvasDoc(
     (d) => !d.nodes.some((n) => n.type === "file") && !d.edges.some((e) => e.id === "x-g-na-g-nb"),
     "链接与笔记摘掉后派生卡消失"

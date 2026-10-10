@@ -242,6 +242,17 @@
   height: 100%;
 }
 
+/* 图 + 右缘笔记浮层共用的定位上下文：浮层绝对钉在这一层的右边，
+   跟着视图高度走而不是整个 pane，滚动时也留在图上 */
+.goalscape-map-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .goalscape-radial-root {
   flex: 1 1 auto;
   display: flex;
@@ -250,6 +261,13 @@
   min-height: 0;
   min-width: 0;
   padding: 12px;
+  transition: padding-right 180ms ease;
+}
+
+/* 钉上卡片后图自己让出这条边："贴边"的一半意思是别压在扇区上。
+   窄分栏里 45% 封顶，免得图被挤成一个点 */
+.goalscape-map-wrap.has-note-dock .goalscape-radial-root {
+  padding-right: min(268px, 45%);
 }
 
 .goalscape-radial-svg {
@@ -358,24 +376,173 @@
   filter: drop-shadow(0 0 3px var(--interactive-accent));
 }
 
-/* notes 里链到真实 vault 笔记的小文件卡片：扇区外缘，点击开笔记 */
-.goalscape-vfile {
+/* 钉在视图右缘的笔记卡：一块一张，点扇区钉上、× 收回，能同时开好几张。
+   浮层不画在 svg 里 —— 贴边才不挡图，文字换行/滚动/关闭按钮这些活 HTML 是白拿的；
+   代价是 PNG/SVG 导出里没有它们（笔记内容仍走 CSV / Markdown / 白板）。
+   卡片靠"阴影 + 1px 细边 + 左侧强调色"浮起来，不靠描边变粗。 */
+.goalscape-note-dock {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  width: 252px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 浮层本身不吃指针事件：卡片之间的空隙要能继续滚轮缩放、拖动平移 */
+  pointer-events: none;
+}
+
+.goalscape-note-card {
+  pointer-events: auto;
+  flex: 0 0 auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-left: 2px solid var(--interactive-accent);
+  border-radius: 8px;
+  padding: 8px 9px 7px;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.16);
+}
+
+.goalscape-note-card:hover {
+  background: var(--background-modifier-hover);
+}
+
+.goalscape-note-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.goalscape-note-card-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.goalscape-note-card-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.goalscape-note-card-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.goalscape-note-card-close {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  border-radius: 4px;
+  color: var(--text-faint);
+  opacity: 0.5;
+  cursor: pointer;
+  transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.goalscape-note-card-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+.goalscape-note-card:hover .goalscape-note-card-close,
+.goalscape-note-card-close:focus-visible {
+  opacity: 1;
+}
+
+.goalscape-note-card-close:hover {
+  background: var(--background-modifier-border);
+  color: var(--text-normal);
+}
+
+/* 正文摘要：最多五行就截，多看几行是面板与原生编辑器的活 */
+.goalscape-note-card-body {
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 5;
+  overflow: hidden;
+}
+
+.goalscape-note-card-body.is-empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+.goalscape-note-card-links {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.goalscape-note-card-link {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  margin: 0 -3px;
+  padding: 2px 3px;
+  border-radius: 4px;
+  font-size: 11.5px;
+  color: var(--text-normal);
   cursor: pointer;
 }
 
-.goalscape-vfile-icon {
-  fill: var(--background-modifier-hover);
-  stroke: var(--text-muted);
-  stroke-width: 1;
+.goalscape-note-card-link:hover {
+  background: var(--background-modifier-hover);
 }
 
-.goalscape-vfile-name {
-  fill: var(--text-muted);
-  font-size: 9px;
-  paint-order: stroke;
-  stroke: var(--background-primary);
-  stroke-width: 2.5px;
-  pointer-events: none;
+.goalscape-note-card-arrow {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.goalscape-note-card-link-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 锚点是"跳到那一节"的凭据，跟标题分色才看得出它不是标题的一部分 */
+.goalscape-note-card-anchor {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--interactive-accent);
+}
+
+.goalscape-note-card-file {
+  margin-top: 5px;
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* 权重拖拽手柄 */
@@ -676,51 +843,11 @@
   background: var(--background-modifier-hover);
 }
 
-.goalscape-chip-x {
-  border: none;
-  border-left: 1px solid var(--background-modifier-border);
-  background: transparent;
-  box-shadow: none;
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 3px 6px;
-  height: auto;
-  cursor: pointer;
-  line-height: 1.4;
-}
-
-.goalscape-chip-x:hover {
-  color: var(--text-error);
-}
-
-.goalscape-chip-add {
-  border: 1px dashed var(--background-modifier-border);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 12px;
-  padding: 3px 8px;
-  height: auto;
-  cursor: pointer;
-}
-
-.goalscape-chip-add:hover {
-  border-style: solid;
-  color: var(--text-normal);
-}
-
-/* links picker 弹窗：一屏半封顶，图大了内部滚而不是把模态框撑出屏幕 */
-.goalscape-pick-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 340px;
-  overflow-y: auto;
-}
-
-.goalscape-pick-btn {
-  text-align: left;
-  width: 100%;
+/* 锚点是"跳到那一小节"的凭据，得看得出来跟标题不是一回事：弱化、不加粗、跟着标题走 */
+.goalscape-chip-anchor {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin-left: 4px;
 }
 
 /* 色系选择（只有二级节点出现）下方的色盘：原生取色器 + 预设色块 + Auto */

@@ -1,5 +1,5 @@
 // 分层守卫：只查 import 边的形状，不查写法。
-// 这三条是"数据层与几何层能脱开 Obsidian 界面单测"的前提（npm test 三秒跑完的那部分）。
+// 这四条是"数据层与几何层能脱开 Obsidian 界面单测"的前提（npm test 三秒跑完的那部分）。
 // 一旦被反向依赖打断，测试就得开真实 Obsidian 才有结论 —— 那正是实机回归越来越肥的由来。
 // 撞到规则时：真的需要框架就加进白名单并写清理由，否则把逻辑挪回内层。
 
@@ -20,8 +20,17 @@ const INNER_DIRS = ["data/", "export/", "geometry/"];
 /** 逐个点名的框架无关文件；geometry/ 整个目录都按同样要求 */
 const PURE = ["data/types.ts", "data/rollup.ts", "data/crud.ts", "data/templates.ts", "data/palette.ts"];
 
-/** 允许碰 obsidian 的位置：视图层、组合根，以及 goalTree / noteFiles 这两个 vault 持久化适配器 */
-const FRAMEWORK_ALLOWED = ["main.ts", "settingsTab.ts", "data/goalTree.ts", "data/noteFiles.ts", "views/"];
+/** 允许碰 obsidian 的位置：视图层、组合根，以及三个"替 vault 干活"的适配器 */
+const FRAMEWORK_ALLOWED = [
+  "main.ts",
+  "settingsTab.ts",
+  "data/goalTree.ts",
+  "data/noteFiles.ts",
+  // 白板镜像读写 .canvas 文件、摘 workspace 标签页，性质同 goalTree / noteFiles；
+  // 纯内容映射（树 → JsonCanvas）留在 canvasSync.ts，那边仍然一行框架都不 import
+  "export/canvasMirror.ts",
+  "views/",
+];
 
 const sourceFiles = (dir: string): string[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
@@ -38,6 +47,7 @@ const importsOf = (file: string): string[] => {
 
 const toViews = (spec: string) => /(^|\/)views\//.test(spec);
 const toObsidian = (spec: string) => spec === "obsidian";
+const toMain = (spec: string) => /(^|\/)main$/.test(spec);
 const frameworkFree = (file: string) => file.startsWith("geometry/") || PURE.includes(file);
 
 describe("依赖方向", () => {
@@ -64,5 +74,16 @@ describe("依赖方向", () => {
       .filter((f) => !FRAMEWORK_ALLOWED.some((a) => f === a || f.startsWith(a)))
       .flatMap((f) => importsOf(f).filter(toObsidian).map((spec) => `${f} → ${spec}`));
     assert.deepEqual(offenders, [], "新增框架依赖点，请写清理由再加进 FRAMEWORK_ALLOWED");
+  });
+
+  it("视图层不直接依赖组合根", () => {
+    const offenders = files
+      .filter((f) => f.startsWith("views/"))
+      .flatMap((f) => importsOf(f).filter(toMain).map((spec) => `${f} → ${spec}`));
+    assert.deepEqual(
+      offenders,
+      [],
+      "视图要的类型面在 views/host.ts 收窄，直接 import 组合根会让视图与 main 互相引用、谁都不能单独改"
+    );
   });
 });

@@ -9,7 +9,7 @@
 
 import { Plugin, TFile, TFolder, type CachedMetadata } from "obsidian";
 import { GoalTreeStore, GOALSCAPE_SUFFIX } from "./goalTree";
-import { GoalNode, NoteIndex, NoteInfo, findNode, flattenTree } from "./types";
+import { GoalNode, NoteIndex, NoteInfo, NoteRef, findNode, flattenTree } from "./types";
 
 /** Obsidian 文件名里不许出现的字符，加上会打断 [[链接]] 解析的 # ^ [ ] */
 const BAD_CHARS = /[*"\\/<>:|?#^[\]]/g;
@@ -59,6 +59,24 @@ export class NoteStore {
     return this.index.get(id);
   }
 
+  /**
+   * 这篇笔记属于哪张图、哪个块 —— "从笔记跳回块"那条命令的唯一依据。
+   * 三条来路按可靠性排：索引里路径对得上（当前图）→ frontmatter 的 gsId 在当前树里 →
+   * 目录名反推图名（`life.notes/` 就是 `life.goalscape.json` 的笔记，用户可能正开着别的图的笔记）。
+   * 都对不上就是 null：不猜，也不替用户建关系。
+   */
+  ownerOf(file: TFile): { scapePath: string; goalId: string } | null {
+    for (const [goalId, info] of this.index) {
+      if (info.path === file.path) return { scapePath: this.store.path, goalId };
+    }
+    const gsId = this.app.metadataCache.getFileCache(file)?.frontmatter?.[GS_ID_KEY];
+    if (typeof gsId !== "string" || !gsId) return null;
+    const scape = this.store.scape;
+    if (scape && findNode(scape.mainGoal, gsId)) return { scapePath: this.store.path, goalId: gsId };
+    const dir = /^(.+)\.notes\/[^/]+$/.exec(file.path);
+    return dir ? { scapePath: `${dir[1]}${GOALSCAPE_SUFFIX}`, goalId: gsId } : null;
+  }
+
   /** 笔记目录跟图文件同级：<图名>.notes/。删图的时候它就在旁边，不会被忘掉 */
   folderFor(mapPath: string): string {
     const parts = mapPath.split("/");
@@ -95,6 +113,12 @@ export class NoteStore {
       }
     }
     this.index = next;
+    // 第二遍才填 goalId：目标是不是"别的块的笔记"取决于整张索引，单条 readInfo 那一刻还不知道
+    const pathToGoal = new Map<string, string>();
+    for (const [goalId, info] of next) pathToGoal.set(info.path, goalId);
+    for (const info of next.values()) {
+      for (const r of info.refs) r.goalId = pathToGoal.get(r.path) ?? null;
+    }
     if (moved.length) {
       this.store.mutate((s) => {
         for (const m of moved) {
@@ -245,19 +269,26 @@ export class NoteStore {
     const raw = await this.app.vault.cachedRead(f).catch(() => null);
     if (raw === null) return null;
     const cache = this.app.metadataCache.getFileCache(f);
-    return { path, text: stripFrontmatter(raw, cache), links: this.resolvedLinks(f, cache) };
+    return { path, text: stripFrontmatter(raw, cache), refs: this.resolvedRefs(f, cache) };
   }
 
   /**
-   * 正文里的 [[wikilink]] → 真实文件路径。走 metadataCache 而不是自己解析文本：
+   * 正文里的 [[wikilink]] → {真实路径, 锚点}。走 metadataCache 而不是自己解析文本：
    * 解析得到才收，指不到的（幽灵链接）不进图 —— 点不动的卡片比没有卡片更糟。
    * cache.links 不含 ![[嵌入]]，正好符合"嵌入是内容不是关系"这条既有语义。
+   * 锚点（`#小节` / `#^块`）原样留着：跳到对端笔记的某一节全靠它，Obsidian 自己认这套语法。
    */
-  private resolvedLinks(file: TFile, cache: CachedMetadata | null): string[] {
-    const out: string[] = [];
+  private resolvedRefs(file: TFile, cache: CachedMetadata | null): NoteRef[] {
+    const out: NoteRef[] = [];
     for (const l of cache?.links ?? []) {
-      const dest = this.app.metadataCache.getFirstLinkpathDest(l.link, file.path);
-      if (dest && dest.path !== file.path && !out.includes(dest.path)) out.push(dest.path);
+      const hash = l.link.indexOf("#");
+      const linkpath = hash < 0 ? l.link : l.link.slice(0, hash);
+      const anchor = hash < 0 ? "" : l.link.slice(hash);
+      const dest = this.app.metadataCache.getFirstLinkpathDest(linkpath, file.path);
+      if (!dest || dest.path === file.path) continue;
+      if (!out.some((r) => r.path === dest.path && r.anchor === anchor)) {
+        out.push({ path: dest.path, anchor, goalId: null });
+      }
     }
     return out;
   }

@@ -1,9 +1,9 @@
 // src/data/notes.ts
-// 笔记相关的纯逻辑：首行摘要、反链扫描、links 清洗。
+// 笔记相关的纯逻辑：首行摘要、块间关系（从笔记互引里现扫）。
 // 零 obsidian 依赖（分层守卫锁死）——正文与出链由 NoteStore 读文件后以 NoteIndex 交进来，
 // 这一层只做不碰文件系统的那部分。
 
-import { GoalNode, flattenTree } from "./types";
+import { NoteIndex, NoteRef } from "./types";
 
 /** notes 的第一行正文（跳过空行、标题、围栏标记），截 max 字，用于 tooltip / 白板卡片 / 导出 */
 export function firstLine(md: string, max = 60): string {
@@ -28,25 +28,30 @@ export function firstLine(md: string, max = 60): string {
   return "";
 }
 
-/** 谁链接了 id：全树扫一遍，返回引用方节点（不含自己），顺序 = 深度优先序 */
-export function backlinks(root: GoalNode, id: string): GoalNode[] {
-  return flattenTree(root).filter((n) => n.id !== id && (n.links ?? []).includes(id));
+/**
+ * 出向块间关系：这个块的笔记引用了哪些**别的块**的笔记（带锚点）。
+ * 弦线、面板 chips、白板链接边的唯一来源 —— 关系必须有出处（正文里真写着那条 wikilink），
+ * 手工维护的 id 数组没有出处，2026-10-10 翻案删掉了。
+ */
+export function outgoingRefs(index: NoteIndex, id: string): NoteRef[] {
+  const out: NoteRef[] = [];
+  for (const r of index.get(id)?.refs ?? []) {
+    if (!r.goalId || r.goalId === id) continue;
+    if (!out.some((x) => x.goalId === r.goalId && x.anchor === r.anchor)) out.push(r);
+  }
+  return out;
 }
 
-/**
- * links 的清洗规则（读档与落盘前各跑一次，同 normalize 的 color 规矩）：
- * 去重、剔除自链、剔除树里已经不存在的目标 id。
- * 空数组删键 —— 不留一个"空连接"的第三种状态。
- */
-export function pruneLinks(root: GoalNode): void {
-  const alive = new Set(flattenTree(root).map((n) => n.id));
-  for (const n of flattenTree(root)) {
-    if (!n.links) continue;
-    const kept: string[] = [];
-    for (const id of n.links) {
-      if (id !== n.id && alive.has(id) && !kept.includes(id)) kept.push(id);
+/** 入向：哪些块的笔记引用了这个块的笔记。锚点落在**本块**笔记里（对方是引到某一节） */
+export function incomingRefs(index: NoteIndex, id: string): Array<{ fromId: string; ref: NoteRef }> {
+  if (!index.has(id)) return [];
+  const out: Array<{ fromId: string; ref: NoteRef }> = [];
+  for (const [fromId, info] of index) {
+    if (fromId === id) continue;
+    for (const r of info.refs) {
+      if (r.goalId !== id) continue;
+      if (!out.some((x) => x.fromId === fromId && x.ref.anchor === r.anchor)) out.push({ fromId, ref: r });
     }
-    if (kept.length) n.links = kept;
-    else delete n.links;
   }
+  return out;
 }

@@ -6,12 +6,12 @@
 // 高亮段保持不动 —— 本标签页仍是原来那个视图，点亮 Canvas 会指向一个并不存在的模式。
 
 import { WorkspaceLeaf, setIcon, setTooltip } from "obsidian";
-import type GoalscapePlugin from "../main";
+import type { GoalscapeHost } from "./host";
 import { VIEW_CANVAS, VIEW_OPTIONS } from "./viewTypes";
 
 export function createViewSwitcher(
   container: HTMLElement,
-  plugin: GoalscapePlugin,
+  plugin: GoalscapeHost,
   leaf: WorkspaceLeaf,
   currentType: string
 ): HTMLElement {

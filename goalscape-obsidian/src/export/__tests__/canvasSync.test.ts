@@ -128,6 +128,19 @@ describe("镜像：用户摆的东西不能被冲掉", () => {
     );
   });
 
+  it("改端点不算改结构：用户在 Obsidian 里拖过的 side 与箭头要接着留住", () => {
+    const existing = toCanvas(makeScape());
+    for (const e of existing.edges) {
+      e.fromSide = "left";
+      e.toEnd = "arrow";
+    }
+    const merged = refreshCanvas(makeScape(), existing);
+    const e = merged.edges.find((x) => x.id === generatedEdgeId("h1"))!;
+    assert.equal(e.fromSide, "left");
+    assert.equal(e.toEnd, "arrow");
+    assert.equal(e.fromNode, "health", "连线的两端由树说了算，只有端点样式归用户");
+  });
+
   it("没有旧文件时结果就是数据本身", () => {
     const fresh = toCanvas(makeScape());
     assert.deepEqual(refreshCanvas(makeScape(), null), fresh);
@@ -201,12 +214,23 @@ describe("镜像：树变了之后白板上不留脏东西", () => {
 });
 
 describe("镜像：笔记派生出的链接边与文件卡片", () => {
-  /** 笔记索引的最小构造：镜像只吃 text 与 links，两者都是 NoteStore 读文件后填进来的 */
-  const notes = (m: Record<string, { links?: string[]; text?: string }>): NoteIndex =>
+  /**
+   * 笔记索引的最小构造：镜像只吃 text 与 refs，两者都是 NoteStore 读文件后填进来的。
+   * refs 写成 `路径#锚点` 的字符串，owner 说明哪条路径是某个块的笔记（→ goalId）。
+   */
+  const notes = (m: Record<string, { text?: string; refs?: string[] }>, owner: Record<string, string> = {}): NoteIndex =>
     new Map(
       Object.entries(m).map(([id, v]) => [
         id,
-        { path: `Goalscapes/x.notes/${id}.md`, text: v.text ?? "", links: v.links ?? [] },
+        {
+          path: `Goalscapes/x.notes/${id}.md`,
+          text: v.text ?? "",
+          refs: (v.refs ?? []).map((raw) => {
+            const hash = raw.indexOf("#");
+            const path = hash < 0 ? raw : raw.slice(0, hash);
+            return { path, anchor: hash < 0 ? "" : raw.slice(hash), goalId: owner[path] ?? null };
+          }),
+        },
       ])
     );
 
@@ -236,28 +260,59 @@ describe("镜像：笔记派生出的链接边与文件卡片", () => {
     assert.equal(byId(toCanvas(scape), "h1").height, 100, "没笔记就还是两行");
   });
 
-  it("links 生成带 label 的链接边；树里没这个 id 就不生成", () => {
+  it("笔记互引生成带 label 的链接边；指向树外 id 的引用不生成", () => {
     const scape = makeScape();
-    findGoal(scape.mainGoal, "h1")!.links = ["c1", "ghost"];
-    const edges = toCanvas(scape).edges;
+    const idx = notes(
+      { h1: { refs: ["Goalscapes/x.notes/c1.md#计划", "Goalscapes/x.notes/ghost.md"] } },
+      { "Goalscapes/x.notes/c1.md": "c1", "Goalscapes/x.notes/ghost.md": "ghost" }
+    );
+    const edges = toCanvas(scape, idx).edges;
     const e = edges.find((x) => x.id === linkEdgeId("h1", "c1"));
     assert.deepEqual([e?.fromNode, e?.toNode, e?.label], ["h1", "c1", "🔗"]);
-    assert.ok(!edges.some((x) => x.id === linkEdgeId("h1", "ghost")));
+    assert.ok(!edges.some((x) => x.id === linkEdgeId("h1", "ghost")), "树里没这个块，线画给谁看");
   });
 
-  it("解析到的笔记生成 file 卡片与连线，且不带 gsId", () => {
-    const resolved = notes({ h1: { links: ["笔记/跑步.md"] } });
+  it("解析到的笔记生成 file 卡片与连线，且不带 gsId；别的块的笔记不重复挂卡", () => {
+    const resolved = notes(
+      { h1: { refs: ["笔记/跑步.md", "Goalscapes/x.notes/c1.md"] } },
+      { "Goalscapes/x.notes/c1.md": "c1" }
+    );
     const c = toCanvas(makeScape(), resolved);
     const f = byId(c, fileNodeId("h1", "笔记/跑步.md"));
     assert.deepEqual([f.type, f.file, f.gsFile], ["file", "笔记/跑步.md", "笔记/跑步.md"]);
     assert.equal(f.gsId, undefined, "文件卡不是任何目标的镜子，挂 gsId 会跟目标卡片抢认领");
     assert.ok(c.edges.some((e) => e.id === fileEdgeId("h1", "笔记/跑步.md")));
     assert.equal(c.nodes.filter((n) => n.gsId === "h1").length, 1);
+    assert.equal(
+      c.nodes.filter((n) => n.type === "file" && n.file === "Goalscapes/x.notes/c1.md").length,
+      0,
+      "块间关系已经有 🔗 边了，再挂张文件卡是同一件事说两遍"
+    );
+  });
+
+  it("块自己的笔记也长一张 file 卡：正文是空的也要有影子", () => {
+    const own = "Goalscapes/x.notes/h1.md";
+    const c = toCanvas(makeScape(), notes({ h1: { text: "" } }));
+    const f = byId(c, fileNodeId("h1", own));
+    assert.deepEqual([f.type, f.file, f.gsFile], ["file", own, own]);
+    assert.equal(f.gsId, undefined, "它认领的是文件，不是目标");
+    assert.ok(c.edges.some((e) => e.id === fileEdgeId("h1", own)), "卡片外侧要连得回源卡片");
+    assert.equal(byId(c, "h1").height, 100, "空笔记不撑高目标卡片，但 file 卡照样在");
+    assert.ok(!toCanvas(makeScape(), new Map()).nodes.some((n) => n.type === "file"),
+      "没笔记文件的块不能在白板上凭空长出笔记");
+  });
+
+  it("自己的笔记排第一格，链到的普通笔记接着排，同一篇不挂两次", () => {
+    const own = "Goalscapes/x.notes/h1.md";
+    const c = toCanvas(makeScape(), notes({ h1: { refs: ["笔记/跑步.md", "笔记/跑步.md"] } }));
+    const files = c.nodes.filter((n) => n.type === "file").map((n) => n.file);
+    assert.deepEqual(files, [own, "笔记/跑步.md"]);
+    assert.equal(c.edges.filter((e) => /^n-/.test(e.id)).length, 2);
   });
 
   it("拖动过的文件卡位置留住；链接没了，卡片和线一起消失", () => {
     const scape = makeScape();
-    const resolved = notes({ h1: { links: ["a.md"] } });
+    const resolved = notes({ h1: { refs: ["a.md"] } });
     const fid = fileNodeId("h1", "a.md");
     const first = refreshCanvas(scape, null, resolved);
     const moved = { ...byId(first, fid), x: 4242, y: -646 };
@@ -293,7 +348,7 @@ describe("镜像：笔记派生出的链接边与文件卡片", () => {
 
   it("源卡片被拖远之后新出现的文件卡落在源卡片旁边", () => {
     const scape = makeScape();
-    const resolved = notes({ h1: { links: ["b.md"] } });
+    const resolved = notes({ h1: { refs: ["b.md"] } });
     const existing: JsonCanvas = {
       nodes: toCanvas(scape).nodes.map((n) => ({ ...n, x: n.x + 5000, y: n.y + 3000 })),
       edges: [],
@@ -309,7 +364,7 @@ describe("镜像：笔记派生出的链接边与文件卡片", () => {
 
   it("带派生卡片的镜像同样幂等", () => {
     const scape = makeScape();
-    const resolved = notes({ h1: { links: ["a.md", "b.md"] }, career: { links: ["c.md"] } });
+    const resolved = notes({ h1: { refs: ["a.md", "b.md"] }, career: { refs: ["c.md"] } });
     const once = refreshCanvas(scape, toCanvas(scape, resolved), resolved);
     const twice = refreshCanvas(scape, once, resolved);
     assert.equal(canvasToJson(twice), canvasToJson(once));

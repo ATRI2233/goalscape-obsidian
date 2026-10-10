@@ -9,29 +9,18 @@ import { RadialGoalMapView } from "./views/radialView";
 import { GoalListView } from "./views/listView";
 import { GanttView } from "./views/ganttView";
 import { VIEW_RADIAL, VIEW_LIST, VIEW_GANTT, VIEW_CANVAS } from "./views/viewTypes";
+import type { GoalscapeHost } from "./views/host";
 import { TEMPLATES } from "./data/templates";
 import { DEFAULT_SLIDERS, Tone, toneFromSliders } from "./data/palette";
 import { GoalscapeSettingTab } from "./settingsTab";
 import { promptInput } from "./views/promptModal";
 import { SubtreeClipboard } from "./views/radialMenu";
-import {
-  canvasToJson,
-  refreshCanvas,
-  parseCanvasJson,
-  trustedSnapshot,
-  type JsonCanvas,
-} from "./export/canvasSync";
-import { exportSvg, exportPng, exportCsv, exportMarkdownOutline, downloadBlob, downloadText } from "./export/exporters";
+import { CanvasMirror } from "./export/canvasMirror";
+import { exportCsv, exportMarkdownOutline } from "./export/exporters";
+import { exportSvg, exportPng } from "./export/svgExport";
+import { downloadBlob, downloadText } from "./export/download";
 
-/** 树变了之后攒多久再写白板：拖滑杆是一次改动几十下 notify，不攒就会把 vault 写成抖动源 */
-const CANVAS_DEBOUNCE_MS = 800;
-/** 摘掉白板标签页之后 Obsidian 还会把内存那份补写一次，等它落地再重试 */
-const CANVAS_WRITE_RETRY = 3;
-const CANVAS_WRITE_SETTLE_MS = 150;
-/** 欠着更新时回头看标签页关了没 —— layout-change 不一定赶在 detach 之后发 */
-const CANVAS_SETTLE_MS = 1000;
-
-export default class GoalscapePlugin extends Plugin {
+export default class GoalscapePlugin extends Plugin implements GoalscapeHost {
   store!: GoalTreeStore;
   /** 块 ↔ 笔记文件的适配器：视图与导出层要的正文/出链都从它的索引里同步取 */
   notes!: NoteStore;
@@ -39,14 +28,8 @@ export default class GoalscapePlugin extends Plugin {
   readonly clipboard = new SubtreeClipboard();
   /** 设置页那两根滑杆的原始值（0..100），换算见 palette.toneFromSliders */
   toneSettings = { ...DEFAULT_SLIDERS };
-  /** 白板自动镜像开关。关掉只剩手点命令 */
-  canvasAuto = true;
-  /** 白板标签页开着、这次没写进去的路径 —— 工具栏那个小点就按它亮 */
-  canvasPending: string | null = null;
-  private canvasTimer: number | null = null;
-  /** 欠着一次更新时回头看标签页关没关的轮询 */
-  private canvasSettleTimer: number | null = null;
-  private canvasWriting = false;
+  /** 树 → .canvas 的自动镜像：待写状态、防抖与定时器都在它里面，本文件只剩门面 */
+  private canvas?: CanvasMirror;
 
   /** 视图与导出统一从这里取当前基调，别各自读 settings 再各自换算一遍 */
   get tone(): Tone {
@@ -62,9 +45,18 @@ export default class GoalscapePlugin extends Plugin {
         }
       | null;
     this.toneSettings = { ...this.toneSettings, ...(saved?.tone ?? {}) };
-    this.canvasAuto = saved?.canvasAuto ?? true;
     this.store = new GoalTreeStore(this, saved?.currentPath || DEFAULT_GOALSCAPE_PATH);
     this.notes = new NoteStore(this, this.store);
+    this.canvas = new CanvasMirror({
+      app: this.app,
+      store: this.store,
+      noteIndex: () => this.notes.notes,
+      persist: () => void this.persistData(),
+      paintBadges: () => this.paintCanvasBadges(),
+      registerEvent: (ref) => this.registerEvent(ref),
+    });
+    // 直接给字段而不是 setAuto()：后者会顺手 saveData 一次，启动路径不该写配置
+    this.canvas.auto = saved?.canvasAuto ?? true;
 
     this.registerView(VIEW_RADIAL, (leaf) => new RadialGoalMapView(leaf, this));
     this.registerView(VIEW_LIST, (leaf) => new GoalListView(leaf, this));
@@ -80,6 +72,21 @@ export default class GoalscapePlugin extends Plugin {
     this.addCommand({ id: "open-list-goalscape", name: "Open goal list view", callback: () => this.openView(VIEW_LIST) });
     this.addCommand({ id: "open-gantt-goalscape", name: "Open Gantt view", callback: () => this.openView(VIEW_GANTT) });
     this.addCommand({ id: "open-goalscape-source", name: "Open source JSON file", callback: () => this.openSourceFile() });
+
+    // 笔记 → 块：反链面板能回答"这篇笔记被谁引用"，回答不了"这篇笔记是谁的笔记"。
+    // checkCallback 让它只在光标真停在某块笔记上时才出现在命令面板里
+    this.addCommand({
+      id: "reveal-owning-block",
+      name: "Reveal the block this note belongs to",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!(file instanceof TFile) || file.extension !== "md") return false;
+        const owner = this.notes.ownerOf(file);
+        if (!owner) return false;
+        if (!checking) void this.revealOwningBlock(owner);
+        return true;
+      },
+    });
 
     this.addCommand({ id: "export-canvas", name: "Refresh .canvas from goals", callback: () => this.exportCanvas() });
     this.addCommand({ id: "export-png", name: "Export radial map as PNG", callback: () => this.exportPng() });
@@ -110,7 +117,7 @@ export default class GoalscapePlugin extends Plugin {
     this.notes.watch();
     // 笔记索引要在开视图之前建好：面板与放射图都是同步读它的
     await this.notes.syncMap();
-    this.watchCanvas();
+    this.canvas.watch();
 
     if (this.app.workspace.layoutReady) {
       await this.openView(VIEW_RADIAL);
@@ -120,9 +127,7 @@ export default class GoalscapePlugin extends Plugin {
   }
 
   onunload(): void {
-    for (const t of [this.canvasTimer, this.canvasSettleTimer]) if (t !== null) window.clearTimeout(t);
-    this.canvasTimer = null;
-    this.canvasSettleTimer = null;
+    this.canvas?.unload();
   }
 
   async openView(type: string): Promise<void> {
@@ -144,6 +149,25 @@ export default class GoalscapePlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.openFile(file);
     this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * 把用户脚下那篇笔记对应的块选中给他看。入口在编辑器里，所以这一步要主动把放射图带过来；
+   * 笔记属于别的图就先切过去（`<图名>.notes/` 这个目录名就是归属），切之前确认文件还在 ——
+   * 图被删掉而笔记还留着是可能的，这时只报一句，不该把人扔进一张空图。
+   */
+  private async revealOwningBlock(owner: { scapePath: string; goalId: string }): Promise<void> {
+    if (owner.scapePath !== this.store.path) {
+      if (!(await this.app.vault.adapter.exists(owner.scapePath))) {
+        new Notice(`Goalscape 文件已不在：${owner.scapePath}`);
+        return;
+      }
+      await this.switchGoalscape(owner.scapePath);
+    }
+    await this.openView(VIEW_RADIAL);
+    if (!this.radialViews()[0]?.revealGoal(owner.goalId)) {
+      new Notice(`这个块在 ${owner.scapePath} 里已经不在了`);
+    }
   }
 
   // ──────────────────────────── 多 goalscape 管理 ────────────────────────────
@@ -194,6 +218,7 @@ export default class GoalscapePlugin extends Plugin {
     for (const view of this.radialViews()) {
       // 选中态存的是节点 id，换图后那是上一张图的节点，信息面板会显示 "Goal not found."
       view.clearSelection();
+      view.clearPinnedNotes();
       view.refreshMapButton();
     }
   }
@@ -214,181 +239,31 @@ export default class GoalscapePlugin extends Plugin {
     }
   }
 
-  // ──────────────────────────── 导出 ────────────────────────────
+  // ──────────────────────────── 白板镜像门面 ────────────────────────────
 
-  /**
-   * 白板与图文件一一对应，用图文件名派生，不用根目标标题：
-   * 标题随时可改（改了就会把白板落在旧文件里），且每张新图的默认根标题都是 "Main Goal"，
-   * 多张图会抢同一个 .canvas。文件名规则只在这一处写，命令导出与切换器共用。
-   */
-  private canvasPathFor(): string {
-    const folder = this.store.path.split("/").slice(0, -1).join("/");
-    const base = this.store.path.split("/").pop()!.replace(/\.goalscape\.json$/, "");
-    return `${folder}/${base}.canvas`;
+  /** 自动镜像开关。关掉只剩手点命令 */
+  get canvasAuto(): boolean {
+    return this.canvas?.auto ?? true;
   }
 
   /** 当前这张图的白板有没有"还没写进去的改动" */
   get canvasStale(): boolean {
-    return !!this.canvasPending && this.canvasPending === this.canvasPathFor();
+    return this.canvas?.stale ?? false;
   }
 
-  /**
-   * 树 → 白板的自动镜像。三条约束都来自实测，不是洁癖：
-   * - 白板文件不存在时**绝不自动创建**，凭空往 vault 扔文件是另一种丢数据；
-   * - 白板标签页开着时不写盘：Obsidian 的 canvas 视图内存领先磁盘几十秒，
-   *   它任何一次补写都会盖在我们后面 —— 用户今天的布局就是这么没的；
-   * - 内容一样不写：插件启动也会 notify 一次，不该白白改一次文件。
-   */
-  private watchCanvas(): void {
-    this.register(this.store.subscribe(() => this.queueCanvasRefresh()));
-    // 关白板标签页正是补写的时机（视图关闭时自己会先把内存那份落盘）
-    this.registerEvent(this.app.workspace.on("layout-change", () => this.settlePendingCanvas()));
-    this.paintCanvasBadges();
-  }
-
-  private queueCanvasRefresh(): void {
-    if (!this.canvasAuto || !this.store.scape) return;
-    if (this.canvasTimer !== null) window.clearTimeout(this.canvasTimer);
-    this.canvasTimer = window.setTimeout(() => {
-      this.canvasTimer = null;
-      void this.refreshCanvasFile(false);
-    }, CANVAS_DEBOUNCE_MS);
-  }
-
-  private settlePendingCanvas(): void {
-    if (!this.canvasAuto || !this.canvasPending) return;
-    // 换图之后上一张的待更新状态不该继续顶着这个点
-    if (this.canvasPending !== this.canvasPathFor()) {
-      this.canvasPending = null;
-      this.paintCanvasBadges();
-      return;
-    }
-    if (this.canvasOpenLeaves(this.canvasPending).length) {
-      this.armCanvasSettle();
-      return;
-    }
-    void this.refreshCanvasFile(false);
-  }
-
-  private armCanvasSettle(): void {
-    if (this.canvasSettleTimer !== null) return;
-    this.canvasSettleTimer = window.setTimeout(() => {
-      this.canvasSettleTimer = null;
-      this.settlePendingCanvas();
-    }, CANVAS_SETTLE_MS);
-  }
-
-  /** 设置页那个开关。关掉之后不该留一颗永远不会消失的小点，打开则欠着的马上补一次 */
+  /** 设置页那个开关：关掉不留一颗永远不会消失的小点，打开则欠着的马上补一次 */
   setCanvasAuto(v: boolean): void {
-    this.canvasAuto = v;
-    void this.persistData();
-    if (v) {
-      this.queueCanvasRefresh();
-      return;
-    }
-    this.canvasPending = null;
-    this.paintCanvasBadges();
+    this.canvas?.setAuto(v);
   }
 
-  /**
-   * Obsidian 没有公开"这块白板有没有未保存的改动"，而它任何一次补写都会盖在我们后面
-   * （实测内存领先磁盘几十秒，关标签页时还会再落一次），所以规则只能是一条：**有人开着就不写**。
-   */
-  private canvasOpenLeaves(canvasPath: string): WorkspaceLeaf[] {
-    return this.app.workspace
-      .getLeavesOfType("canvas")
-      .filter((l) => (l.view as { file?: TFile }).file?.path === canvasPath);
+  /** 视图切换器里的 Canvas 项 */
+  openCanvas(): Promise<void> {
+    return this.canvas?.open() ?? Promise.resolve();
   }
 
-  private liveCanvasDoc(leaf: WorkspaceLeaf | undefined): JsonCanvas | null {
-    const canvas = (leaf?.view as { canvas?: { getData?: () => unknown } } | undefined)?.canvas;
-    if (typeof canvas?.getData !== "function") return null;
-    try {
-      return parseCanvasJson(JSON.stringify(canvas.getData()));
-    } catch {
-      return null;
-    }
-  }
-
-  /** 白板快照：内存优先（实测它领先磁盘几十秒），但只有真加载出卡片才算可信，否则退回磁盘 */
-  private async canvasSnapshot(canvasPath: string): Promise<JsonCanvas | null> {
-    const leaf = this.canvasOpenLeaves(canvasPath)[0];
-    const disk =
-      this.app.vault.getAbstractFileByPath(canvasPath) instanceof TFile
-        ? parseCanvasJson(await this.app.vault.adapter.read(canvasPath).catch(() => ""))
-        : null;
-    return trustedSnapshot(this.liveCanvasDoc(leaf), disk);
-  }
-
-  /**
-   * 单向镜像落盘。explicit = 用户手点的命令：可以创建文件、可以摘标签页、要给反馈。
-   * 自动路径只在"文件已存在 && 没人开着这块白板"时写。
-   */
-  private async refreshCanvasFile(explicit: boolean): Promise<void> {
-    const scape = this.store.scape;
-    if (!scape || this.canvasWriting) return;
-    const path = this.canvasPathFor();
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile) && !explicit) return;
-
-    const open = this.canvasOpenLeaves(path);
-    if (!explicit && open.length) {
-      this.canvasPending = path;
-      this.paintCanvasBadges();
-      return;
-    }
-
-    const json = canvasToJson(
-      refreshCanvas(scape, await this.canvasSnapshot(path), this.notes.notes)
-    );
-    if (file instanceof TFile) {
-      const disk = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
-      if (disk === json.trim()) {
-        this.canvasPending = null;
-        this.paintCanvasBadges();
-        if (explicit) {
-          new Notice(`白板已是最新：${path}`);
-          await this.openCanvasFile(path);
-        }
-        return;
-      }
-    }
-
-    this.canvasWriting = true;
-    let written = false;
-    try {
-      // 先摘标签页、后写盘：canvas 视图关闭时会把内存里那份补写一次，顺序反了刚写的就被盖掉
-      for (const l of open) l.detach();
-      await new Promise((r) => window.setTimeout(r, CANVAS_WRITE_SETTLE_MS));
-      written = await this.writeCanvasDoc(path, json);
-      this.canvasPending = written ? null : path;
-    } finally {
-      this.canvasWriting = false;
-    }
-    this.paintCanvasBadges();
-    if (!explicit) return;
-    new Notice(written ? `白板已更新：${path}` : `白板写入失败：${path}`);
-    await this.openCanvasFile(path);
-  }
-
-  /**
-   * 写完读回来确认落盘的是我们这份 —— 刚摘掉的 canvas 视图会把内存里那份补写一次，
-   * 实测就发生在我们的 modify 之后。重试几次比假装没这回事便宜。
-   */
-  private async writeCanvasDoc(path: string, json: string): Promise<boolean> {
-    for (let i = 0; i < CANVAS_WRITE_RETRY; i++) {
-      const f = this.app.vault.getAbstractFileByPath(path);
-      try {
-        if (f instanceof TFile) await this.app.vault.modify(f, json);
-        else await this.app.vault.create(path, json);
-      } catch {
-        return false;
-      }
-      const back = (await this.app.vault.adapter.read(path).catch(() => "")).trim();
-      if (back === json.trim()) return true;
-      await new Promise((r) => window.setTimeout(r, CANVAS_WRITE_SETTLE_MS));
-    }
-    return false;
+  /** 手点命令：把当前图刷进 .canvas */
+  exportCanvas(): Promise<void> {
+    return this.canvas?.refreshExplicit() ?? Promise.resolve();
   }
 
   /** 工具栏 Canvas 段上的小点：这块白板有还没写进去的改动 */
@@ -404,48 +279,7 @@ export default class GoalscapePlugin extends Plugin {
     }
   }
 
-  private async exportCanvas(): Promise<void> {
-    await this.refreshCanvasFile(true);
-  }
-
-  /**
-   * 切换器里的 Canvas 项。三种情况分开走，因为"正在看的白板"盖不得：
-   * 文件不存在 → 生成第一版；存在且没开着 → 先刷成最新的再打开（点它就是来看最新图）；
-   * 已经开着 → 只切过去不写盘，待更新的小点继续亮着，等标签页关掉再补。
-   */
-  async openCanvas(): Promise<void> {
-    const canvasPath = this.canvasPathFor();
-    const exists = this.app.vault.getAbstractFileByPath(canvasPath) instanceof TFile;
-    if (exists) {
-      const open = this.canvasOpenLeaves(canvasPath);
-      if (open.length) {
-        this.app.workspace.revealLeaf(open[0]);
-        return;
-      }
-      await this.refreshCanvasFile(false);
-      await this.openCanvasFile(canvasPath);
-      return;
-    }
-    await this.refreshCanvasFile(true);
-  }
-
-  private async openCanvasFile(canvasPath: string): Promise<void> {
-    const file = this.app.vault.getAbstractFileByPath(canvasPath);
-    if (!(file instanceof TFile)) {
-      new Notice(`Canvas file not found: ${canvasPath}`);
-      return;
-    }
-    const opened = this.app.workspace
-      .getLeavesOfType("canvas")
-      .find((leaf) => (leaf.view as { file?: TFile }).file?.path === canvasPath);
-    if (opened) {
-      this.app.workspace.revealLeaf(opened);
-      return;
-    }
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.openFile(file);
-    this.app.workspace.revealLeaf(leaf);
-  }
+  // ──────────────────────────── 导出 ────────────────────────────
 
   private getRadialSvg(): SVGSVGElement | null {
     const view = this.radialViews()[0];

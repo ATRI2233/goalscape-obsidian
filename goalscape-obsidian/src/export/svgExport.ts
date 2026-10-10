@@ -1,0 +1,98 @@
+// src/export/svgExport.ts
+// SVG/PNG 导出：这一半边要真实 DOM（getComputedStyle / XMLSerializer / canvas），
+// node 里跑不了，只在实机回归里验。纯字符串那半边留在 exporters.ts。
+
+import { VIEW_SIZE } from "../geometry/radialGeometry";
+
+/**
+ * 序列化后的 SVG 脱离了文档：CSS 规则与 var() 变量都不再存在，
+ * 所以必须把渲染依赖的样式按计算值内联成属性，否则标签会退回黑色 16px 默认值、描边消失。
+ */
+const INLINED_PROPS = [
+  "fill",
+  "stroke",
+  "stroke-width",
+  "stroke-linejoin",
+  "paint-order",
+  "font-size",
+  "font-weight",
+  "font-family",
+  "text-anchor",
+  "dominant-baseline",
+  "opacity",
+  "filter",
+];
+
+function inlineComputedStyles(svgEl: SVGSVGElement): SVGSVGElement {
+  const clone = svgEl.cloneNode(true) as SVGSVGElement;
+  const src = svgEl.querySelectorAll<Element>("*");
+  const dst = clone.querySelectorAll<Element>("*");
+  for (let i = 0; i < src.length; i++) {
+    const cs = getComputedStyle(src[i]);
+    for (const prop of INLINED_PROPS) {
+      const value = cs.getPropertyValue(prop);
+      if (value) dst[i].setAttribute(prop, value);
+    }
+  }
+  return clone;
+}
+
+/**
+ * 导出图的底色。Obsidian 的主题变量挂在 body 上而非 documentElement，
+ * 所以从 svg 往上找第一个真正被绘制的背景，取当前主题的实际颜色，不能写死暗色。
+ */
+function themeBackground(svgEl: SVGSVGElement): string {
+  for (let el: Element | null = svgEl; el; el = el.parentElement) {
+    const bg = getComputedStyle(el).backgroundColor;
+    if (bg && bg !== "transparent" && !bg.startsWith("rgba(0, 0, 0, 0")) return bg;
+  }
+  return "#ffffff";
+}
+
+/** 导出文件必须自带底色矩形：脱离应用后 SVG 常在白底查看器里打开，
+ *  而标签是按深色主题绘制的白字，没有背景时中心盘文字会完全看不见。 */
+function withBackground(clone: SVGSVGElement, color: string): SVGSVGElement {
+  const vb = (clone.getAttribute("viewBox") || "").trim().split(/\s+/).map(Number);
+  const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  rect.setAttribute("x", String(vb.length === 4 ? vb[0] : 0));
+  rect.setAttribute("y", String(vb.length === 4 ? vb[1] : 0));
+  rect.setAttribute("width", String(vb.length === 4 ? vb[2] : 1000));
+  rect.setAttribute("height", String(vb.length === 4 ? vb[3] : 1000));
+  rect.setAttribute("fill", color);
+  clone.insertBefore(rect, clone.firstChild);
+  return clone;
+}
+
+export function exportSvg(svgEl: SVGSVGElement): string {
+  const styled = inlineComputedStyles(svgEl);
+  // 导出的是整张图、不是当前视野：界面上放大/平移到哪儿都不该改变文件内容
+  styled.setAttribute("viewBox", `0 0 ${VIEW_SIZE} ${VIEW_SIZE}`);
+  const clone = withBackground(styled, themeBackground(svgEl));
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("width", "1000");
+  clone.setAttribute("height", "1000");
+  return new XMLSerializer().serializeToString(clone);
+}
+
+export async function exportPng(svgEl: SVGSVGElement, scale = 2): Promise<Blob> {
+  const svgStr = exportSvg(svgEl);
+  const blob = new Blob([svgStr], { type: "image/svg+xml;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = reject;
+    img.src = url;
+  });
+  const canvas = document.createElement("canvas");
+  canvas.width = 1000 * scale;
+  canvas.height = 1000 * scale;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = themeBackground(svgEl);
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  URL.revokeObjectURL(url);
+  return new Promise<Blob>((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
+  });
+}

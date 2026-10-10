@@ -1,12 +1,11 @@
-// src/data/notes.ts 的契约：摘要的剥记号与截断、反链的现扫语义、
-// links 清洗（去重/自链/死目标/空数组删键）。
+// src/data/notes.ts 的契约：摘要的剥记号与截断、块间关系的现扫语义
+// （关系只认笔记正文里的 wikilink，手工 id 数组已删）。
 // 这些规则一旦被 views/export 层消费就改不动了，全部锁在这里。
 
 import { describe, it } from "node:test";
 import * as assert from "node:assert/strict";
-import { backlinks, firstLine, pruneLinks } from "../notes";
-import { createGoalNode, findNode } from "../types";
-import type { GoalNode, GoalScape } from "../types";
+import { firstLine, incomingRefs, outgoingRefs } from "../notes";
+import type { NoteIndex, NoteRef } from "../types";
 
 describe("firstLine", () => {
   it("跳过空行与标题行，取第一条正文", () => {
@@ -30,62 +29,75 @@ describe("firstLine", () => {
   });
 });
 
-/** root ├─ a └─ b(→a) … 各测试自己加 links */
-function makeTree(): GoalScape {
-  return {
-    version: 1,
-    mainGoal: createGoalNode({
-      id: "root",
-      title: "R",
-      importance: 100,
-      children: [
-        createGoalNode({ id: "a", title: "A", importance: 50 }),
-        createGoalNode({ id: "b", title: "B", importance: 50, links: ["a"] }),
-      ],
-    }),
-  };
+function ref(path: string, goalId: string | null, anchor = ""): NoteRef {
+  return { path, anchor, goalId };
 }
 
-describe("backlinks", () => {
-  it("返回引用方（DFS 序），不含自己", () => {
-    const s = makeTree();
-    findNode(s.mainGoal, "root")!.node.links = ["b"];
+/** 块 a / b / c 各有笔记；refs 由各测试自己给 */
+function makeIndex(entries: Record<string, NoteRef[]>): NoteIndex {
+  const index: NoteIndex = new Map();
+  for (const [id, refs] of Object.entries(entries)) {
+    index.set(id, { path: `G/${id}.md`, text: "", refs });
+  }
+  return index;
+}
+
+describe("outgoingRefs", () => {
+  it("只返回指向别的块的引用，锚点原样带着", () => {
+    const index = makeIndex({
+      a: [],
+      b: [ref("G/a.md", "a", "#计划"), ref("G/outside.md", null)],
+    });
+    assert.deepEqual(outgoingRefs(index, "b"), [ref("G/a.md", "a", "#计划")]);
+  });
+
+  it("同一目标不同小节算两条，同小节重复只留一条", () => {
+    const index = makeIndex({
+      a: [],
+      b: [ref("G/a.md", "a", "#x"), ref("G/a.md", "a", "#x"), ref("G/a.md", "a", "#y")],
+    });
     assert.deepEqual(
-      backlinks(s.mainGoal, "a").map((n) => n.id),
-      ["b"]
-    );
-    assert.deepEqual(
-      backlinks(s.mainGoal, "b").map((n) => n.id),
-      ["root"]
+      outgoingRefs(index, "b").map((r) => r.anchor),
+      ["#x", "#y"]
     );
   });
 
-  it("没人引用就是空数组", () => {
-    assert.deepEqual(backlinks(makeTree().mainGoal, "root"), []);
+  it("自链不算关系（笔记引自己的另一节）", () => {
+    const index = makeIndex({ a: [ref("G/a.md", "a", "#自己")] });
+    assert.deepEqual(outgoingRefs(index, "a"), []);
+  });
+
+  it("没笔记 / 没出链就是空数组", () => {
+    assert.deepEqual(outgoingRefs(makeIndex({}), "ghost"), []);
   });
 });
 
-describe("pruneLinks", () => {
-  it("去重、剔自链、剔死目标", () => {
-    const s = makeTree();
-    const a = findNode(s.mainGoal, "a")!.node;
-    a.links = ["a", "ghost", "b", "b"];
-    pruneLinks(s.mainGoal);
-    assert.deepEqual(a.links, ["b"]);
+describe("incomingRefs", () => {
+  it("返回引用方与那条引用，按 Map 序", () => {
+    const index = makeIndex({
+      a: [],
+      b: [ref("G/a.md", "a", "#计划")],
+      c: [ref("G/a.md", "a")],
+    });
+    assert.deepEqual(incomingRefs(index, "a"), [
+      { fromId: "b", ref: ref("G/a.md", "a", "#计划") },
+      { fromId: "c", ref: ref("G/a.md", "a") },
+    ]);
   });
 
-  it("清空后删键，不留空数组", () => {
-    const s = makeTree();
-    findNode(s.mainGoal, "b")!.node.links = ["ghost"];
-    pruneLinks(s.mainGoal);
-    const b = findNode(s.mainGoal, "b")!.node as GoalNode;
-    assert.ok(!("links" in b), "空 links 应该整个删掉");
+  it("同一家引两次不同小节 → 两条（面板要各自能跳）", () => {
+    const index = makeIndex({
+      a: [],
+      b: [ref("G/a.md", "a", "#x"), ref("G/a.md", "a", "#y")],
+    });
+    assert.deepEqual(
+      incomingRefs(index, "a").map((x) => x.ref.anchor),
+      ["#x", "#y"]
+    );
   });
 
-  it("幂等", () => {
-    const s = makeTree();
-    pruneLinks(s.mainGoal);
-    pruneLinks(s.mainGoal);
-    assert.deepEqual(findNode(s.mainGoal, "b")!.node.links, ["a"]);
+  it("这个块自己没有笔记文件 → 空数组（没文件就谈不上被引）", () => {
+    const index = makeIndex({ b: [ref("G/a.md", "a")] });
+    assert.deepEqual(incomingRefs(index, "a"), []);
   });
 });

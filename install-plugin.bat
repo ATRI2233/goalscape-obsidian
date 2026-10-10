@@ -1,35 +1,46 @@
 @echo off
 setlocal
 
-rem ===== 配置：复制源 与 目标 =====
+rem ===== config: where the build lives, and where the plugin goes =====
 set "SRC=%~dp0goalscape-obsidian"
-set "DEST=D:\all codes projeck\ob库--个人记录\.obsidian\plugins\goalscape-obsidian"
 
-echo 源文件夹: %SRC%
-echo 目标位置: %DEST%
+if not defined GS_VAULT (
+    echo [error] GS_VAULT is not set, so this script does not know your vault.
+    echo         Set it once and reopen this terminal:
+    echo             setx GS_VAULT "D:\path\to\your-vault"
+    echo         Or set it for this window only:
+    echo             set GS_VAULT=D:\path\to\your-vault
+    pause
+    exit /b 1
+)
+
+set "DEST=%GS_VAULT%\.obsidian\plugins\goalscape-obsidian"
+
+echo source       : %SRC%
+echo destination  : %DEST%
 echo.
 
 if not exist "%SRC%\main.js" (
-    echo [错误] 源文件夹缺少 main.js，请确认路径。
+    echo [error] main.js is missing - run "npm run build" inside goalscape-obsidian first.
     pause
     exit /b 1
 )
 
 if not exist "%DEST%" mkdir "%DEST%"
 
-echo 正在复制替换插件文件...
+echo copying...
 copy /y "%SRC%\main.js"       "%DEST%\main.js"
 copy /y "%SRC%\manifest.json" "%DEST%\manifest.json"
 copy /y "%SRC%\styles.css"    "%DEST%\styles.css"
 
 if errorlevel 1 (
     echo.
-    echo [错误] 复制失败。
+    echo [error] copy failed.
     pause
     exit /b 1
 )
 
 echo.
-echo 完成！请重启 Obsidian 或重新加载插件。
+echo Done. A running Obsidian does not hot-reload: disable and re-enable the plugin.
 pause
 endlocal

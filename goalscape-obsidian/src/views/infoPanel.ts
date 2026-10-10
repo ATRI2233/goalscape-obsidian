@@ -1,17 +1,16 @@
 // src/views/infoPanel.ts
 // 右侧信息面板：编辑 Title / Importance / Progress / Due / Start /
 // Tags / 色系（中心盘与二级节点）或明度（更深层级）/ Notes（渲染预览 + 一键交给原生编辑器）/
-// Linked goals / Referenced by。
+// References / Referenced by（都从笔记互引现扫，面板只读）。
 // 所有改动统一走 store.mutate。
 
 import { Component, MarkdownRenderer, Setting, Notice, TFile, setTooltip } from "obsidian";
-import type GoalscapePlugin from "../main";
-import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, findNode, flattenTree } from "../data/types";
-import { backlinks } from "../data/notes";
+import type { GoalscapeHost } from "./host";
+import { DEFAULT_BRANCH_COLOR, GoalNode, GoalScape, NoteRef, findNode } from "../data/types";
+import { incomingRefs, outgoingRefs } from "../data/notes";
 import { paletteSwatches } from "../data/palette";
-import { renameGoal, adjustImportance } from "../data/crud";
+import { renameGoal, adjustImportance, setBrightness } from "../data/crud";
 import { BAND_DEFAULT_INDEX, BAND_STEPS } from "../geometry/radialGeometry";
-import { promptPick } from "./promptModal";
 
 /** 与 BAND_STEPS 一一对应，只用于 tooltip / aria-label */
 const BAND_LABELS = ["Extra thin ring", "Thin ring", "Standard ring", "Thick ring"];
@@ -53,7 +52,7 @@ export class InfoPanel {
 
   constructor(
     private container: HTMLElement,
-    private plugin: GoalscapePlugin,
+    private plugin: GoalscapeHost,
     /** 点链接 chip 时跳选目标块（由视图注入：含"展开折叠祖先"的完整跳选） */
     private onSelectNode?: (id: string) => void
   ) {}
@@ -103,6 +102,19 @@ export class InfoPanel {
 
     this.container.createEl("h3", { text: node.title, cls: "goalscape-panel-title" });
 
+    this.renderTitle(node);
+    this.renderWeight(node, isMain);
+    this.renderProgress(node, isLeaf);
+    this.renderSchedule(node);
+
+    if (ownsHue) this.addHueControls(node, isMain);
+    else this.addBrightnessControl(node);
+
+    this.renderNotes(node);
+    this.renderLinks(node);
+  }
+
+  private renderTitle(node: GoalNode): void {
     new Setting(this.container).setName("Title").addText((text) => {
       text.setValue(node.title);
       text.inputEl.addEventListener("blur", () => {
@@ -110,7 +122,10 @@ export class InfoPanel {
         if (v && v !== node.title) this.mutate((s) => renameGoal(s, node.id, v));
       });
     });
+  }
 
+  /** 占比与环带厚度：中心盘没有 Importance 行，但它的厚度就是 hub 半径，同样要能调 */
+  private renderWeight(node: GoalNode, isMain: boolean): void {
     if (!isMain) {
       const importance = new Setting(this.container)
         .setName("Importance")
@@ -125,33 +140,38 @@ export class InfoPanel {
           });
         });
       this.addBandControl(importance, node);
-    } else {
-      // 中心盘没有 Importance 行，但它的厚度就是 hub 半径，同样要能调
-      this.addBandControl(
-        new Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
-        node
-      );
+      return;
     }
+    this.addBandControl(
+      new Setting(this.container).setName("Hub size").setDesc("Center disc thickness"),
+      node
+    );
+  }
 
-    if (isLeaf) {
-      new Setting(this.container)
-        .setName("Progress")
-        .setDesc(`${node.progress ?? 0}%`)
-        .addSlider((slider) => {
-          slider.setLimits(0, 100, 1);
-          slider.setValue(node.progress ?? 0);
-          slider.setDynamicTooltip();
-          this.trackInteraction(slider.sliderEl);
-          slider.onChange((v) => {
-            this.mutate((s) => this.patch(s, node.id, (n) => (n.progress = v)));
-          });
-        });
-    } else {
+  /** 叶子节点手填进度；中间节点只显示，值由 rollup 算出来 */
+  private renderProgress(node: GoalNode, isLeaf: boolean): void {
+    if (!isLeaf) {
       new Setting(this.container)
         .setName("Progress (auto-rollup)")
         .setDesc(`${node.progress ?? 0}%`);
+      return;
     }
+    new Setting(this.container)
+      .setName("Progress")
+      .setDesc(`${node.progress ?? 0}%`)
+      .addSlider((slider) => {
+        slider.setLimits(0, 100, 1);
+        slider.setValue(node.progress ?? 0);
+        slider.setDynamicTooltip();
+        this.trackInteraction(slider.sliderEl);
+        slider.onChange((v) => {
+          this.mutate((s) => this.patch(s, node.id, (n) => (n.progress = v)));
+        });
+      });
+  }
 
+  /** 起止日期与标签：三个字段各写各的，都不参与几何 */
+  private renderSchedule(node: GoalNode): void {
     new Setting(this.container).setName("Due date").addText((text) => {
       text.inputEl.type = "date";
       text.setValue(node.due ?? "");
@@ -180,12 +200,6 @@ export class InfoPanel {
           this.mutate((s) => this.patch(s, node.id, (n) => (n.tags = list)));
         });
       });
-
-    if (ownsHue) this.addHueControls(node, isMain);
-    else this.addBrightnessControl(node);
-
-    this.renderNotes(node);
-    this.renderLinks(node);
   }
 
   /**
@@ -286,12 +300,7 @@ export class InfoPanel {
         slider.setDynamicTooltip();
         this.trackInteraction(slider.sliderEl);
         slider.onChange((v) => {
-          this.mutate((s) =>
-            this.patch(s, node.id, (n) => {
-              if (v === 0) delete n.brightness;
-              else n.brightness = v;
-            })
-          );
+          this.mutate((s) => setBrightness(s, node.id, v));
         });
       });
   }
@@ -376,73 +385,50 @@ export class InfoPanel {
   }
 
   /**
-   * 块间链接：Linked goals（本块 links 指向的）+ Referenced by（反向现扫，不存第二份）。
-   * chip 一律"点主体跳选、点 × 断链"；跳选交给视图注入的 onSelectNode（含展开折叠祖先）。
+   * 块间关系只从笔记互引里长出来：本块笔记 `[[` 了别的块的笔记 = 出向，反过来 = 入向。
+   * 出向 chip 点主体 = 打开对端笔记并落到锚点那一节；入向 chip 点主体 = 跳选引用方那块。
+   * 关系住在正文里，所以这里**没有断链也没有添加** —— 要改就去笔记里改那条 wikilink。
    */
   private renderLinks(node: GoalNode): void {
     const scape = this.plugin.store.scape;
     if (!scape) return;
+    const index = this.plugin.notes.notes;
+    const titleOf = (id: string) => findNode(scape.mainGoal, id)?.node.title;
 
-    this.container.createEl("h4", { text: "Linked goals" });
-    const linksRow = this.container.createDiv({ cls: "goalscape-chips" });
-    const linked = (node.links ?? [])
-      .map((id) => findNode(scape.mainGoal, id)?.node)
-      .filter((n): n is GoalNode => Boolean(n));
-    if (!linked.length) {
-      linksRow.createDiv({ cls: "goalscape-panel-empty", text: "No links yet." });
-    }
-    for (const target of linked) {
-      this.createChip(linksRow, target.title, target.id, () => {
-        this.mutate((s) =>
-          this.patch(s, node.id, (n) => {
-            n.links = (n.links ?? []).filter((x) => x !== target.id);
-            if (!n.links.length) delete n.links;
-          })
-        );
-      });
-    }
-    const add = linksRow.createEl("button", { cls: "goalscape-chip-add", text: "Add link" });
-    this.trackInteraction(add);
-    add.addEventListener("click", async () => {
-      const used = new Set([node.id, ...(node.links ?? [])]);
-      const options = flattenTree(scape.mainGoal)
-        .filter((n) => !used.has(n.id))
-        .map((n) => ({ id: n.id, label: n.title }));
-      if (!options.length) {
-        new Notice("No other goals to link.");
-        return;
+    const out = outgoingRefs(index, node.id)
+      .map((ref) => ({ ref, title: ref.goalId ? titleOf(ref.goalId) : undefined }))
+      .filter((x): x is { ref: NoteRef; title: string } => Boolean(x.title));
+    if (out.length) {
+      this.container.createEl("h4", { text: "References" });
+      const row = this.container.createDiv({ cls: "goalscape-chips" });
+      for (const { ref, title } of out) {
+        this.createChip(row, title, ref.anchor, () => this.openNoteAt(ref));
       }
-      const picked = await promptPick(this.plugin.app, "Link to goal", options);
-      if (!picked) return;
-      this.mutate((s) =>
-        this.patch(s, node.id, (n) => {
-          n.links = Array.from(new Set([...(n.links ?? []), picked]));
-        })
-      );
-    });
+    }
 
-    const refs = backlinks(scape.mainGoal, node.id);
-    if (refs.length) {
+    const inc = incomingRefs(index, node.id).filter((x) => titleOf(x.fromId));
+    if (inc.length) {
       this.container.createEl("h4", { text: "Referenced by" });
-      const backRow = this.container.createDiv({ cls: "goalscape-chips" });
-      for (const src of refs) {
-        // 反链只读：断链要回到引用方那边做，这里只给跳转
-        this.createChip(backRow, src.title, src.id);
+      const row = this.container.createDiv({ cls: "goalscape-chips" });
+      for (const { fromId, ref } of inc) {
+        this.createChip(row, titleOf(fromId)!, ref.anchor, () => this.onSelectNode?.(fromId));
       }
     }
   }
 
-  /** 一个 chip：主体按钮跳选（onSelectNode），可选地带一个 × 断链按钮 */
-  private createChip(row: HTMLElement, title: string, targetId: string, onRemove?: () => void): void {
+  /** 打开对端笔记并落到锚点那一节：`#小节` / `#^块` 这套语法 Obsidian 自己认 */
+  private openNoteAt(ref: NoteRef): void {
+    void this.plugin.app.workspace.openLinkText(`${ref.path}${ref.anchor}`, ref.path, true);
+  }
+
+  /** 一个 chip：主体按钮走 onClick，锚点作为淡色后缀（没有锚点就不占地方） */
+  private createChip(row: HTMLElement, title: string, anchor: string, onClick: () => void): void {
     const chip = row.createDiv({ cls: "goalscape-chip" });
-    const label = chip.createEl("button", { cls: "goalscape-chip-main", text: title });
+    const label = chip.createEl("button", { cls: "goalscape-chip-main" });
+    label.createSpan({ text: title });
+    if (anchor) label.createSpan({ cls: "goalscape-chip-anchor", text: anchor });
     this.trackInteraction(label);
-    label.addEventListener("click", () => this.onSelectNode?.(targetId));
-    if (onRemove) {
-      const x = chip.createEl("button", { cls: "goalscape-chip-x", text: "×" });
-      x.setAttr("aria-label", "Remove link");
-      x.addEventListener("click", onRemove);
-    }
+    label.addEventListener("click", onClick);
   }
 
   private mutate(fn: (s: GoalScape) => void): void {

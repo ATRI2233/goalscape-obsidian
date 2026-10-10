@@ -12,6 +12,9 @@ import {
   moveGoal,
   pasteSubtree,
   renameGoal,
+  setBrightness,
+  setCollapsed,
+  toggleCollapsed,
 } from "../crud";
 import { createGoalNode, findNode, flattenTree } from "../types";
 import type { GoalNode, GoalScape } from "../types";
@@ -161,24 +164,6 @@ describe("deleteGoal", () => {
 
   it("不存在的 id 返回 false", () => {
     assert.equal(deleteGoal(scape, "ghost"), false);
-  });
-
-  it("删除会清扫别的节点里指向被删子树的死链", () => {
-    // rel 链接到 h1 及其后代 h1a，删掉 h1 这一支后这些引用必须消失
-    node(scape, "rel").links = ["h1", "h1a", "career"];
-    assert.equal(deleteGoal(scape, "h1"), true);
-    assert.deepEqual(node(scape, "rel").links, ["career"], "死链 h1/h1a 被清掉，活链保留");
-  });
-});
-
-describe("links 不进剪贴板快照", () => {
-  it("复制/粘贴的子树不带走原节点的 links（克隆会生成全新 id，旧链会指向已被删掉的原节点）", () => {
-    node(scape, "health").links = ["career"];
-    const clip = extractSubtree(scape, "health")!;
-    assert.ok(clip, "health 应能取出");
-    assert.ok(!clip.links, "快照根不应带 links");
-    const pastedId = pasteSubtree(scape, "rel", "child", clip);
-    assert.ok(!node(scape, pastedId).links, "粘贴出的新节点也不应带 links");
   });
 });
 
@@ -344,5 +329,51 @@ describe("extractSubtree / pasteSubtree", () => {
     const before = ids(scape).length;
     assert.equal(pasteSubtree(scape, "ghost", "child", clip), clip.id);
     assert.equal(ids(scape).length, before);
+  });
+});
+
+// 这两个字段都按"缺席即默认"存（collapsed 缺省展开、brightness 缺省 0）。
+// 原先是视图层各自 delete 一下（radialView 展开祖先、infoPanel 明度滑杆），
+// 语义收进 crud 之后才有地方断言"取消折叠不是写 false"。
+describe("setCollapsed / toggleCollapsed / setBrightness", () => {
+  const self = (scape: GoalScape, id: string) => findNode(scape.mainGoal, id)!.node;
+
+  it("取消折叠是删字段，不是写 false", () => {
+    const scape = makeScape();
+    setCollapsed(scape, "health", true);
+    assert.equal(self(scape, "health").collapsed, true);
+    setCollapsed(scape, "health", false);
+    assert.equal("collapsed" in self(scape, "health"), false);
+  });
+
+  it("toggle 两次回到缺省态", () => {
+    const scape = makeScape();
+    toggleCollapsed(scape, "h1");
+    assert.equal(self(scape, "h1").collapsed, true);
+    toggleCollapsed(scape, "h1");
+    assert.equal("collapsed" in self(scape, "h1"), false);
+  });
+
+  it("明度偏移 0 落回缺省，越界夹到 ±20", () => {
+    const scape = makeScape();
+    setBrightness(scape, "h1", 8);
+    assert.equal(self(scape, "h1").brightness, 8);
+    setBrightness(scape, "h1", 0);
+    assert.equal("brightness" in self(scape, "h1"), false);
+    setBrightness(scape, "h1", 50);
+    assert.equal(self(scape, "h1").brightness, 20);
+    setBrightness(scape, "h1", -99);
+    assert.equal(self(scape, "h1").brightness, -20);
+  });
+
+  it("id 不存在：静默返回，不碰树", () => {
+    const scape = makeScape();
+    const before = flattenTree(scape.mainGoal).length;
+    setCollapsed(scape, "ghost", true);
+    toggleCollapsed(scape, "ghost");
+    setBrightness(scape, "ghost", 5);
+    assert.equal(flattenTree(scape.mainGoal).length, before);
+    // createGoalNode 会把每个可选键都写出来（值为 undefined），所以判"有没有被设过"看值不看 in
+    assert.ok(flattenTree(scape.mainGoal).every((n) => n.collapsed === undefined && n.brightness === undefined));
   });
 });

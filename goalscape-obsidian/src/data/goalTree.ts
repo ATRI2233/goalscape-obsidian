@@ -4,7 +4,6 @@
 
 import { TFile, Plugin, Notice } from "obsidian";
 import { GoalScape, GoalNode, createGoalNode, HUE_OWNER_DEPTH } from "./types";
-import { pruneLinks } from "./notes";
 import { recalcTree } from "./rollup";
 
 /** vault 里存放 goalscape 文件的目录与扩展名，多处按它筛选/建档，只在这一处定义 */
@@ -118,6 +117,8 @@ export class GoalTreeStore {
     delete (node as LegacyNode).responsible;
     // Custom fields 是个只写不读的死洞（放射图/白板/导出全都不看它），字段随功能一起删掉
     delete (node as LegacyNode).fields;
+    // 手工块间链接已翻案成"笔记互引"（关系有出处、能跳到原文那一节），旧字段读档即删
+    delete (node as LegacyNode).links;
     // 旧数据里深层节点可能存过 color：读档时一律清掉（中心盘和二级节点各自持有）。
     // 留着就是"文件里有值、图上不生效"的第三种状态，也正是父子颜色不同步的来源
     if (depth > HUE_OWNER_DEPTH) delete node.color;
@@ -129,8 +130,6 @@ export class GoalTreeStore {
     node.tags ??= [];
     node.children ??= [];
     node.children.forEach((c) => this.normalize(c, depth + 1));
-    // links 的清洗要拿全树的 id 集合判"目标还存在吗"，只能在根上跑一次
-    if (depth === 0) pruneLinks(node);
   }
 
   /** 监听外部（用户手动改 JSON / 同步冲突）修改，自动重载并刷新视图 */

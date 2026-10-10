@@ -28,9 +28,9 @@ export interface GoalNode {
   /** @deprecated 旧版把 Markdown 正文直接存在 JSON 里；读档后由 NoteStore 迁移成文件并删掉 */
   notes?: string;
   /**
-   * 块间链接：**显式存目标节点 id**，不用 `[[标题]]` 模糊匹配 ——
-   * goal 不是 vault 文件，标题撞名时歧义不可判定。
-   * 有意的单向设计：A→B 不代表 B→A，反向由 backlinks() 现扫，不存两份。
+   * @deprecated 旧版手工维护的块间链接（存目标 id）。已翻案：块间关系**只从笔记互引里长出来**
+   * （B 的笔记 `[[` 了 A 的笔记，可选 `#小节`/`#^块` 锚点），关系有出处、能跳到原文那一节；
+   * 手工 id 数组没有出处，读档时删掉。
    */
   links?: string[];
   collapsed?: boolean;
@@ -44,13 +44,24 @@ export interface GoalScape {
 }
 
 /**
+ * 笔记正文里一条解析成功的 `[[wikilink]]`（嵌入不算，指不到的不算）。
+ * 块间关系的唯一来源：目标恰好是另一个块的笔记时 `goalId` 有值，
+ * 弦线 / 面板 chips / 白板链接边都从它长出来；普通 vault 笔记则 `goalId` 为 null，只当文件卡片。
+ */
+export interface NoteRef {
+  path: string; // 目标笔记的 vault 路径
+  anchor: string; // `#小节` / `#^块id`，空串 = 整篇；Obsidian 自己认这套语法
+  goalId: string | null; // 目标是别的块的笔记时 = 那块的 id
+}
+
+/**
  * 一个块的笔记在 vault 里的样子。由 NoteStore 读文件 + metadataCache 填好，
  * 内层（导出 / 几何 / 数据）只吃这份纯数据 —— 分层守卫不允许它们 import obsidian。
  */
 export interface NoteInfo {
   path: string; // 笔记文件路径
   text: string; // 正文，已剥掉 frontmatter
-  links: string[]; // 正文里解析成功的 [[wikilink]] 目标路径；嵌入不算，指不到的不算
+  refs: NoteRef[]; // 出链，顺序 = 正文里出现的顺序
 }
 
 /** goalId → 笔记。没有笔记文件的块不出现在里面 */
@@ -69,7 +80,6 @@ export function createGoalNode(partial: Partial<GoalNode> & { title: string }): 
     start: partial.start,
     tags: partial.tags ?? [],
     note: partial.note,
-    links: partial.links,
     collapsed: partial.collapsed,
     children: partial.children ?? [],
   };

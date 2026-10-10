@@ -4,7 +4,10 @@
 > 不要默认它是对的。但不要吹毛求疵：对已验证正确、只是写法不够优雅的代码不必返工；只在发现真实的正确性/
 > 可用性问题，或与 tech-plan.txt 验收标准冲突时才动手改。每次做分析/发现问题/定计划，都更新本文件，不要只放在对话里。
 >
-> 2026-10-08：下面每条任务记录已压缩到 100 字以内（只留结论与踩过的坑，实现细节回代码里读）。
+> 记录规矩（2026-10-08 定，2026-10-10 重压一遍并写死在这里）：**每条修改记录 100–200 字**，
+> 只留结论、拍板的理由、踩过的坑；实现细节、代码位置、行数与测试计数都回代码和 git log 里读。
+> 加新记录按这条写；看到超长的记录是压它，而不是接着往下堆。短于 100 字不必扩写——宁可短。
+>
 ## 已完成并验证（构建通过 + 数据层单测通过）
 
 ### Phase 1 — 数据层 + 放射图只读渲染 + Collapse/Expand
@@ -107,167 +110,103 @@ Responsible 全链路删除，`normalize` 读档即 `delete` 旧键让历史 JSO
 "丑"的根因不是配色，是上轮把五支选色的饱和度全提纯成 S50、明度又只差 +3/层。现在饱和度还给选色；进度改画外缘 dash 弧、不画轨道；整组一份投影 + 全图坐标系的光源渐变。不引玻璃拟态。
 
 ### 配色第四轮：浓淡也收归系统（`src/data/palette.ts`）
-第三轮只还了饱和度，实测仍丑——因为**协调的类别色是"色相变、浓淡锁死"，而当时三个通道一起乱变**（五支色 S28~71、L60~75，且中心盘与一支分支同色相）。于是新建 `branchFills(root)` 作为最终底色的唯一真源：色相仍沿父链继承自 `branchColors`，但明度按层分配（中心盘最深、往外逐层提亮）、饱和度取"该色相在该明度下上限"的固定比例。必须用 **OKLCH**：HSL 的明度不是感知量，按 HSL 统一浓淡统一不了，黄色会被压成橄榄绿。附带三件事——两支撞色相时后入场的被推开 14°、灰（C<0.02）保持中性、`(siblingIndex%3)*2` 的无编码抖动删除。面板预设色盘由同一套数学生成，所以"色块上看到的"就是"图上会有的"（幂等，有单测锁）。消费方统一到 `branchFills`：放射图、甘特条、CSV 的 Color 列；`focusFilter` 仍读 `branchColors`，因为筛的是"哪一家"而不是"哪个像素"。光源渐变从全图坐标系改成 `objectBoundingBox`，即每个块自己一束（全图那一版压在同浓淡扇区上看不出来）。不变量单测 9 项（`palette.test.ts`，共 90 项），`test:ui` 54 项；color 步骤的断言从"对账具体色相数字"改成**关系断言**（同层同色、逐层变亮、跨分支不同色），基调再调也不用改断言。踩到的两个坑：跨色相比亮度量的不是层级（色相自带明度校正，绿色盘会比蓝色支亮）；同一 OKLCH 色相折算回 HSL 会随浓淡漂十几度，容差得放到 20。多窗口下 CDP 会把别的 vault 排在第一个 target，回归脚本现在按"有没有 Goalscapes 目录"甄别窗口。
+上轮只还了饱和度，实测仍丑——协调的类别色是"色相变、浓淡锁死"，当时三个通道一起乱变。`branchFills(root, tone)` 成了底色唯一真源：色相沿父链继承，明度按层分配，饱和度取该色相在该明度下的上限，**必须用 OKLCH**（HSL 的明度不是感知量，按它统一浓淡会把黄色压成橄榄绿）。面板色盘由同一套数学生成；`focusFilter` 仍读 `branchColors`，筛"哪一家"而非"哪个像素"。坑：跨色相比亮度量的不是层级（色相自带明度校正）；OKLCH 色相折回 HSL 会随浓淡漂十几度，断言容差得放 20。
 
 ### 配色第五轮：基调开放给用户 + 块内明暗与倒角（设置页两根滑杆）
-用户反馈两条：① 有时嫌太艳、② "还是大色块通铺，没有质感"（投影和光源都看不见）。
-- **基调不再写死**：`palette.ts` 的浓淡两个尺度提成 `Tone {chroma, step}`，`branchFills(root, tone)` / `paletteSwatches(tone)` 都收参数；
-  新建 `src/settingsTab.ts` 放两根滑杆（`Colour intensity` 柔和↔浓艳、`Level contrast` 层次平缓↔分明），拖动即时存盘 + 重画。
-  默认值 `DEFAULT_SLIDERS` 与 `DEFAULT_TONE` 同源（单测卡住具体数字，谁动默认值都会被抓）。
-  `data.json` 收成一个写入方 `persistData()` —— 原先 `switchGoalscape` 直接 `saveData({currentPath})`，会把新加的 `tone` 顶掉。
-  重画走新加的 `view.repaint()`，**不走 `store.mutate`**：那会把数据标成已修改并落盘，而这里什么都没改。
-- **"每个块自己有明暗"才是解药**：之前那版光源是叠在扇区上的一层极淡白/黑，压在同浓淡的色上根本看不出。
-  现在改成**逐扇区一个 `radialGradient`**，圆心在图心、半径取本块外径、深色那一端停在**本块内径**上 ——
-  于是厚块薄块都是"整块走完这一档明度跨度"（`SECTOR_RAMP 0.1`，各偏一半），而不是薄块只蹭到全图渐变的一小条。
-  代价是 `fill` 变成 `url(#…)`，所以扇区上另存 `data-color` 记录那个扁平中间色（调试和断言都要用）。
-  `shadeOf(hex, ±dL)` 保证深浅两端只动明度、色相与主导通道都不翻（有单测锁）。
-- **外缘倒角**：`bevelArc()` 贴着 rOuter 走一道 1.2px 的边，暗底用亮边、`.theme-light` 换成暗边。
-- **投影要有落点**：黑色投影落在近黑的 `--background-primary` 上等于没画，所以给 `.goalscape-radial-root` 垫了一圈比页面亮的径向"台面"，投影同时加强到 `0 14px 30px / .5`。
-- 旧的 `.goalscape-sheen` 叠层删除（被块内渐变取代），进度条与倒角都靠 DOM 顺序归属最近的 `data-id` 扇区，不给装饰层再挂 id。
-- 测试：数据层 96 项（+6：`shadeOf` 两条、两根滑杆各一条、色盘跟随滑杆、出厂默认）；`test:ui` 58 项（+4：块内渐变必须内深外浅且中间值等于 `data-color`、倒角计数、台面 + 投影、设置页两根滑杆的全链路）。
-  踩到的坑：设置模态框会把**之前看过的标签页**留在 DOM 里（只是 `display:none`），按 `.modal .setting-item` 取会捞到别人的行、
-  拿到没有 `input[type=range]` 的那一行就抛错，而**抛错的步骤会把它自己开的模态框留给后面所有步骤**（file-menu 和 forest 因此连崩）——
-  现在按 `offsetParent` 筛可见行，且每步跑完无条件 `app.setting.close()` + 清 `.notice/.menu/.tooltip`。
-- 用户侧观察：`life` 图左上那块现在是蓝的，是用户自己把 `赚钱与技能` 改成了 `#adb2c2`，不是渲染问题。
+用户两条：嫌太艳、"还是大色块通铺，没有质感"。基调不再写死——浓淡提成 `Tone {chroma, step}`，`settingsTab.ts` 两根滑杆即时存盘并重画，走 `view.repaint()` 而**不走 `store.mutate`**（那会标脏落盘）。"每个块自己有明暗"才是解药：逐扇区一个 `radialGradient`，深色端停在本块内径，厚块薄块都走完一整档；外缘再走一道 1.2px 倒角。投影要有落点：先给根垫一圈比页面亮的"台面"。坑：设置模态框会把看过的标签页留在 DOM 里（只是 `display:none`），按 `.setting-item` 会捞到别人的行，抛错那步还会把模态框遗留给后面所有步骤。
 
 ### 标签摆放：从"一律沿半径"改成"哪边写得下字就走哪边"
-用户反馈"放射图上的标题摆放容不下几个字"。根因不是截断阈值，是**摆法**：文字一律沿半径排，
-能写多长就被环带厚度卡死（87px 的环只放得下 6 个汉字），而同一条分支顺环方向有 400px 以上可用。
-- `fitLabel(title, edge, progressText)` 改成收**整个扇区** `{rInner,rOuter,a0,a1}`，不再收两个标量：
-  上一版正是调用方把弧长当预算传了进来，而签名只收两个数时谁都看不出传反了。返回 `{text, fontSize, angle, mode}`。
-- 两个方向各算一次可用长度再**取宽者**：顺环写是条直线、会往外凸，被"外径减半字高"和"扇区两条边"各卡一次；
-  沿半径写受楔形 taper 约束 —— 最靠圆心的那一端得容得下字高。
-- 字号 14→11 自适应，**全名优先于百分比**（塞得下才带 ` 0%`，进度本来就在外缘 dash 上）；
-  降到底还写不下才截断，且至少留两个字，否则整格不写字（悬停 `<title>` 兜底）。
-  `angle` 由几何侧归一到 `[-90, 90)`，视图只管 `rotate(angle)`，旧版那套 `deg>90 && deg<270` 的 flip 判断删掉。
-- 测试：`fitLabel` 是纯函数，不该只活在 26 秒的实机回归里 → 新增 `src/views/__tests__/label.test.ts`（8 项），
-  `run-tests.mjs` 的扫描范围从 `src/data/__tests__` 扩到 `src/{data,views}/__tests__`。
-  断言**不复述实现里那两条 room 公式**（那样会跟着 bug 一起错），而是把文字还原成旋转矩形、
-  四个角逐个判还在不在楔形内 —— 环厚 × 扇区角 × 标题长度全组合扫一遍。
-  实机侧再加一条用浏览器真实 `getBBox()` + `getScreenCTM()` 的量法（字宽估算可能偏乐观），以及"两种方向都真的出现了"。
-- 离线渲染对比（同一张 `life` 图，headless Chrome）：极薄档从"写出 26 字 + 2 格空白"变成"32 字 + 0 格空白"，
-  长标题案例 68 → 71 字且不再出现省略号。
+根因不是截断阈值，是**摆法**：文字一律沿半径排，长度被环带厚度卡死（87px 的环只放得下 6 个汉字，顺环方向却有 400px 以上）。`fitLabel` 改成收**整个扇区** `{rInner,rOuter,a0,a1}`——签名只收两个数时，调用方把弧长当预算传进来谁都看不出来。两方向各算可用长度取宽者，字号 14→11、全名优先于百分比，降到底仍写不下才截断、至少留两个字，否则整格不写字（悬停 `<title>` 兜底）。断言**不复述实现里那两条 room 公式**，而是把文字还原成旋转矩形、四个角逐个判还在不在楔形内。
 
-### 测试流程收敛：一条命令 + 去掉白等
-- `npm run check`（新 `test/check.mjs`）：类型检查 → 打包 → 部署 `main.js/styles.css/manifest.json` 到 vault →
-  纯逻辑单测 → 实机回归。9333 不通时最后一步记 **SKIP** 并打印启动方式，不算失败 —— 不用为了跑测试去开 Obsidian。
-  `--no-ui` 全程 3.3 秒。Windows 上 `spawnSync` 不经 shell 起不了 `npm.cmd`（EINVAL），
-  所以四步全用 `process.execPath` 直接拉本地 bin。
-- 实机回归的等待按"能不能验"分三等：**能验就轮询谓词**（`waitFor` / 页内等 `pl.toneSettings[k]===v`、
-  等 `data.json` 真的写进目标值）→ 只能等浏览器排版完就 `__gsSettle(上限)`（两帧 + 超时兜底）→
-  只有 Obsidian 自己的异步才留固定 `setTimeout`（插件重载、换视图、开原生菜单、建文件，6 处）。
-  依据是 `store.mutate → notify → render()` 在**同一个 JS 任务里同步跑完**，所以"等一下"其实只要等两帧；
-  轮询谓词比等帧更准 —— 窗口被遮挡时 rAF 会整个停下来，两帧可能几分钟不来。
-  36 处页内固定等待删掉 30 处，轮询间隔 150ms → 40ms。
-- 实测结果（用户同意后带 `--remote-debugging-port=9333` 重启了 Obsidian）：**60/60 通过，8.8 秒**（改造前 26.0 秒），
-  数据现场由脚本自己恢复（`path=Goalscapes/life.goalscape.json`、临时图和白板已删、目录清单回到起始）。
-  新加的断言当场抓到两个真 bug：① 量标签溢出的那条把 `getScreenCTM()` 的矩阵乘序写反（`T·S⁻¹` 而不是 `S⁻¹·T`），
-  于是 10 个标签被报成"捅出扇区"；② 设置页那步把快照压在实时基调上、却硬编码"拖回 84"来复原，
-  再加上"等两帧"读不到滑杆的最新值 —— 现在两头都改成轮询 `pl.toneSettings`，复原值也从进页面时的 `orig` 取。
+### 测试流程收敛：一条命令 + 去掉白等 + 按 diff 挑步骤
+`npm run check` ＝ 类型检查 → 打包 → 部署 vault → 纯逻辑单测 → 实机回归；9333 不通时最后一步记 **SKIP** 不算失败，离线 5.7s。等待按"能不能验"分三等：能验就轮询谓词 `waitFor`，只能等排版就 `__gsSettle`（两帧 + 上限），只有 Obsidian 自己的异步留固定 `setTimeout`——依据是 `mutate → notify → render()` 同步跑完，而窗口被遮挡时 rAF 会整个停住，轮询比等帧准。实机 26.0s → 8.8s，新断言当场抓到两条写反的（`getScreenCTM` 矩阵乘序、复原值硬编码）。2026-10-10 补 `--auto`（`test/auto-router.mjs`）：按 `git diff` 路由该跑的实机步骤，`reload` 永远带上，判不准就倒向全量，收尾仍跑不带参数的 check。
 
 ### 分层守卫：几何层搬出视图层（`src/geometry/radialGeometry.ts`）
-拿用户给的 DDD 规范只量了"依赖只能指向内"这一条（其余七成是 Python Web 服务的形状，对本项目无意义），
-当场抓到真反向依赖：`export/canvasSync → views/radialGeometry`——数据/导出层依赖界面层，代价不是难看，
-是这段纯逻辑再也离不开 Obsidian 的 mock。根因是模块住错目录：它只 import `data/types`、被 data/export/views
-三方共用，于是 `git mv` 到 `src/geometry/`，例外随之消失而不是留进白名单。
-新增 `src/data/__tests__/layering.test.ts`（3 条断言、零新依赖、跑在 `npm test` 里）：内层不得指向 views；
-`geometry/**` 与领域核心不得 import obsidian；全项目 obsidian 依赖点只能在白名单
-（`main`/`settingsTab`/`goalTree`/`views`）。**`goalTree.ts` 是白名单里唯一的数据层成员**，它就是规范说的"领域对象携带 ORM"
-那类违规（领域+vault IO+Notice 三合一），拆开的前提是引擎要脱开 Obsidian 复用，今天没这需求，所以记成有意例外。
-守卫做过反向验证（临时探针同时 import `obsidian` 与 `../views/infoPanel`，两条断言精确报出来源）。
-顺带去掉 `ganttView`/`listView` 各一份的 8 行私有 `findInScape`，4 个调用点改走 `data/types` 的 `findNode`。
-`npm test` 107/107、`npm run build` 干净。踩到的坑：`git add` 里混进已被 `git mv` 挪走的旧路径会让**整条 add 因
-pathspec 不匹配而失败**（只提交了 rename），以及并发会话正在写同一文件时被读到半截，会造成一次不可复现的偶发失败。
+只量"依赖只能指向内"这一条，抓到真反向依赖 `export/canvasSync → views/radialGeometry`：代价不是难看，是这段纯逻辑再也离不开 mock。根因是住错目录：它只 import `data/types`、被三方共用，`git mv` 到 `src/geometry/` 之后例外随之消失，而不是塞进白名单。新增 `layering.test.ts`：内层不得指向 views，`geometry/**` 与领域核心不得 import obsidian，obsidian 依赖点只能在白名单。`goalTree.ts` 是白名单里唯一的数据层成员——领域对象携带 ORM 那类违规，拆开的前提今天不存在，记成有意例外。坑：`git add` 里混进已被 `git mv` 挪走的旧路径，整条 add 会因 pathspec 不匹配而失败。
 
-### 白板 ⇄ 数据：合并导出 + "从白板同步"（手册里的 Stage B/C 落地）——**整节已被下一节推翻**
-- 导出从覆盖改成合并（`mergeCanvas`）：卡片身份认 **gsId**（旧白板退化成节点 id），`x/y/width/height` 一律留住，
-  用户自己加的便签和它牵的线原样保留，目标树新增的节点补一张卡。
-- 新命令 `goalscape:sync-from-canvas`：`diffCanvas` 只出**计划**（换父/新建/兄弟顺序/改标题）→
-  `CanvasSyncModal` 念一遍 → 用户点 Apply 才写；写前把当前 json 备份成 `Goalscapes/<名>-synced-<时间戳>.goalscape.json.bak`
-  （`.bak` 后缀不进图选择器）。删卡片只报"缺卡 K 个"，永不删目标。
-- 拦住而不是半应用：成环 / 重复 gsId / 多条入边 / 认不出中心卡 → 只报问题、Apply 按死、数据一字节不动。
-- 手册之外补的关键一步：**新建的目标要立刻回写 `gsId` 把那张便签认领掉**（`stampAdoptedCards`）。
-  不认领，第二次同步会把同一条便签再变成一个目标 —— 同步没有撤销，重复建比漏建难收拾。
-  认领顺带逼出"合并导出按 gsId 认卡片"，否则重导出会给同一个目标画两张卡。
-- 实机抓到的坑（单测抓不到）：canvas 标签页 **`detach()` 时会把内存里那份补写一次**，
-  所以"先写盘、后摘页"会把刚写的内容盖掉 —— 导出与认领两处都改成先摘页再写盘。
-  同一条坑在回归脚本里表现为"手工编辑没留住"：改成写完验、验不到就重写（并留 400ms 沉降）。
-  另一处：断言"内存文档认得 gsId"必须轮询 `canvas.getData()`，导出完立刻读会拿到 `nodes:0`。
-- 实测：`npm test` 135/135（`src/export/__tests__/canvasSync.test.ts` 23 条，含两轮收敛）、
-  `npm run check` 全绿 16.2s、实机 94 项 12.6s；两条新步骤（合并导出 / 同步全流程）连跑两次各 21 项全过，
-  临时白板与 `.bak` 由步骤自己 `finally` 清掉，目录清单回到起始。预览模态框暗/亮两主题都截图看过，
-  Apply/Cancel 合成一行（两个 `Setting` 各带一道分隔线，看着像两张表）。
-- Stage D（字段回写）前提已验证可行、未做；Stage E 做了两条：problems 非空时 Apply 直接禁用、预览期间图换过就作废重来。
-  实时 watch 没做（手册里也写了不要做）。细节见 `CANVAS-WRITEBACK.md` 第 7 节。
+### 白板 ⇄ 数据：合并导出 + "从白板同步"（Stage B/C）——**整节已被下一节推翻**
+回写方向现已不存在，留下三条教训：① canvas 标签页 `detach()` 时会把内存里那份补写一次，"先写盘、后摘页"会把刚写的盖掉；② 新建的目标必须立刻回写 `gsId` 把便签认领掉，否则第二次同步会把同一条便签再变成一个目标——同步没有撤销，重复建比漏建难收拾；③ `.canvas` 的数组顺序是创建/z 序而不是用户意图，按它排序会造出用户从没做过的重排（按几何角度推断更危险）。
 
 ### 白板改成单向自动镜像：回写方向整体删除（2026-10-09）
-- 用户在真实 vault 里连做三件事（白板换父 / 改标题 / 挪位置）全部落空，据此判定"白板不兼容原有设计"，
-  要求只剩两条：改动能实时体现、再生成不会弄乱布局。**回写（白板→数据）连同命令、预览模态框、`.bak`、
-  `diffCanvas/applyCanvasPlan/stampAdoptedCards/mergeCanvas` 一起删掉**，"兄弟顺序"这个概念也没留。
-- 删它的三条理由（都实测过）：一旦有反向通道，导出就必须吃掉未同步的改动；`.canvas` 的节点数组顺序是 Obsidian 的
-  创建/z 序而不是用户意图，按它排序会造出用户从没做过的重排（按几何角度推断更危险）；数据层没有 undo，误判不可恢复。
-- 现在的形状：`store.subscribe` → 800ms 去抖 → `refreshCanvas(树, 快照)` → 先摘页再写盘、写完读回校验（≤3 次）。
-  留住 `x/y/width/height` + 用户便签 + 它们牵的线；`text`/`color`/生成边跟树走；带 `gsId` 而树里没这个目标的鬼卡删掉。
-- 三条红线：文件不存在**绝不自动创建**；**有人开着这块白板就不写**（Obsidian 没有公开的 dirty 标记，
-  不做"干净就写"的优化）；内容一致就不碰文件。欠着的时候工具栏 Canvas 段亮一个 6px 橙点，关页/每秒回头看一眼就补上。
-- 设置页加第三个开关"自动更新白板"（默认开，存 `data.json`）；关掉时小点跟着灭，重新打开立刻补欠着的那次。
-  命令 `export-canvas` 留着，改名 "Refresh .canvas from goals"。
-- 事故记录：`trustedSnapshot` 之前把"刚打开的 canvas 视图 `getData()` 返回 `nodes:0`"当成可信快照，
-  于是整份文件按算法重画 —— 实测 15 张卡里 14 张回到算法位，用户布局就是这么没的。
-- **测试基建的坑（比功能坑贵）**：`test/run-tests.mjs` 按文件名扁平拼 esbuild 产物路径，而 esbuild 会搬 `outbase`
-  以下的目录结构 → `node --test` 跑的是 `node_modules/.goalscape-tests/` 下一份永不被覆盖的旧产物，
-  **新写的 14 条断言一条都没执行过，`npm test` 照样报 135/135 全绿**。已改成 `outbase: root` + 逐个 `existsSync` 校验 +
-  跑前清空 outDir。教训：加完测试先确认它被跑到了（故意改坏一行看它红不红）。
-- 上面那个假绿掩盖的真 bug：`refreshCanvas` 算 `kept` 时漏了用户自己的便签，于是"便签牵到树上的那条线"每次镜像都被删。
-- 实测：`npm test` 126/126（canvasSync 14 条）、`npm run check` 33.3s 全绿、实机 99 项 28.9s。
-  实机重写为四段 26 项：`canvas 段：开着只切过去、关掉标签页才补写` / `mirror 自动镜像` /
-  `mirror 只往一个方向走` / `settings 自动更新白板开关`。橙点亮着的样子看过截图（暗色主题，工具栏没被撑宽）。
+真库里连做换父/改标题/挪位置都落空，要求只剩两条：实时体现改动、再生成不弄乱布局。回写整体删除：有反向通道就得吃掉未同步的改动，数据层无 undo。三条红线：文件不存在**绝不自动创建**、开着白板就不写、内容一致就不碰。事故：`trustedSnapshot` 把刚打开时 `getData()` 的 `nodes:0` 当成可信快照，14/15 张卡回到算法位，布局就这么没了。更贵的坑：`run-tests.mjs` 按文件名扁平拼 esbuild 产物路径，`node --test` 跑的是永不被覆盖的旧产物，14 条新断言没跑却报全绿——加完测试先确认它在跑。
 
-### Notes 融入 Obsidian：面板渲染 / 块间链接 / 放射图与白板可视化（2026-10-09，四阶段全做完）
-- 数据层新增 `GoalNode.links?: string[]`，**存目标 id 而不是 `[[标题]]`**：goal 不是 vault 文件，撞名时歧义不可判定。
-  有意单向存，反链一律 `backlinks()` 现扫；读档与落盘各跑一次 `pruneLinks`（去重、剔自链、剔死 id、空数组删键）。
-- `src/data/notes.ts`（零 obsidian，进 `npm test`）：`parseWikiTargets`/`parseTags`/`firstLine`/`backlinks`/`effectiveTags`/`pruneLinks`。
-  代码围栏里的 `[[x]]`、`#tag` 不算，`![[嵌入]]` 不当链接目标；notes 里的 `#tag` **只读合流、不落盘**
-  （否则删正文一行字，tags 字段被悄悄写坏，而数据层没有 undo）。
-- 面板 Notes 双态：默认 `MarkdownRenderer.render(app, notes, el, scapePath, host)`，`[[链接]]` 可点、原生 page preview 白拿；
-  "Edit" 切回 textarea、blur 落盘（落盘时机不变）。**每渲染一次新建一个 `Component`、下次 render 前 unload** ——
-  把 view 当宿主传进去会让 render-children 只增不减。
-- 放射图零噪音（用户拍板）：弦线与文件卡片只在选中时画，解析不到的链接不画。弦线 = 三次 bezier、两控制点钉在图心、
-  两端各取 `branchFills` 底色做渐变描边；hover 提亮并高亮对端扇区，点击 = 跳选（`selectRevealing` 先展开折叠祖先）。
-- 白板跟着单向镜像重画：卡片 `text` 追加 tags 行与摘要（高度按行数长）、`x-<from>-<to>` 链接边（label 🔗、色按源进度）、
-  `f-<goal>-<hash>` 文件节点 + `n-` 边。文件卡带 `gsFile` 而**不带 `gsId`** —— 挂了 `gsId` 就和目标卡片抢认领，
-  触发"复制卡降级"分支，两张互相把对方挤成便签。
-- 为此加的两条镜像规则：① 带 `gsFile` 的旧卡本轮没再生成就删（链接没了不许留僵尸卡），拖过的位置照旧留住；
-  ② **id 前缀就是所有权** —— `e-`/`x-`/`n-` 的边只认本轮结果。只按"两端还在"判，删掉的链接会在白板上
-  留一条两端卡片都还活着的幽灵线（实机就是这么暴露的）。
-- `resolved`（wikilink → 真实路径）由 `main.ts` 用 `metadataCache.getFirstLinkpathDest` 算好再传进 canvasSync：
-  export 层不许 import obsidian（分层守卫抓得到）。
-- 实测：`npm test` 161/161（notes 19 条、canvasSync 新增 8 条、`exporters.test.ts` 新文件 7 条，全部按"故意改坏一行"验过在跑）；
-  实机 `notes` 步骤 14 项全绿 / 3.5s。链接目标是运行时从 vault 取的 —— 写死笔记名的话"解析得到"这件事从来没被验过。
-- 踩到的坑：
-  - 测试靠"真点一次扇区"选中，而弦线与端点圆点正好落在**弧中点**上，把这一击拦了下来 → 取 0.3 弧位才打得中。
-  - 只跑筛出来的步骤 = 跑的是**旧 bundle**：部署在 `npm run check` 里，插件重载在 `reload` 那一步里，
-    `node test/ui-regression.mjs notes` 两个都跳过了，于是整轮都在验几分钟前的代码。要么带上新建图的 `reload`，要么走 `npm run check`。
-  - "有标签页开着就不写"这条红线在诊断里表现成"永远等不到更新"：`export-canvas` 之后马上 `detach` 会赶上 `view.file`
-    还没赋值，一个标签页都没摘掉（实测 `openTabs:2`）→ 先等它挂上文件再摘。
-- 未跑：全量实机回归（用户当时只批了 notes 那几步）、真实系统保存框。
+### Notes 融入 Obsidian：初版轻量集成（2026-10-09，**关系来源与 tags 合流已被后两轮推翻**）
+仍成立的：放射图零噪音是用户拍板——弦线与文件卡只在选中时画，解析不到的链接不画；跳选走 `selectRevealing`（先展开折叠祖先）；白板文件卡带 `gsFile` 而**不带 `gsId`**，挂了 gsId 就和目标卡抢认领、两张互相把对方挤成便签；镜像里 **id 前缀就是所有权**，只按"两端还在"判会留下一条两端卡片都活着的幽灵线。坑：`resolved`（wikilink→真实路径）要由 `main.ts` 用 `metadataCache` 算好传进 export 层，分层守卫抓得到 obsidian import；只跑筛出来的步骤＝跑旧 bundle（部署在 `npm run check` 里、热加载在 `reload` 那一步里）。
 
 ### Notes 存储形状翻案：md 文件是唯一真相（2026-10-09 晚）
-用户实机用了一轮，五条意见里三条是设计翻案："为什么不是真 md 文件映射"、"编辑界面丑"、"custom fields 有什么用"。
-拍板：**每块一个真 .md**（`<图名>.notes/` 下，frontmatter 记 `gsId` 供改名后找回），JSON 只存路径；面板删掉 textarea，
-只留渲染预览 + 一个 "Open note" 把撰写交给原生编辑器；**不做双向同步**（两份可写副本必打架，数据层无 undo）。
-Custom fields 与白板卡片的 `#tags` 行一起删（都验过是只写不读的死洞）。
-- 新文件 `data/noteFiles.ts`（内层第二个允许碰 obsidian 的）：建目录 / 防重名 / 写 frontmatter / 按 gsId 全库找回 /
-  一次性迁移旧 `notes` / 盯 vault 事件。红线：**绝不替用户建笔记文件**，只有面板点击与迁移会写。
-- 坑：刚写完的 .md `metadataCache` 往往还没解析完，那一刻读 `links` 是空的 → 扇区文件卡片时有时无（实机十次撞一次）。
-  补一条不受 `writing` 屏蔽的 `metadataCache.on("changed")` 监听让索引自己追一轮；`watch()` 因此要排在 `syncMap()` 之前。
-- 坑：面板在 `pointerup` 里同步重建会拆掉用户正点着的按钮 → Chrome 不再派发 `click`（Edit / Add link / chip 全点不动）。
-  补渲染改成"拖拽期间真改过数据才做、且推迟一个宏任务"；回归新增 `realClick()` 走 CDP 真鼠标——合成 click 在这类 bug 上永远假绿。
-- 实测：单测 172/172（noteFiles 18 条、fake-vault 补了 metadataCache 与冷缓存模拟）；`npm run check` 全绿，
-  实机 117/117（notes 步骤 20 项，含迁移、外部编辑回预览、删文件不重建、白板摘要取文件首行）。
-  用户真库里那一条旧 notes 已无损搬进 `Goalscapes/life.notes/健康1.md`（跑测前备份在 `D:\tmp\GS_BACKUP_*`）。
+**每块一个真 .md**（`<图名>.notes/` 下，frontmatter 记 `gsId` 供改名后找回），JSON 只存路径；面板只留预览 + "Open note"；**不做双向同步**（两份可写副本必打架）。Custom fields 与白板 `#tags` 行一起删（只写不读的死洞）。红线：**绝不替用户建笔记文件**。坑：刚写完的 .md `metadataCache` 常常还没解析完，读链接是空的、文件卡时有时无（十次撞一次）→ 补一条不受 `writing` 屏蔽的 `changed` 监听让它自己追，`watch()` 因此排在 `syncMap()` 之前。坑：面板在 `pointerup` 里同步重建会拆掉用户正点着的按钮，Chrome 就不再派发 `click`——合成 click 永远假绿，改用真鼠标。
+
+### 干净度三项：导出层拆 DOM、注释纠错、字段写入收编（2026-10-10）
+量过体量与依赖方向：零反向边、`layering.test.ts` 全绿；超行的还是 radialView / main，这三件挑的是不碰它们的零风险项，大头（`canvasMirror.ts`、`linkLayer.ts`）等并发会话提交后再动。① 碰 DOM 的 `exportSvg`/`exportPng`/`download*` 拆成 `svgExport.ts`/`download.ts`，留下能在 node 里全量测的 CSV/Markdown——分层守卫只禁 `obsidian` import，`document` 渗进内层没人报警，靠文件位置划线。② `canvasSync.ts` 里 `live` 的注释还在替已删的 `pruneLinks` 说话：说法会跟着功能一起烂掉。③ `collapsed`/`brightness` 的"缺席即默认"语义从视图层收回 `crud.ts`。**顺带撞出**：`createGoalNode` 把可选键都显式写成 `undefined`，判"字段被设过没有"要看值、不能看 `"k" in node`。
+
+### 笔记卡搬出 svg：右缘浮层 + 可钉多张 + 白板补影子（2026-10-10）
+四条反馈：卡片粘在扇区边上、点第二块就换掉、白板仍没笔记影子、卡里字太少。定案：**卡片层从 svg 搬到 HTML 浮层**，钉在视图右缘（`mapWrap` 绝对定位，`pointer-events` 只在卡上，空隙仍能滚轮缩放）；`pinned[]` 按打开顺序存，`select()` 只 push 不替换，卡上带 × 单张收回，换图/套模板走 `clearPinnedNotes()`。**代价：PNG/SVG 导出里没有卡片了**（笔记内容仍走 CSV/Markdown/白板）。图在有卡时让出 `min(268px,45%)` 的右边距，浮层不压最外圈。摘要走 `excerpt()`：`[[目标|别名]]` 折成别名、标题行去井号，正文最多五行（CSS line-clamp），加"链到的每一行 + 文件名"。白板那侧：`buildCanvas` 把**块自己的笔记也镜像成 file 卡**（正文空着也有），排在链到的文件前面，边仍是 `n-<块>-<hash>`。坑：`setTmpTree` 抹掉 `note` 路径后索引不会自己重建（只在开图/换图/文件事件时重建），镜像吃的是旧索引 → 测试里补一次 `notes.syncMap()`，别把这事当成镜像 bug。实机 138/138、单测 187/187，两主题截图看过。
+
+### 关系换源：弦线只表达笔记互引 + 选中态笔记摘要卡（2026-10-10）
+三条质疑定下**关系只有一个主人：笔记正文里的 `[[wikilink]]`**（`#小节`/`#^块` 锚点交给 Obsidian 解析），手填的 `links` 数组整体删除——没出处又抢同一个语义。`NoteRef` 的 goalId 要 `rebuild()` 第二遍才填：对方是不是"别的块的笔记"取决于整张索引；自链丢掉，否则弦线画成自环。7px 角标换成选中态笔记摘要卡（常态仍零标记），面板两排 chip：一头跳对方笔记那一节、一头选中那块，命令 **Reveal the block this note belongs to** 靠 `ownerOf` 认人、认不出就不动。坑：被打开的笔记会抢走可见标签页，真点图内元素前先 `revealLeaf`。
+
+### 组合根瘦身：镜像搬出 main、弦线搬出放射图（2026-10-10）
+`main.ts` 606 → **370 行**：17 个成员 / 5 个状态字段的白板镜像子系统整体搬进 `export/canvasMirror.ts`（270 行），
+main 只剩门面（`canvasAuto`/`canvasStale`/`setCanvasAuto`/`openCanvas`/`exportCanvas`）加涂小点的 `paintCanvasBadges`
+——小点属于界面，镜像不该知道按钮长什么样，靠 `host.paintBadges` 回调反向通知；宿主接口共 6 个成员，
+`persist` 是红线（data.json 只有 `main.persistData()` 一个写入方）。分层守卫当场报警 `canvasMirror → obsidian`，
+按它自己写的提示进 `FRAMEWORK_ALLOWED` 并附理由：它读写 `.canvas`、摘 workspace 标签页，与 goalTree/noteFiles 同性质；
+纯内容映射仍留在 `canvasSync.ts`（那边一行框架都不 import）。`radialView.ts` 757 → **675 行**：`drawLinkDecorations`
++ `sectorMid` 搬 `views/linkLayer.ts`（109 行，接口 10 个成员、3 个回调：`nextGradientId` 保住逐视图编号、
+`lightSector` 与浮层卡片共用同一段加/去 class、`reveal` 回视图的 `selectRevealing`），`litSector` 留在视图里因为卡片也在用。
+静态核对没搬断实机脚本：`ui-regression.mjs` 只伸到 `pl.canvasAuto`/`pl.setCanvasAuto`（门面都在，没碰过 `canvasPending`），
+弦线那几步靠 `path.goalscape-chord`/`data-chord`/`circle.goalscape-chord-dot` 选择器，类名与 `d` 字符串一字没改。
+tsc 干净、单测 187/187。**下一步该抽的接缝是右缘浮层那 103 行**（`renderNoteDock`/`noteCardEl`/`excerpt`/`refTitle`/`openNote`），
+它上一轮刚写完、正热，这轮没动。
+
+### 长函数清零：扇区层 + 白板三段式 + 面板分段 + 视图窄接口（2026-10-10）
+先重测一遍"全树 ≥55 行的函数"，四个目标落空为零：
+
+- `views/sectorLayer.ts`（275 行）接走扇区画法：`drawSectors(surface)` 递归 + `sectorBody`/`sectorDecor`/`sectorLabel`/`weightHandle`
+  四段，`addText`/`addOverlay`/`sectorFill` 一起搬（查过它们只服务扇区，视图里没有第二处调用）。渐变 id 计数器从视图字段
+  `gradSeq` 收进 `drawSectors` 的局部 `seq`：扇区前缀 `g`、弦线前缀 `c`，两套各自自增也撞不上。`radialView.ts` 675 → **523**，
+  `render()` 176 → **69**（只剩建 svg/defs/map、算 fills、两个 draw 层、一次空白点击清选中）。
+- `canvasSync.ts`：114 行的 `walk` 拆成 `emitCard`/`emitFileCards`/`emitLinkEdges` + 一个 `Sink` 累加器，`walk` 只留极坐标递推。
+  文件 429 → 458（多了接口和文档注释），但最长的函数已经 <55；纯映射层一行框架没 import，原 24 条单测未改判绿。
+- `infoPanel.render()` 112 → **39**：切出 `renderTitle`/`renderWeight`/`renderProgress`/`renderSchedule`，与既有
+  `renderNotes`/`renderLinks` 同形状，`render` 退化成一段调度。
+- `views/host.ts`：5 个视图原先都 `import type GoalscapePlugin from "../main"`——视图与组合根互相引用，谁都不能单独改。
+  现在只认 `GoalscapeHost` 的 **10 个成员**（app / store / notes / clipboard / tone / listGoalscapes / switchGoalscape /
+  openView / canvasStale / openCanvas），`main.ts` 挂 `implements GoalscapeHost` 让形状不符当场编译报错。
+  分层守卫加**第 4 条**：`views/` 里出现 `import … "../main"` 直接红（这条正是给以后挡手滑用的）。
+
+没拆的三处及理由：`radialMenu.buildGoalMenu` 110 行是十来个 `menu.addItem` 的平铺，表驱动会把菜单顺序变成数据结构、
+把"哪一项在什么条件下出现"拆成两处；`refreshCanvas` 89 行是"读旧文件 → 合并 → 写回"一条直线；`main.onload` 89 行是组合根本职。
+右缘浮层那 103 行仍未抽（`renderNoteDock`/`noteCardEl`/`excerpt`/`refTitle`/`openNote`）——它不是一个长函数，是五个小方法，
+抽它只减文件行数不减认知负担，且是另一会话最新写完的热区。
+
+验证边界：tsc 干净、单测 **188/188**、production 打包通过，`ui-regression.mjs` 静态核对没引用到搬走的名字
+（它页内脚本里那个 `walk` 是它自己的递归，与 `buildCanvas` 无关），DOM 类名/属性/`d` 字符串逐条对照未改。
+**这三处渲染层随后在真 Obsidian 里补验过**，见下一节。
+
+### 上传前收口：实机补验、镜像一处竞态修复、本机路径清零（2026-10-10）
+`npm run check` 全量实机第一轮 **137/138**，红的正是"白板文件还不存在时，改树不会凭空往 vault 里扔文件"。
+查下来不是搬 `canvasMirror` 弄坏的（旧 `main.ts:332` 那道 `!(file instanceof TFile) && !explicit` 守卫逐行还在），
+是**入口检查与真正落盘之间隔着快照读取、摘标签页和 150ms 静置**：这期间用户把 `.canvas` 删掉，
+`writeDoc` 就 fallback 成 `create`，等于替他把刚删的文件建回来。补一道写前复检（`canvasMirror.refresh`，
+顺带把 `pending` 清掉，免得为一个已经不存在的文件永远亮着橙点）。
+修后连跑 **7 轮全量 138/138**（修前修后各红过一次，那一次还没有现场证据）。断言现在失败时会把
+`exists/bytes/sinceDeleteMs/head/auto/stale/tabs` 一起打出来，再撞就直接能看出是谁写的文件。
+单跑 mirror 组从来不复现 —— 这题只有全量顺序跑才触发，别拿单组绿当结论。
+
+上传前把本机信息从仓库里清了：`test/check.mjs` 与 `test/ui-regression.mjs` 不再拿真 vault 路径当默认值，
+改成只认 `GS_VAULT`（check 没设时**部署记 SKIP**、构建与单测照给结论，与 CDP 不通的处理一致；
+ui-regression 必须在 vault 里建 `ZZ_*` 临时图，没设就直接报错）。`install-plugin.bat` 从 GBK 中文重写成
+纯 ASCII（CRLF 保留、无重定向），目标路径取 `%GS_VAULT%`，没设就打印 `setx` 怎么敲。README 的开发节补了这条。
 
 ## 剩余未实测
+- ~~这轮三处渲染拆分与 `views/host.ts` 没在真 Obsidian 里看过~~ —— **已补验**：全量实机 **138/138**（连跑 7 轮），
+  扇区底色渐变、倒角与进度弧、标签摆放由 `forest`/`color`/`viewport` 三组断言与截图覆盖，白板 file 卡的切线并排由
+  `mirror` 两组覆盖，面板那四段是每次选中就重绘的路径、`notes` 组里真点过它的 chip 与笔记卡（没为这次分段新增断言）。
+  暗/亮两主题各留一张整窗截图在 `node_modules/.goalscape-ui/`。
+- 那条"白板文件还不存在时不凭空建文件"的断言在全量顺序跑下**偶发**（本轮修前修后各撞一次，修后 7 轮绿）。
+  写前复检已经把主要窗口关掉，剩下的窄缝是复检与 `vault.create` 之间那几毫秒。失败时断言自带现场证据，
+  再撞就能直接判是谁写的文件 —— 别把它当噪声删掉，也别拿单跑 mirror 组的绿当结论。
 - PNG/SVG/CSV/Markdown 的**内容**已用 Blob 捕获法实测。仍未点过一次真实的系统保存框：
   `<a download>` 在 Electron 里会弹原生对话框，自动化会把它卡住。
 - 没有覆盖率统计，也没有 watch 模式（刻意不引第三方框架）。
@@ -282,11 +221,17 @@ Custom fields 与白板卡片的 `#tags` 行一起删（都验过是只写不读
   改成"分支色相→最近 preset"会引入量化误差，等点头再动。
 - 白板镜像里"用户改过布局/加了便签"是**脚本直接写 `.canvas` 模拟的**，没请真人在 Obsidian 里拖一遍再看：
   真手拖还会带出组节点、复制卡片、`fromSide` 等东西，Stage A 只验过单键保留。
+  （`fromSide/toSide` + `fromEnd/toEnd` 这一类端点键 2026-10-10 补了单测，仍是脚本模拟，没真手拖过。）
 - Canvas 段那个橙点只在暗色主题看过截图，亮色没单独看（颜色用 `--color-orange` + `--background-secondary` 描边，理论上自适应）。
 - notes 四阶段那轮只跑了新增步骤；翻案这轮（2026-10-09 晚）**全量实机回归已跑**（117/117），
   白板卡片高度按行数长、`text` 变长对既有 `mirror`/`canvas 段` 步骤的影响在实机层面也验过了。
+  关系换源这轮（2026-10-10）同样全量绿：123/123；笔记卡搬右缘这轮 138/138。
+- 笔记浮层只在 3 个块的临时图上判过观感。**用户真图 15 个块**：钉到五张以上时那列卡滚起来好不好用、
+  窄分栏（让边被 `45%` 封顶）把图挤到多小，都没在真图上看过。
 - 分层守卫那次改动（`findInScape` → `findNode` 的 4 个写入点：list 折叠/勾选/进度滑杆、gantt 叶子进度拖拽）
   只过了 `tsc` + 单测，**没跑实机回归**——`npm run check` 会把 `main.js` 部署进 vault 并要求真实 Obsidian 在最前台。
+- 字段写入收编那 4 个点同样只过了 `tsc` + 单测：list 三角折叠、右键 Collapse、跳选时展开祖先、明度滑杆归零，
+  都是要点开界面才看得出的路径（导出层拆分只动了 import，`main.js` 已重建）。
 
 ## 后续计划（按优先级）
 
@@ -294,7 +239,8 @@ Custom fields 与白板卡片的 `#tags` 行一起删（都验过是只写不读
 2. Focus Filter 加"高亮匹配项列表"侧栏、Gantt 依赖关系连线、Canvas 导出支持 group 节点分层。
 3. 白板方向已收口成单向镜像（自动更新 + 待更新小点 + 设置开关），**回写不再做**：白板改父子/顺序既危险又不可撤销，
    理由记在 `CANVAS-WRITEBACK.md` 第 3 节。要动结构就在放射图/列表里动。
-4. Notes 融入 Obsidian 走了两轮：先按操作书做完四阶段轻量集成，当晚用户实机反馈后翻案成 **md 文件唯一真相**
-   （面板只读预览 + 原生编辑器撰写，不做双向同步；Custom fields 与白板 `#tags` 行删除）。
-   `NOTES-INTEGRATION.md` 已按翻案改写；下一步仍是**看着改**（用户："先开始做吧,做好了再看着改"）。
+4. Notes 融入 Obsidian 走了三轮：先按操作书做完四阶段轻量集成，当晚用户实机反馈后翻案成 **md 文件唯一真相**
+   （面板只读预览 + 原生编辑器撰写，不做双向同步；Custom fields 与白板 `#tags` 行删除）；
+   2026-10-10 第三轮把**块间关系换成只由笔记互引派生**（带锚点，`links` 字段删除），补"跳到所属块"与选中态笔记摘要卡。
+   `NOTES-INTEGRATION.md` 已跟着改写；下一步仍是**看着改**（用户："先开始做吧,做好了再看着改"）。
 5. 上面"剩余未实测"里等用户点头的几项：留白版模板、层级明度阶梯、色盘降饱和、Focus Filter 色块可读性。

@@ -2,9 +2,9 @@
 // Goal List 视图：缩进列表，可勾选完成、inline 编辑标题、更新进度。
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
-import type GoalscapePlugin from "../main";
+import type { GoalscapeHost } from "./host";
 import { GoalNode, findNode } from "../data/types";
-import { renameGoal } from "../data/crud";
+import { renameGoal, toggleCollapsed } from "../data/crud";
 import { VIEW_LIST } from "./viewTypes";
 import { createViewSwitcher } from "./viewSwitcher";
 
@@ -12,7 +12,7 @@ export class GoalListView extends ItemView {
   private unsubscribe?: () => void;
   private rootEl!: HTMLElement;
 
-  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapePlugin) {
+  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapeHost) {
     super(leaf);
   }
 
@@ -50,10 +50,7 @@ export class GoalListView extends ItemView {
     if (node.children.length) {
       toggle.textContent = node.collapsed ? "▶" : "▼";
       toggle.addEventListener("click", () => {
-        this.plugin.store.mutate((s) => {
-          const found = findNode(s.mainGoal, node.id)?.node;
-          if (found) found.collapsed = !found.collapsed;
-        });
+        this.plugin.store.mutate((s) => toggleCollapsed(s, node.id));
       });
     } else {
       toggle.textContent = "·";

@@ -2,7 +2,7 @@
 // Gantt 时间线视图：按 start/due 日期渲染条形图，拖动条形右端更新进度。
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
-import type GoalscapePlugin from "../main";
+import type { GoalscapeHost } from "./host";
 import { GoalNode, DEFAULT_BRANCH_COLOR, findNode, flattenTree } from "../data/types";
 import { branchFills } from "../data/palette";
 import { VIEW_GANTT } from "./viewTypes";
@@ -17,7 +17,7 @@ export class GanttView extends ItemView {
   private unsubscribe?: () => void;
   private rootEl!: HTMLElement;
 
-  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapePlugin) {
+  constructor(leaf: WorkspaceLeaf, private plugin: GoalscapeHost) {
     super(leaf);
   }
 
